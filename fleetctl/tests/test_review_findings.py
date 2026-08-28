@@ -188,3 +188,30 @@ class TestAGroupChangeDoesNotChownTheModels:
         step("service-account").apply(ctx)
         assert calls[0][0] == "useradd"
         assert any(c[0] == "chown" for c in calls)
+
+
+# --------------------------------------------------------------------------
+class TestTheFirstCommandAStrangerRuns:
+    """`detect --quick` is the first thing both bootstraps and the README run.
+    It printed `python … (3.12.10, need >= None)` -- the quick path built the
+    python fact by hand and left out the minimum the slow path reports."""
+
+    def test_quick_detect_still_names_the_minimum(self):
+        from fleetctl import facts as facts_mod
+        f = facts_mod.gather(quick=True)
+        assert f["python"]["min"] == ".".join(map(str, facts_mod.MIN_PYTHON))
+        assert f["python"]["exe"]
+        assert f["python"]["version"]
+
+    def test_quick_and_slow_agree_on_the_shape(self):
+        from fleetctl import facts as facts_mod
+        quick = facts_mod.gather(quick=True)["python"]
+        assert set(quick) == set(facts_mod.find_python())
+
+    def test_a_venv_is_not_the_interpreter_a_service_gets_pointed_at(self, monkeypatch):
+        from fleetctl import facts as facts_mod
+        monkeypatch.setattr(facts_mod.sys, "prefix", "/somewhere/.venv")
+        monkeypatch.setattr(facts_mod.sys, "base_prefix", "/usr")
+        monkeypatch.setattr(facts_mod.sys, "executable", "/somewhere/.venv/bin/python")
+        monkeypatch.setattr(facts_mod.sys, "_base_executable", "/usr/bin/python3", raising=False)
+        assert facts_mod.this_python()["exe"] == "/usr/bin/python3"
