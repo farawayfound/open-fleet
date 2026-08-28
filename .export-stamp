@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "private_sha": "4a9bee06a78b4eba52cfe40dde47154cd0de3e66",
+  "exported_at": "2026-08-28T01:14:19+00:00",
+  "files": 59,
+  "overlay_files": 14,
+  "executable": [
+    "gateway/bin/llmstack-gpuconf",
+    "hosts/linux/grants.sh",
+    "install.sh"
+  ]
+}

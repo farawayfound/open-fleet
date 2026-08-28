@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# llmstack-gpuconf -- root helper invoked by the gateway (Optimize tab).
+#
+# Stages the GTT window -- how much system RAM an AMD GPU may map beyond its
+# dedicated VRAM -- as large as is safe. On an APU the BIOS UMA carve-out
+# ("VRAM") cannot be changed from software, but GTT can.
+#
+# WHY the kernel cmdline, not just /etc/modprobe.d:
+#   `ttm.pages_limit=`/`ttm.page_pool_size=` on the KERNEL CMDLINE wins over
+#   whatever /etc/modprobe.d says, and applies regardless of what got baked
+#   into any particular initramfs. amdgpu.gttsize is deprecated and flaky, so
+#   it is never relied on here (still written to modprobe.d -- harmless, and
+#   some kernels still honour it). modprobe.d + an initramfs rebuild is kept
+#   as a belt-and-braces second mechanism only; a failure there is a warning,
+#   never fatal, because the cmdline path is what actually applies.
+#
+#   The cmdline is staged for the DEFAULT boot entry and, where the tool
+#   supports it (grubby), for every installed kernel -- a newer kernel
+#   becoming the default must not silently drop the setting.
+#
+# WHY a JSON receipt: staging only takes effect on the next reboot, so the
+# gateway needs to tell "staged, pending reboot" apart from "staged and
+# active" without re-deriving all of this logic itself. /etc/llmstack/gtt.json
+# (or, on macOS, /usr/local/etc/llmstack/gtt.json) is that receipt, world
+# readable, rebuilt fresh (never merely copied) every time this runs.
+#
+# Testing hooks (production always leaves both unset):
+#   LLMSTACK_GPUCONF_ROOT  prefixes every absolute path this script touches,
+#                          so the whole thing can be exercised against a fake
+#                          filesystem tree as a normal user.
+#   LLMSTACK_GPUCONF_OS    overrides `uname -s` ("Linux"/"Darwin"), so the
+#                          Linux branch can be tested from a Darwin box (or
+#                          vice versa) without a second machine.
+#
+# CLI contract (depended on by gateway/app.py -- do not change shapes):
+#   llmstack-gpuconf auto      compute + stage the aggressive-but-safe target
+#   llmstack-gpuconf <N>       stage exactly N GiB (validated)
+#   llmstack-gpuconf status    read-only; print the receipt, make no changes
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+: "${LLMSTACK_GPUCONF_ROOT:=}"
+ROOT="$LLMSTACK_GPUCONF_ROOT"
+OS_NAME="${LLMSTACK_GPUCONF_OS:-$(uname -s)}"
+
+PAGES_PER_GIB=262144          # 1 GiB / 4 KiB
+
+# --- paths (all routed through $ROOT so tests can sandbox them) ------------
+P_PROC_MEMINFO="$ROOT/proc/meminfo"
+P_PROC_CMDLINE="$ROOT/proc/cmdline"
+P_LIB_MODULES="$ROOT/lib/modules"
+P_ETC_LLMSTACK="$ROOT/etc/llmstack"
+P_RECEIPT_LINUX="$P_ETC_LLMSTACK/gtt.json"
+P_MODPROBE_FILE="$ROOT/etc/modprobe.d/llmstack-gpu.conf"
+P_GRUB_FILE="$ROOT/etc/default/grub"
+P_GRUB_BAK="$ROOT/etc/default/grub.llmstack-bak"
+P_GRUB_D_DIR="$ROOT/etc/default/grub.d"
+P_GRUB_D_FILE="$P_GRUB_D_DIR/99-llmstack-gtt.cfg"
+P_GRUB_CFG="$ROOT/boot/grub/grub.cfg"
+P_KERNEL_CMDLINE="$ROOT/etc/kernel/cmdline"
+P_MAC_ETC="$ROOT/usr/local/etc/llmstack"
+P_RECEIPT_MAC="$P_MAC_ETC/gtt.json"
+P_PLIST="$ROOT/Library/LaunchDaemons/com.llmstack.iogpu.plist"
+
+warn_list=()
+warn() { warn_list+=("$1"); printf 'warning: %s\n' "$1" >&2; }
+
+usage() { echo "usage: llmstack-gpuconf <auto|status|N>" >&2; exit 2; }
+
+require_root() {
+  [[ -n "$ROOT" ]] && return 0   # sandboxed test tree -- no real root needed
+  if [[ "$EUID" -ne 0 ]]; then
+    echo "llmstack-gpuconf must run as root" >&2
+    exit 3
+  fi
+}
+
+# --- tiny JSON helpers (no python3 dependency; the shapes we emit are fully
+# under our own control, so this never has to be a general JSON parser) -----
+json_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+json_num_or_null() { [[ -z "${1:-}" ]] && printf 'null' || printf '%s' "$1"; }
+json_strnum_or_null() { [[ -z "${1:-}" ]] && printf 'null' || printf '"%s"' "$(json_str "$1")"; }
+json_array() {
+  local out="[" first=1 a
+  for a in "$@"; do
+    if [[ $first -eq 1 ]]; then first=0; else out+=","; fi
+    out+="\"$(json_str "$a")\""
+  done
+  out+="]"
+  printf '%s' "$out"
+}
+
+# Extract one scalar field from a receipt this same script wrote (single-line
+# JSON, values never contain a raw comma) and unquote/null it.
+receipt_field() {
+  local path="$1" key="$2"
+  [[ -f "$path" ]] || return 1
+  grep -o "\"$key\":\"[^\"]*\"\|\"$key\":[^,}]*" "$path" | head -n1 | sed -E "s/^\"$key\"://"
+}
+receipt_scalar() {
+  local raw="${1:-}"
+  if [[ -z "$raw" || "$raw" == "null" ]]; then printf ''; return 0; fi
+  # Strip one leading and one trailing quote. NOT "${raw:1:-1}": a negative
+  # length in a substring expression needs bash 4.2, and macOS ships 3.2.
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  printf '%s' "$raw"
+}
+
+validate_n() {
+  local arg="$1"
+  [[ "$arg" =~ ^[0-9]+$ ]] || { echo "gtt size must be a positive integer number of GiB" >&2; exit 2; }
+  local n=$((10#$arg))
+  if (( n < 4 || n > MAX_GIB )); then
+    echo "gtt size out of range: 4..$MAX_GIB GiB (RAM ${RAM_GIB_STR} GiB; reserve is a fixed 3 GiB)" >&2
+    exit 2
+  fi
+  printf '%s' "$n"
+}
+
+# --- Linux -------------------------------------------------------------
+
+mem_kb_linux() { awk '/^MemTotal:/{print $2; exit}' "$P_PROC_MEMINFO"; }
+
+# auto's reserve is generous (max(3 GiB, 15%)); the hard ceiling for an
+# explicit N is always a fixed 3 GiB, so a manual override can go tighter
+# than auto ever would -- MAX_GIB can therefore exceed AUTO_GIB.
+calc_numbers_linux() {
+  local kb; kb="$(mem_kb_linux)"
+  [[ -n "$kb" ]] || { echo "cannot read MemTotal from $P_PROC_MEMINFO" >&2; exit 1; }
+  read -r AUTO_GIB MAX_GIB RAM_GIB_STR <<<"$(awk -v kb="$kb" 'BEGIN{
+    bytes=kb*1024; gib=1073741824;
+    ram_gib=bytes/gib;
+    reserve15=bytes*0.15; reserve3=3*gib;
+    reserve=(reserve15>reserve3)?reserve15:reserve3;
+    auto_gib=int((bytes-reserve)/gib); if(auto_gib<4) auto_gib=4;
+    max_gib=int((bytes-reserve3)/gib); if(max_gib<0) max_gib=0;
+    printf "%d %d %.1f", auto_gib, max_gib, ram_gib;
+  }')"
+}
+
+list_kernels_linux() {
+  [[ -d "$P_LIB_MODULES" ]] || return 0
+  local k
+  for k in "$P_LIB_MODULES"/*/; do
+    [[ -d "$k" ]] || continue
+    basename "$k"
+  done
+}
+
+live_gtt_gib_linux() {
+  local f
+  for f in "$ROOT"/sys/class/drm/card*/device/mem_info_gtt_total; do
+    [[ -f "$f" ]] || continue
+    awk -v b="$(cat "$f")" 'BEGIN{printf "%.1f", b/1073741824}'
+    return 0
+  done
+  return 1
+}
+
+cmdline_active_linux() {
+  # Whole-token match, not a substring: ttm.pages_limit=1048576 (4 GiB) is a
+  # prefix of ttm.pages_limit=10485760 (40 GiB), so `grep -F` would call a
+  # freshly staged 4 GiB "already active" while the box is still booted at 40.
+  # The token never contains whitespace, so word-splitting the cmdline and
+  # comparing with == is exact -- the same thing app.py's _gtt_info does.
+  [[ -f "$P_PROC_CMDLINE" ]] || return 1
+  local w
+  for w in $(cat "$P_PROC_CMDLINE"); do
+    [[ "$w" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# Debian/Ubuntu/Mint: append via grub.d, strip stale inline tokens from the
+# main file so the two copies can never disagree, regenerate, then verify.
+stage_grub() {
+  local tok="$1" pages_tok="$2"
+
+  [[ -f "$P_GRUB_BAK" ]] || cp -a "$P_GRUB_FILE" "$P_GRUB_BAK"
+
+  # Strip any ttm tokens already written INLINE into /etc/default/grub -- the
+  # grub.d snippet below appends to $GRUB_CMDLINE_LINUX_DEFAULT, so an inline
+  # copy would put two (conflicting) values on the same cmdline. server-1 was
+  # provisioned exactly that way by hand, so this is the live case, not a
+  # hypothetical.
+  #
+  # Write-and-move rather than `sed -i`: the in-place flag is not portable --
+  # BSD sed reads `-i -E` as "in place, backup suffix -E", which silently
+  # writes grub-E and leaves the original untouched. Any sed can do this.
+  local tmp="$P_GRUB_FILE.llmstack-tmp"
+  sed -E \
+    -e 's/ttm\.pages_limit=[0-9]+//g' \
+    -e 's/ttm\.page_pool_size=[0-9]+//g' \
+    -e '/^GRUB_CMDLINE_LINUX(_DEFAULT)?=/ s/[ ]{2,}/ /g' \
+    -e '/^GRUB_CMDLINE_LINUX(_DEFAULT)?=/ s/="[ ]+/="/' \
+    -e '/^GRUB_CMDLINE_LINUX(_DEFAULT)?=/ s/[ ]+"$/"/' \
+    "$P_GRUB_FILE" >"$tmp"
+  # Never leave the bootloader config truncated: an empty result means sed
+  # failed, and a zero-byte /etc/default/grub is a box that boots wrong.
+  if [[ -s "$tmp" ]]; then
+    cat "$tmp" >"$P_GRUB_FILE"
+    rm -f "$tmp"
+  else
+    rm -f "$tmp"
+    echo "could not rewrite $P_GRUB_FILE (sed produced nothing)" >&2
+    exit 1
+  fi
+
+  mkdir -p "$P_GRUB_D_DIR"
+  cat >"$P_GRUB_D_FILE" <<EOF
+# Written by llmstack-gpuconf. Appends the GTT window to the DEFAULT kernel
+# cmdline -- ttm.pages_limit wins over /etc/modprobe.d and survives whichever
+# kernel is the default, regardless of initramfs contents.
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT $tok"
+EOF
+
+  if ! update-grub >&2; then
+    echo "update-grub failed" >&2
+    exit 1
+  fi
+  if ! grep -q "$pages_tok" "$P_GRUB_CFG" 2>/dev/null; then
+    echo "generated $P_GRUB_CFG does not contain $pages_tok for the default entry" >&2
+    exit 1
+  fi
+}
+
+# Fedora/RHEL: grubby touches every installed kernel's BLS entry directly.
+stage_grubby() {
+  local tok="$1"
+  if ! grubby --update-kernel=ALL --remove-args="ttm.pages_limit ttm.page_pool_size" >&2; then
+    echo "grubby --remove-args failed" >&2
+    exit 1
+  fi
+  if ! grubby --update-kernel=ALL --args="$tok" >&2; then
+    echo "grubby --args failed" >&2
+    exit 1
+  fi
+  if [[ -f "$P_KERNEL_CMDLINE" ]]; then
+    # Read+rewrite rather than sed -i append: command substitution strips any
+    # trailing newline so the token always lands on the same logical line,
+    # whether or not the file happened to end with one.
+    local kc; kc="$(cat "$P_KERNEL_CMDLINE")"
+    kc="$(printf '%s' "$kc" | sed -E \
+      -e 's/ttm\.pages_limit=[0-9]+//g' -e 's/ttm\.page_pool_size=[0-9]+//g' \
+      -e 's/[ ]{2,}/ /g' -e 's/^[ ]+//' -e 's/[ ]+$//')"
+    if [[ -n "$kc" ]]; then printf '%s %s\n' "$kc" "$tok" >"$P_KERNEL_CMDLINE"
+    else printf '%s\n' "$tok" >"$P_KERNEL_CMDLINE"; fi
+  fi
+}
+
+# Belt-and-braces only: the cmdline is what actually applies, so a failure
+# here is recorded as a warning and never aborts the stage.
+stage_modprobe() {
+  local pages="$1"
+  mkdir -p "$(dirname "$P_MODPROBE_FILE")"
+  cat >"$P_MODPROBE_FILE" <<EOF
+# Written by llmstack-gpuconf. Belt-and-braces only -- the kernel cmdline
+# option (grub/grubby) is what actually applies. amdgpu.gttsize is deprecated
+# and not relied on.
+options ttm pages_limit=$pages page_pool_size=$pages
+EOF
+  if command -v update-initramfs >/dev/null 2>&1; then
+    update-initramfs -u -k all >&2 || warn "update-initramfs -u -k all failed; cmdline path still applies"
+  elif command -v dracut >/dev/null 2>&1; then
+    dracut -f --regenerate-all >&2 || warn "dracut -f --regenerate-all failed; cmdline path still applies"
+  else
+    warn "no update-initramfs/dracut found; initramfs not rebuilt"
+  fi
+}
+
+# Staging writes outside /etc/llmstack, and the gateway that invokes this runs
+# under a systemd unit with ProtectSystem=full. sudo does NOT escape that unit's
+# mount namespace, so /etc and /boot can be read-only HERE while being perfectly
+# writable in a login shell -- the failure then looks like a permissions bug
+# that "should" not happen, which is exactly how the Optimize tab's GTT control
+# came to look broken for so long. Say what is actually wrong instead.
+preflight_writable_linux() {
+  local blocked=""
+  local d
+  for d in "$ROOT/etc/default" "$ROOT/etc/modprobe.d" "$ROOT/boot"; do
+    [[ -d "$d" ]] || continue
+    if ! ( : >"$d/.llmstack-wtest" ) 2>/dev/null; then
+      blocked="$blocked $d"
+    else
+      rm -f "$d/.llmstack-wtest"
+    fi
+  done
+  [[ -z "$blocked" ]] && return 0
+  cat >&2 <<EOF
+cannot write:$blocked
+
+These are read-only for this process. If this ran from the gateway, its
+systemd unit sandboxes them (ProtectSystem=full) and sudo does not escape
+that -- add them to ReadWritePaths= in llm-gateway.service and
+\`systemctl daemon-reload && systemctl restart llm-gateway\`:
+
+  ReadWritePaths=/var/lib/llmstack /etc/llmstack /etc/default /etc/modprobe.d /boot
+EOF
+  exit 1
+}
+
+cmd_stage_linux() {
+  local arg="$1"
+  require_root
+  preflight_writable_linux
+  calc_numbers_linux
+  local n
+  if [[ "$arg" == "auto" ]]; then n="$AUTO_GIB"; else n="$(validate_n "$arg")"; fi
+
+  local pages=$(( n * PAGES_PER_GIB ))
+  local pages_tok="ttm.pages_limit=$pages"
+  local full_tok="ttm.pages_limit=$pages ttm.page_pool_size=$pages"
+  local mech
+
+  if [[ -f "$P_GRUB_FILE" ]] && command -v update-grub >/dev/null 2>&1; then
+    mech="grub"; stage_grub "$full_tok" "$pages_tok"
+  elif command -v grubby >/dev/null 2>&1; then
+    mech="grubby"; stage_grubby "$full_tok"
+  else
+    echo "no grub/grubby; cannot stage kernel cmdline" >&2
+    exit 1
+  fi
+
+  stage_modprobe "$pages"
+
+  local kernels=(); while IFS= read -r k; do [[ -n "$k" ]] && kernels+=("$k"); done < <(list_kernels_linux)
+  KERNELS=("${kernels[@]+"${kernels[@]}"}")
+  RUNNING_KERNEL="$(uname -r)"
+  GIB_VAL="$n"; PAGES_VAL="$pages"; MECH_VAL="$mech"; TOKEN_VAL="$pages_tok"
+  STAGED_AT_VAL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  LIVE_VAL="$(live_gtt_gib_linux || true)"
+  if cmdline_active_linux "$pages_tok"; then ACTIVE_VAL="true"; else ACTIVE_VAL="false"; fi
+  if [[ "$ACTIVE_VAL" == "true" ]]; then REBOOT_VAL="false"; else REBOOT_VAL="true"; fi
+
+  emit_json
+  mkdir -p "$P_ETC_LLMSTACK"
+  printf '%s' "$OUT" >"$P_RECEIPT_LINUX"
+  chmod 0644 "$P_RECEIPT_LINUX"
+  printf '%s\n' "$OUT"
+}
+
+cmd_status_linux() {
+  calc_numbers_linux
+  local kernels=(); while IFS= read -r k; do [[ -n "$k" ]] && kernels+=("$k"); done < <(list_kernels_linux)
+  KERNELS=("${kernels[@]+"${kernels[@]}"}")
+  RUNNING_KERNEL="$(uname -r)"
+
+  GIB_VAL=""; PAGES_VAL=""; MECH_VAL=""; STAGED_AT_VAL=""; TOKEN_VAL=""
+  if [[ -f "$P_RECEIPT_LINUX" ]]; then
+    GIB_VAL="$(receipt_scalar "$(receipt_field "$P_RECEIPT_LINUX" gib || true)")"
+    PAGES_VAL="$(receipt_scalar "$(receipt_field "$P_RECEIPT_LINUX" pages || true)")"
+    MECH_VAL="$(receipt_scalar "$(receipt_field "$P_RECEIPT_LINUX" mechanism || true)")"
+    STAGED_AT_VAL="$(receipt_scalar "$(receipt_field "$P_RECEIPT_LINUX" staged_at || true)")"
+    TOKEN_VAL="$(receipt_scalar "$(receipt_field "$P_RECEIPT_LINUX" cmdline_token || true)")"
+  fi
+
+  if [[ -n "$TOKEN_VAL" ]] && cmdline_active_linux "$TOKEN_VAL"; then ACTIVE_VAL="true"; else ACTIVE_VAL="false"; fi
+  LIVE_VAL="$(live_gtt_gib_linux || true)"
+  if [[ -n "$MECH_VAL" && "$ACTIVE_VAL" == "false" ]]; then REBOOT_VAL="true"; else REBOOT_VAL="false"; fi
+
+  emit_json
+  printf '%s\n' "$OUT"
+}
+
+# --- macOS ---------------------------------------------------------------
+
+calc_numbers_mac() {
+  local bytes; bytes="$(sysctl -n hw.memsize)"
+  read -r AUTO_GIB MAX_GIB RAM_GIB_STR <<<"$(awk -v bytes="$bytes" 'BEGIN{
+    gib=1073741824;
+    ram_gib=bytes/gib;
+    reserve15=bytes*0.15; reserve3=3*gib;
+    reserve=(reserve15>reserve3)?reserve15:reserve3;
+    auto_gib=int((bytes-reserve)/gib); if(auto_gib<4) auto_gib=4;
+    max_gib=int((bytes-reserve3)/gib); if(max_gib<0) max_gib=0;
+    printf "%d %d %.1f", auto_gib, max_gib, ram_gib;
+  }')"
+}
+
+cmd_stage_mac() {
+  local arg="$1"
+  require_root
+  calc_numbers_mac
+  local n
+  if [[ "$arg" == "auto" ]]; then n="$AUTO_GIB"; else n="$(validate_n "$arg")"; fi
+  local mib=$(( n * 1024 ))
+
+  sysctl -w iogpu.wired_limit_mb="$mib" >&2
+
+  mkdir -p "$(dirname "$P_PLIST")"
+  cat >"$P_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.llmstack.iogpu</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/sbin/sysctl</string>
+    <string>-w</string>
+    <string>iogpu.wired_limit_mb=$mib</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+EOF
+  chmod 0644 "$P_PLIST"
+
+  if command -v launchctl >/dev/null 2>&1; then
+    launchctl bootstrap system "$P_PLIST" >&2 2>&1 || launchctl load "$P_PLIST" >&2 2>&1 \
+      || warn "launchctl failed to load $P_PLIST"
+  else
+    warn "launchctl not found; LaunchDaemon written but not loaded"
+  fi
+
+  KERNELS=(); RUNNING_KERNEL="$(uname -r)"
+  GIB_VAL="$n"; PAGES_VAL=""; MECH_VAL="sysctl"; TOKEN_VAL=""
+  STAGED_AT_VAL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local cur; cur="$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || true)"
+  if [[ -n "$cur" && "$cur" == "$mib" ]]; then ACTIVE_VAL="true"; else ACTIVE_VAL="false"; fi
+  if [[ -n "$cur" ]]; then LIVE_VAL="$(awk -v m="$cur" 'BEGIN{printf "%.1f", m/1024}')"; else LIVE_VAL=""; fi
+  REBOOT_VAL="false"   # sysctl -w above already applied it -- no reboot needed on macOS
+
+  emit_json
+  mkdir -p "$P_MAC_ETC"
+  printf '%s' "$OUT" >"$P_RECEIPT_MAC"
+  chmod 0644 "$P_RECEIPT_MAC"
+  printf '%s\n' "$OUT"
+}
+
+cmd_status_mac() {
+  calc_numbers_mac
+  KERNELS=(); RUNNING_KERNEL="$(uname -r)"
+
+  GIB_VAL=""; PAGES_VAL=""; MECH_VAL=""; STAGED_AT_VAL=""; TOKEN_VAL=""
+  if [[ -f "$P_RECEIPT_MAC" ]]; then
+    GIB_VAL="$(receipt_scalar "$(receipt_field "$P_RECEIPT_MAC" gib || true)")"
+    MECH_VAL="$(receipt_scalar "$(receipt_field "$P_RECEIPT_MAC" mechanism || true)")"
+    STAGED_AT_VAL="$(receipt_scalar "$(receipt_field "$P_RECEIPT_MAC" staged_at || true)")"
+  fi
+
+  local cur=""
+  if command -v sysctl >/dev/null 2>&1; then cur="$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || true)"; fi
+  if [[ -n "$GIB_VAL" && -n "$cur" && "$cur" == "$(( GIB_VAL * 1024 ))" ]]; then ACTIVE_VAL="true"; else ACTIVE_VAL="false"; fi
+  if [[ -n "$cur" ]]; then LIVE_VAL="$(awk -v m="$cur" 'BEGIN{printf "%.1f", m/1024}')"; else LIVE_VAL=""; fi
+  REBOOT_VAL="false"
+
+  emit_json
+  printf '%s\n' "$OUT"
+}
+
+# --- shared receipt shape --------------------------------------------------
+# Deliberately the SAME shape for a stage run and for `status` (a superset of
+# the minimum fields either one strictly needs) so the gateway has exactly
+# one JSON document to parse either way.
+emit_json() {
+  OUT="{"
+  OUT+="\"gib\":$(json_num_or_null "${GIB_VAL:-}"),"
+  OUT+="\"pages\":$(json_num_or_null "${PAGES_VAL:-}"),"
+  OUT+="\"mechanism\":$(json_strnum_or_null "${MECH_VAL:-}"),"
+  OUT+="\"ram_gib\":$RAM_GIB_STR,"
+  OUT+="\"max_gib\":$MAX_GIB,"
+  OUT+="\"suggested_gib\":$AUTO_GIB,"
+  OUT+="\"kernels\":$(json_array "${KERNELS[@]+"${KERNELS[@]}"}"),"
+  OUT+="\"running_kernel\":$(json_strnum_or_null "${RUNNING_KERNEL:-}"),"
+  OUT+="\"warnings\":$(json_array "${warn_list[@]+"${warn_list[@]}"}"),"
+  OUT+="\"staged_at\":$(json_strnum_or_null "${STAGED_AT_VAL:-}"),"
+  OUT+="\"cmdline_token\":$(json_strnum_or_null "${TOKEN_VAL:-}"),"
+  OUT+="\"live_gib\":$(json_num_or_null "${LIVE_VAL:-}"),"
+  OUT+="\"active\":${ACTIVE_VAL:-false},"
+  OUT+="\"reboot_required\":${REBOOT_VAL:-false}"
+  OUT+="}"
+}
+
+# --- dispatch ---------------------------------------------------------------
+main() {
+  local cmd="${1:-}"
+  [[ -n "$cmd" ]] || usage
+
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    case "$cmd" in
+      status) cmd_status_mac ;;
+      auto)   cmd_stage_mac auto ;;
+      *)      cmd_stage_mac "$cmd" ;;
+    esac
+  else
+    case "$cmd" in
+      status) cmd_status_linux ;;
+      auto)   cmd_stage_linux auto ;;
+      *)      cmd_stage_linux "$cmd" ;;
+    esac
+  fi
+}
+
+main "$@"

@@ -1,0 +1,31 @@
+# hosts/hub/host.yml -- an always-on Linux box that routes and does not serve.
+host:
+  name: hub
+  role: hub
+  klass: hub
+  description: fleet hub and control plane -- routes, does not serve
+platform:
+  os: linux
+  arch: x86_64
+  package_manager: apt
+  service: systemd
+paths:
+  python: /usr/bin/python3
+network:
+  # Only a reverse proxy on this box ever calls the hub, so it stays on
+  # loopback. Peers bind 0.0.0.0 because the hub calls THEM.
+  bind: 127.0.0.1
+  # The address peers and clients reach this box at on your private network.
+  tailnet_ip: 10.0.0.1
+  # What the dashboard hands to API clients. Must not sit behind an SSO
+  # policy: a bearer request answered with a 302 to a login page reads as a
+  # hang, not a 401.
+  public_api_url: https://api.example.com/v1
+engine:
+  kind: none
+  backend: cpu
+sizing:
+  ram_gb: 24
+access:
+  # Cloudflare Access application audience for the dashboard, if you use it.
+  cf_aud: ""

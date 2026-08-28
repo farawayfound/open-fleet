@@ -1,0 +1,26 @@
+# hosts/mac-laptop/host.yml -- an Apple Silicon laptop with a Metal ceiling.
+host:
+  name: mac-laptop
+  klass: small
+  description: 16 GB Apple Silicon laptop; Metal capped so the machine stays usable
+platform:
+  os: darwin
+  arch: arm64
+  package_manager: brew
+  # No Aqua session over ssh, so a LaunchAgent cannot be bootstrapped; cron
+  # (@reboot plus a keepalive) supervises the gateway instead.
+  service: cron
+network:
+  tailnet_ip: 10.0.0.30
+  public_api_url: http://10.0.0.30:8080/v1
+engine:
+  kind: llama.cpp
+  backend: metal
+sizing:
+  vram_gb: 12
+  ram_gb: 16
+  # Size context windows against the Metal cap, not all of RAM -- the OS
+  # needs its share.
+  context_budget_gib: 12
+  # iogpu.wired_limit_mb, applied by llmstack-gpuconf (needs sudo once).
+  metal_gib: 12

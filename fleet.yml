@@ -1,0 +1,36 @@
+# fleet.yml -- what is true of every box in YOUR fleet.
+#
+# Layer 2 of four (fleetctl/shapes.py is layer 1, hosts/<name>/host.yml is
+# layer 3, the command line is layer 4). This is the one file to edit when
+# you stand up a fleet of your own: everything below applies to every box
+# unless a host.yml says otherwise. A single machine with no fleet does not
+# need this file at all -- fleetctl treats a missing fleet.yml as "defaults".
+#
+# Keep it out of any public copy of your fork. It is, by design, a map.
+
+fleet:
+  name: my-fleet
+
+  # The hub holds the peer list and routes requests across the fleet. Pick
+  # the box that is always on. A one-box setup is its own hub.
+  hub: hub
+  hub_url: http://127.0.0.1:8080
+
+network:
+  # 0.0.0.0, not loopback: the hub calls every peer's admin API over your
+  # private network (Tailscale, a VPN, a LAN). A gateway bound to loopback
+  # drops out of the routing table. The inference engine behind it stays
+  # strictly on 127.0.0.1 -- the gateway is the only authenticated door.
+  # The hub itself may pin `network.bind: 127.0.0.1` in its own host.yml if
+  # only a reverse proxy on the same box ever calls it.
+  bind: 0.0.0.0
+  port: 8080
+
+access:
+  # Optional. Cloudflare Access in front of the dashboard: the gateway
+  # verifies the Access JWT signature against this team domain's JWKS. Leave
+  # cf_team_domain empty to use the admin token only. A box with no tunnel
+  # leaves cf_aud empty in its own host.yml.
+  cf_team_domain: your-team.cloudflareaccess.com
+  admin_emails:
+    - admin@example.com

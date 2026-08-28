@@ -1,0 +1,9 @@
+# Deliberately floors rather than pins: this box runs Fedora 44 with Python
+# 3.14, and older pinned releases of pydantic-core / psutil have no cp314
+# wheels, which would drag a Rust toolchain into the build.
+fastapi>=0.118
+uvicorn[standard]>=0.36
+httpx>=0.28
+PyJWT[crypto]>=2.10
+psutil>=7.0
+PyYAML>=6.0

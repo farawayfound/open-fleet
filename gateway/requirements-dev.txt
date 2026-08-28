@@ -1,0 +1,6 @@
+# What running the tests and the lint needs, on top of requirements.txt.
+#   pip install -r gateway/requirements.txt -r gateway/requirements-dev.txt
+pytest>=8
+pytest-asyncio>=0.24
+PyYAML>=6.0
+ruff>=0.6

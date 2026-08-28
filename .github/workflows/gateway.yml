@@ -1,0 +1,52 @@
+name: gateway
+
+# Lint and the full gateway test suite. Hosted runners only -- this
+# repository never registers a self-hosted runner (see SECURITY.md), which
+# is also why pull_request is a safe trigger here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - gateway/**
+      - pyproject.toml
+      - .github/workflows/gateway.yml
+  pull_request:
+    paths:
+      - gateway/**
+      - pyproject.toml
+      - .github/workflows/gateway.yml
+  workflow_dispatch: {}
+
+concurrency:
+  group: gateway-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --quiet ruff
+      - run: ruff check .
+      - name: shell scripts parse
+        run: |
+          sudo apt-get install -y -qq shellcheck >/dev/null
+          for f in install.sh hosts/linux/grants.sh gateway/bin/llmstack-gpuconf; do
+            bash -n "$f" && shellcheck --severity=warning "$f" && echo "ok  $f"
+          done
+
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --quiet -r gateway/requirements.txt -r gateway/requirements-dev.txt
+      - run: python -m pytest gateway/tests -q -p no:cacheprovider

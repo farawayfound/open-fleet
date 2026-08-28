@@ -1,0 +1,37 @@
+# hosts/gpu-desktop/host.yml -- a Windows gaming PC that lends its idle hours.
+host:
+  name: gpu-desktop
+  # Routing class. Derived from VRAM unless stated: big >= 32 GB,
+  # gpu >= 6 GB, small otherwise, fallback for a CPU-only box.
+  klass: gpu
+  description: gaming desktop; serves only while nobody is using it
+platform:
+  os: windows
+  arch: AMD64
+  package_manager: windows
+  service: schtasks
+paths:
+  # An all-users install, so the SYSTEM scheduled task can run it.
+  python: C:\Program Files\Python312\python.exe
+network:
+  tailnet_ip: 10.0.0.20
+  public_api_url: http://10.0.0.20:8080/v1
+engine:
+  # llama.cpp (with llama-swap in front) exposes --n-cpu-moe, which is what
+  # lets a card smaller than the model run a mixture-of-experts at a usable
+  # speed. Ollama does not.
+  kind: llama.cpp
+  # vulkan for AMD and Intel, cuda for NVIDIA, metal on Macs.
+  backend: vulkan
+  # Which GPU llama.cpp may see when the box has more than one and the wrong
+  # one is first -- an APU's integrated GPU looks like a fine card to anything
+  # that picks device 0.
+  visible_devices: "1"
+sizing:
+  vram_gb: 16
+  ram_gb: 32
+availability:
+  # Set this and an outside watchdog owns "may the fleet use this machine
+  # right now". The gateway stops advertising its models whenever the answer
+  # is no. For a box that is somebody's daily driver before it is a peer.
+  file: C:\llmstack\state\availability.json

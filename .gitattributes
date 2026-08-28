@@ -1,0 +1,47 @@
+# Everything is LF. The exceptions are listed, and there are two.
+#
+# Naming extensions one at a time is how this went wrong. The rules started
+# as *.sh and *.py -- CRLF breaks a shebang (`env: bash\r`) and a
+# `\`-continued line -- and then had to grow *.yml, *.json, *.txt and *.md as
+# each one was found the hard way. The last of them was static/index.html,
+# noticed only because a fresh worktree made to deploy FROM was about to ship
+# a CRLF dashboard to fourteen Linux and macOS boxes.
+#
+# What made it hard to see: with `text` set, git hashes the converted content,
+# so a CRLF working-tree copy of an LF blob is "clean" to git status. Thirty-
+# nine tracked files were sitting like that, having been checked out before
+# the *.py and *.sh rules existed. One was hosts/linux/grants.sh, which
+# deploy-gateway.sh runs on every Linux deploy -- and which already carried a
+# `sed -i "s/\r$//"` on the receiving end, which is how somebody found this
+# the first time.
+#
+# The cost of getting it wrong is not only a broken script. deploy-gateway.sh
+# ships the working tree, and the pi runner is Linux while this workstation is
+# Windows, so an unruled file flip-flops between LF and CRLF depending on
+# which machine deployed last. public_domains_seed.json differed by 4717
+# bytes and not one character; fleetctl duly reported `gateway-files: 4 of 6
+# differ` on every box in the fleet, permanently, and content-comparing tools
+# cannot tell that apart from a real change.
+#
+# `text=auto` leaves detected binaries alone, so this is safe as a default and
+# covers whatever file type gets added next.
+* text=auto eol=lf
+
+# Batch files are the exception that is not a preference: cmd.exe mis-parses a
+# .cmd with LF endings. fleetctl writes the wrappers it generates CRLF for the
+# same reason (see Ctx._NL, and the UNCHANGED loop it caused on three Windows
+# boxes when the check read them back translated).
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binaries, in case the detector is ever unsure about one of them.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.gz   binary
+*.zip  binary
+*.woff  binary
+*.woff2 binary

@@ -1,0 +1,10 @@
+open-fleet
+Copyright 2026 the open-fleet contributors
+
+Licensed under the Apache License, Version 2.0.
+
+This product invokes, but does not include, the following separately
+licensed software: llama.cpp (MIT), llama-swap (MIT), Ollama (MIT),
+Tailscale, cloudflared (Apache-2.0). Python dependencies are listed in
+gateway/requirements.txt and carry their own licenses (MIT, BSD-3-Clause,
+Apache-2.0).

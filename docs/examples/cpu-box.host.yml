@@ -1,0 +1,26 @@
+# hosts/cpu-box/host.yml -- a small always-on fallback running Ollama on CPU.
+host:
+  name: cpu-box
+  klass: fallback
+  description: CPU-only always-on fallback; its iGPU is a RAM carve-out and not worth offloading to
+platform:
+  os: linux
+  arch: x86_64
+  package_manager: apt
+  service: systemd
+paths:
+  # Where the fleet's own weights live. Ollama keeps its store elsewhere and
+  # fleetctl finds it; this is for anything pulled through the dashboard.
+  models: /var/lib/llmstack/models
+  python: /usr/bin/python3
+network:
+  tailnet_ip: 10.0.0.40
+  public_api_url: http://10.0.0.40:8080/v1
+engine:
+  # Ollama is adopted where it already runs; its own installer is not
+  # wrapped. fleetctl pins it to loopback so the gateway is the only door.
+  kind: ollama
+  backend: cpu
+sizing:
+  vram_gb: 0.5
+  ram_gb: 32

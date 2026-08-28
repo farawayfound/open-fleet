@@ -1,0 +1,320 @@
+name: fleetctl
+
+# The heterogeneity, in CI.
+#
+# The fleet is three OS shapes across four package families, and the thing
+# most likely to break a fleetctl change is a box nobody happened to test on.
+# So: the unit suite on all three OSes, a real detect/plan/dry-run on each of
+# them, and the same again in a container per package family. None of it
+# installs anything on the runner -- `apply --dry-run` runs every step's
+# check() for real and applies nothing, and `apply --root` does the file half
+# inside a scratch directory.
+#
+# What this would have caught, had it existed a day earlier:
+#   * a plan built on Windows writing `C:/Users/...` into a macOS host.yml
+#   * a home-directory fallback that only fired when the planning machine's
+#     OS matched the target's -- green on Windows, wrong on Linux as root
+#   * `apt-get` assumed on a box that wants pacman
+#   * `/releases/latest` on llama.cpp, which answers with a release that has
+#     no binaries in it
+
+on:
+  push:
+    paths:
+      - fleetctl/**
+      - gateway/hw.py
+      - hosts/*/host.yml
+      - fleet.yml
+      - install.sh
+      - install.ps1
+      - .github/workflows/fleetctl.yml
+  pull_request:
+    paths:
+      - fleetctl/**
+      - gateway/hw.py
+      - hosts/*/host.yml
+      - fleet.yml
+      - install.sh
+      - install.ps1
+  workflow_dispatch: {}
+
+concurrency:
+  group: fleetctl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  unit:
+    name: unit (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.12", "3.13"]
+        exclude:
+          # One interpreter each off the two expensive runners; the Linux
+          # leg covers the version spread, and 3.10 is the floor that
+          # matters (the gateway's `X | None` syntax needs it).
+          - {os: macos-latest, python: "3.10"}
+          - {os: macos-latest, python: "3.13"}
+          - {os: windows-latest, python: "3.10"}
+          - {os: windows-latest, python: "3.13"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # PyYAML is not a dependency of fleetctl and never will be -- it is
+      # installed HERE so the tests can check the hand-written parser against
+      # the real thing on every host.yml in the repo. Without it those tests
+      # skip, which is fine locally and not fine in CI.
+      - run: python -m pip install --quiet pytest pyyaml
+      - run: python -m pytest fleetctl/tests -q
+
+  # ---------------------------------------------------------------------
+  # The commands a person actually runs, on all three shapes. Nothing is
+  # installed; the point is that detection is honest about a machine nobody
+  # has ever provisioned.
+  dry-run:
+    name: detect/plan/dry-run (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # bash on all three, including the Windows runner (which has it, from Git
+    # for Windows). Without this the Windows leg gets pwsh, where a trailing
+    # `\` is not a line continuation -- so a wrapped command becomes two
+    # statements and the second starts with `--set`, which PowerShell reads as
+    # a decrement operator: "Missing expression after unary operator '--'".
+    # One shell for a job whose whole purpose is to run the same commands
+    # three ways.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      - name: detect
+        run: python -m fleetctl detect
+
+      - name: detect --json is machine-readable
+        run: |
+          python -m fleetctl detect --json > facts.json
+          python -c "import json,sys; f=json.load(open('facts.json')); \
+            assert f['os']['family'] in ('linux','darwin','windows'), f['os']; \
+            assert f['python']['exe'], 'no interpreter found'; \
+            print('facts ok:', f['os']['family'], f['os']['package_manager'])"
+
+      - name: plan
+        # A CI runner has no tailnet, so nothing can derive the public URL --
+        # which is the one value a box genuinely cannot be provisioned
+        # without. Supplying it here is what makes the plan complete.
+        run: |
+          python -m fleetctl plan --host ci-runner --explain \
+            --set network.public_api_url=http://10.0.0.1:8080/v1
+
+      - name: plan is complete enough to apply
+        run: |
+          python -m fleetctl plan --host ci-runner --json \
+            --set network.public_api_url=http://10.0.0.1:8080/v1 > plan.json
+          python -c "import json; p=json.load(open('plan.json')); \
+            assert not p['problems'], p['problems']; print('plan ok')"
+
+      - name: apply --dry-run changes nothing
+        # Exit 2 is expected (steps that need root report blocked); a step
+        # whose check() THREW also exits 2, so the output is what tells them
+        # apart -- an ERROR line fails the job. The leak check covers every
+        # shape's default prefix, including macOS's ~/llmstack, which is the
+        # one this matrix leg would actually write to.
+        run: |
+          python -m fleetctl apply --dry-run --host ci-runner \
+            --set network.public_api_url=http://10.0.0.1:8080/v1 | tee dryrun.txt || true
+          python -c "import sys; t=open('dryrun.txt').read(); \
+            bad=[l for l in t.splitlines() if l.strip().startswith('ERROR')]; \
+            sys.exit('a check() raised:\n' + '\n'.join(bad) if bad else 0)"
+          python -c "import os,sys; from pathlib import Path; \
+            bad=[p for p in ('/opt/llmstack', r'C:\\llmstack', str(Path.home()/'llmstack')) if os.path.exists(p)]; \
+            sys.exit('a dry run created ' + str(bad) if bad else 0)"
+
+      - name: apply --root really applies, in a sandbox
+        run: |
+          python -m fleetctl apply --root sandbox --host ci-runner \
+            --set network.public_api_url=http://10.0.0.1:8080/v1 \
+            --only directories --only gateway-files --only envfile \
+            --only wrappers --only swap-config
+
+      - name: and applying again does nothing
+        # The idempotence claim, checked rather than asserted: every step has
+        # to come back `ok` on the second run.
+        run: |
+          python -m fleetctl apply --root sandbox --host ci-runner \
+            --set network.public_api_url=http://10.0.0.1:8080/v1 \
+            --only directories --only gateway-files --only envfile \
+            --only wrappers --only swap-config > second.txt
+          cat second.txt
+          python -c "import sys; t=open('second.txt').read(); \
+            bad=[l for l in t.splitlines() if l.strip().startswith(('missing','drift'))]; \
+            sys.exit('second apply was not a no-op:\n' + '\n'.join(bad) if bad else 0)"
+
+      - name: verify reads the sandbox back
+        run: |
+          python -m fleetctl verify --root sandbox --host ci-runner \
+            --set network.public_api_url=http://10.0.0.1:8080/v1 || true
+
+  # ---------------------------------------------------------------------
+  # One container per package family, each starting with NO Python at all --
+  # so install.sh's bootstrap is under test, not assumed.
+  distros:
+    name: ${{ matrix.image }} (${{ matrix.family }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: "debian:13",           family: apt}
+          - {image: "ubuntu:24.04",        family: apt}
+          # 22.04 carries Python 3.10 -- the floor. Worth its own leg: it is
+          # where a 3.11-only syntax slip would first show up.
+          - {image: "ubuntu:22.04",        family: apt}
+          - {image: "fedora:44",           family: dnf}
+          - {image: "archlinux:latest",    family: pacman}
+          # Leap rather than Tumbleweed: Tumbleweed's published image is a
+          # snapshot whose repo metadata the mirrors have already rotated
+          # away, so it cannot install anything until it is rebuilt. That is
+          # the image's problem, not zypper's, and Leap covers the family.
+          - {image: "opensuse/leap:15.6",  family: zypper}
+    steps:
+      # Checked out on the RUNNER and mounted, rather than run as a
+      # `container:` job.
+      #
+      # A container job runs every step inside the image, including
+      # actions/checkout -- which needs node and tar, and these images have
+      # neither. The fallback was a plain `git clone`, which cannot work
+      # either: this repo is private, so the clone exits 128 with no
+      # credential. Mounting sidesteps all of it, and it is what the local
+      # version of this matrix has always done.
+      - uses: actions/checkout@v4
+
+      - name: ${{ matrix.image }}, from nothing
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          # --network host so the bootstrap can reach the distro's mirrors.
+          # No -t: there is no tty, and some package managers change their
+          # output when they think there is.
+          docker run --rm --network host \
+            -v "$PWD:/repo" -w /repo \
+            -e HOME=/root \
+            "$IMAGE" sh -c '
+              set -e
+              echo "=== python before install.sh ==="
+              command -v python3 >/dev/null 2>&1 && python3 -V || echo "no python3"
+
+              echo "=== install.sh bootstraps one ==="
+              ./install.sh -- detect
+
+              PY=""
+              for c in python3.14 python3.13 python3.12 python3.11 python3 python; do
+                command -v "$c" >/dev/null 2>&1 || continue
+                "$c" -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" \
+                  2>/dev/null && { PY="$c"; break; }
+              done
+              [ -n "$PY" ] || { echo "install.sh left no usable interpreter"; exit 1; }
+
+              URL=--set=network.public_api_url=http://10.0.0.1:8080/v1
+              echo "=== plan ==="
+              $PY -m fleetctl plan --host ci-container "$URL"
+              echo "=== apply --dry-run ==="
+              $PY -m fleetctl apply --dry-run --host ci-container "$URL" || true
+              echo "=== apply --root ==="
+              $PY -m fleetctl apply --root /tmp/sandbox --host ci-container "$URL" \
+                --only directories --only gateway-files --only envfile --only swap-config
+              echo "=== and again, which must do nothing ==="
+              $PY -m fleetctl apply --root /tmp/sandbox --host ci-container "$URL" \
+                --only directories --only gateway-files --only envfile --only swap-config \
+                | tee /tmp/second.txt
+              grep -Eq "^[[:space:]]*(missing|drift)" /tmp/second.txt && \
+                { echo "second apply was not a no-op"; exit 1; } || true
+
+              # A container has no systemd, and the plan must say so rather
+              # than claim units it cannot install.
+              $PY -m fleetctl detect --json | grep -q "\"service_manager\": \"none\"" \
+                || echo "note: this image does have a supervisor"
+
+              # A venv, not the system pip: PEP 668 marks these interpreters
+              # externally managed, and the distro pytest is built for the
+              # distro python3 rather than the one install.sh chose -- on Leap
+              # that is pytest 5.4 for Python 3.6.
+              echo "=== unit suite, in a venv ==="
+              $PY -m venv /tmp/tv
+              /tmp/tv/bin/pip -q install pytest pyyaml
+              /tmp/tv/bin/python -m pytest fleetctl/tests -q
+            '
+
+  # ---------------------------------------------------------------------
+  # hw.py is shared with the running gateway, so its own suite runs here too
+  # -- an extraction that broke the dashboard's GPU readings would otherwise
+  # only be found by deploying it.
+  gateway:
+    name: gateway tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --quiet -r gateway/requirements.txt pytest pytest-asyncio
+      - name: hw.py and the plans agree with the spec sheet
+        working-directory: gateway
+        run: python -m pytest tests/test_hw_module.py tests/test_windows_gpu.py
+             tests/test_darwin_gpu.py -q
+
+  # ---------------------------------------------------------------------
+  shellcheck:
+    name: shell + powershell syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash parses
+        run: |
+          for f in install.sh deploy-gateway.sh push.sh hosts/linux/grants.sh \
+                   gateway/bin/llmstack-gpuconf; do
+            bash -n "$f" && echo "ok  $f"
+          done
+      - name: the documented first command works
+        # `./install.sh --dry-run` is what every README tells a new user to
+        # run first. It once died at the plan step (plan has no --dry-run
+        # flag) and nothing here exercised the bare script, only `-- detect`.
+        run: |
+          ./install.sh --dry-run --set network.public_api_url=http://10.0.0.1:8080/v1 \
+            | tee first.txt || true
+          grep -q "unrecognized arguments" first.txt && { echo "install.sh forwarded a flag plan does not take"; exit 1; } || true
+          grep -q "==> apply" first.txt || { echo "install.sh never reached apply"; exit 1; }
+      - name: dash cannot run install.sh, and it says so rather than failing oddly
+        # /bin/sh is dash on Debian and Ubuntu, which has no arrays and no
+        # `set -o pipefail`. install.sh re-execs itself under bash; this
+        # checks that it does, because the failure otherwise is a syntax
+        # error eighty lines from the cause.
+        run: |
+          out=$(sh ./install.sh -- detect 2>&1 || true)
+          echo "$out" | tail -5
+          echo "$out" | grep -qi "syntax error" && { echo "did not re-exec"; exit 1; } || true
+      - name: powershell parses
+        shell: pwsh
+        run: |
+          $errs = $null
+          foreach ($f in @("install.ps1", "hosts/harden-gateway-task.ps1")) {
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f), [ref]$null, [ref]$errs)
+            if ($errs) { $errs | ForEach-Object { $_.Message }; exit 1 }
+            "ok  $f"
+          }

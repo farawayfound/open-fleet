@@ -1,0 +1,4718 @@
+[
+{
+"domain": "amazon.com",
+"company": "Amazon",
+"source": "fortune500",
+"rank": 1
+},
+{
+"domain": "walmart.com",
+"company": "Walmart",
+"source": "fortune500",
+"rank": 2
+},
+{
+"domain": "unitedhealthgroup.com",
+"company": "UnitedHealth Group",
+"source": "fortune500",
+"rank": 3
+},
+{
+"domain": "uhc.com",
+"company": "UnitedHealth Group",
+"source": "fortune500",
+"rank": 3
+},
+{
+"domain": "optum.com",
+"company": "UnitedHealth Group",
+"source": "fortune500",
+"rank": 3
+},
+{
+"domain": "apple.com",
+"company": "Apple",
+"source": "fortune500",
+"rank": 4
+},
+{
+"domain": "abc.xyz",
+"company": "Alphabet",
+"source": "fortune500",
+"rank": 5
+},
+{
+"domain": "google.com",
+"company": "Alphabet",
+"source": "fortune500",
+"rank": 5
+},
+{
+"domain": "youtube.com",
+"company": "Alphabet",
+"source": "fortune500",
+"rank": 5
+},
+{
+"domain": "cvshealth.com",
+"company": "CVS Health",
+"source": "fortune500",
+"rank": 6
+},
+{
+"domain": "cvs.com",
+"company": "CVS Health",
+"source": "fortune500",
+"rank": 6
+},
+{
+"domain": "aetna.com",
+"company": "CVS Health",
+"source": "fortune500",
+"rank": 6
+},
+{
+"domain": "berkshirehathaway.com",
+"company": "Berkshire Hathaway",
+"source": "fortune500",
+"rank": 7
+},
+{
+"domain": "geico.com",
+"company": "Berkshire Hathaway",
+"source": "fortune500",
+"rank": 7
+},
+{
+"domain": "bnsf.com",
+"company": "Berkshire Hathaway",
+"source": "fortune500",
+"rank": 7
+},
+{
+"domain": "mckesson.com",
+"company": "McKesson",
+"source": "fortune500",
+"rank": 8
+},
+{
+"domain": "exxonmobil.com",
+"company": "Exxon Mobil",
+"source": "fortune500",
+"rank": 9
+},
+{
+"domain": "exxon.com",
+"company": "Exxon Mobil",
+"source": "fortune500",
+"rank": 9
+},
+{
+"domain": "mobil.com",
+"company": "Exxon Mobil",
+"source": "fortune500",
+"rank": 9
+},
+{
+"domain": "cencora.com",
+"company": "Cencora",
+"source": "fortune500",
+"rank": 10
+},
+{
+"domain": "microsoft.com",
+"company": "Microsoft",
+"source": "fortune500",
+"rank": 11
+},
+{
+"domain": "linkedin.com",
+"company": "Microsoft",
+"source": "fortune500",
+"rank": 11
+},
+{
+"domain": "github.com",
+"company": "Microsoft",
+"source": "fortune500",
+"rank": 11
+},
+{
+"domain": "jpmorganchase.com",
+"company": "JPMorgan Chase",
+"source": "fortune500",
+"rank": 12
+},
+{
+"domain": "jpmorgan.com",
+"company": "JPMorgan Chase",
+"source": "fortune500",
+"rank": 12
+},
+{
+"domain": "chase.com",
+"company": "JPMorgan Chase",
+"source": "fortune500",
+"rank": 12
+},
+{
+"domain": "costco.com",
+"company": "Costco Wholesale",
+"source": "fortune500",
+"rank": 13
+},
+{
+"domain": "cigna.com",
+"company": "Cigna Group",
+"source": "fortune500",
+"rank": 14
+},
+{
+"domain": "express-scripts.com",
+"company": "Cigna Group",
+"source": "fortune500",
+"rank": 14
+},
+{
+"domain": "evernorth.com",
+"company": "Cigna Group",
+"source": "fortune500",
+"rank": 14
+},
+{
+"domain": "cardinalhealth.com",
+"company": "Cardinal Health",
+"source": "fortune500",
+"rank": 15
+},
+{
+"domain": "nvidia.com",
+"company": "Nvidia",
+"source": "fortune500",
+"rank": 16
+},
+{
+"domain": "meta.com",
+"company": "Meta Platforms",
+"source": "fortune500",
+"rank": 17
+},
+{
+"domain": "fb.com",
+"company": "Meta Platforms",
+"source": "fortune500",
+"rank": 17
+},
+{
+"domain": "elevancehealth.com",
+"company": "Elevance Health",
+"source": "fortune500",
+"rank": 18
+},
+{
+"domain": "anthem.com",
+"company": "Elevance Health",
+"source": "fortune500",
+"rank": 18
+},
+{
+"domain": "centene.com",
+"company": "Centene",
+"source": "fortune500",
+"rank": 19
+},
+{
+"domain": "bankofamerica.com",
+"company": "Bank of America",
+"source": "fortune500",
+"rank": 20
+},
+{
+"domain": "merrilllynch.com",
+"company": "Bank of America",
+"source": "fortune500",
+"rank": 20
+},
+{
+"domain": "chevron.com",
+"company": "Chevron",
+"source": "fortune500",
+"rank": 21
+},
+{
+"domain": "ford.com",
+"company": "Ford Motor",
+"source": "fortune500",
+"rank": 22
+},
+{
+"domain": "gm.com",
+"company": "General Motors",
+"source": "fortune500",
+"rank": 23
+},
+{
+"domain": "citigroup.com",
+"company": "Citigroup",
+"source": "fortune500",
+"rank": 24
+},
+{
+"domain": "citi.com",
+"company": "Citigroup",
+"source": "fortune500",
+"rank": 24
+},
+{
+"domain": "homedepot.com",
+"company": "Home Depot",
+"source": "fortune500",
+"rank": 25
+},
+{
+"domain": "fanniemae.com",
+"company": "Fannie Mae",
+"source": "fortune500",
+"rank": 26
+},
+{
+"domain": "kroger.com",
+"company": "Kroger",
+"source": "fortune500",
+"rank": 27
+},
+{
+"domain": "verizon.com",
+"company": "Verizon Communications",
+"source": "fortune500",
+"rank": 28
+},
+{
+"domain": "phillips66.com",
+"company": "Phillips 66",
+"source": "fortune500",
+"rank": 29
+},
+{
+"domain": "marathonpetroleum.com",
+"company": "Marathon Petroleum",
+"source": "fortune500",
+"rank": 30
+},
+{
+"domain": "stonex.com",
+"company": "StoneX Group",
+"source": "fortune500",
+"rank": 31
+},
+{
+"domain": "statefarm.com",
+"company": "State Farm Insurance",
+"source": "fortune500",
+"rank": 32
+},
+{
+"domain": "freddiemac.com",
+"company": "Freddie Mac",
+"source": "fortune500",
+"rank": 33
+},
+{
+"domain": "humana.com",
+"company": "Humana",
+"source": "fortune500",
+"rank": 34
+},
+{
+"domain": "att.com",
+"company": "AT&T",
+"source": "fortune500",
+"rank": 35
+},
+{
+"domain": "goldmansachs.com",
+"company": "Goldman Sachs Group",
+"source": "fortune500",
+"rank": 36
+},
+{
+"domain": "gs.com",
+"company": "Goldman Sachs Group",
+"source": "fortune500",
+"rank": 36
+},
+{
+"domain": "comcast.com",
+"company": "Comcast",
+"source": "fortune500",
+"rank": 37
+},
+{
+"domain": "nbcuniversal.com",
+"company": "Comcast",
+"source": "fortune500",
+"rank": 37
+},
+{
+"domain": "wellsfargo.com",
+"company": "Wells Fargo",
+"source": "fortune500",
+"rank": 38
+},
+{
+"domain": "morganstanley.com",
+"company": "Morgan Stanley",
+"source": "fortune500",
+"rank": 39
+},
+{
+"domain": "valero.com",
+"company": "Valero Energy",
+"source": "fortune500",
+"rank": 40
+},
+{
+"domain": "dell.com",
+"company": "Dell Technologies",
+"source": "fortune500",
+"rank": 41
+},
+{
+"domain": "target.com",
+"company": "Target",
+"source": "fortune500",
+"rank": 42
+},
+{
+"domain": "tesla.com",
+"company": "Tesla",
+"source": "fortune500",
+"rank": 43
+},
+{
+"domain": "disney.com",
+"company": "Walt Disney",
+"source": "fortune500",
+"rank": 44
+},
+{
+"domain": "thewaltdisneycompany.com",
+"company": "Walt Disney",
+"source": "fortune500",
+"rank": 44
+},
+{
+"domain": "espn.com",
+"company": "Walt Disney",
+"source": "fortune500",
+"rank": 44
+},
+{
+"domain": "jnj.com",
+"company": "Johnson & Johnson",
+"source": "fortune500",
+"rank": 45
+},
+{
+"domain": "pepsico.com",
+"company": "PepsiCo",
+"source": "fortune500",
+"rank": 46
+},
+{
+"domain": "boeing.com",
+"company": "Boeing",
+"source": "fortune500",
+"rank": 47
+},
+{
+"domain": "ups.com",
+"company": "UPS",
+"source": "fortune500",
+"rank": 48
+},
+{
+"domain": "rtx.com",
+"company": "RTX",
+"source": "fortune500",
+"rank": 49
+},
+{
+"domain": "raytheon.com",
+"company": "RTX",
+"source": "fortune500",
+"rank": 49
+},
+{
+"domain": "fedex.com",
+"company": "FedEx",
+"source": "fortune500",
+"rank": 50
+},
+{
+"domain": "progressive.com",
+"company": "Progressive",
+"source": "fortune500",
+"rank": 51
+},
+{
+"domain": "lowes.com",
+"company": "Lowe's",
+"source": "fortune500",
+"rank": 52
+},
+{
+"domain": "energytransfer.com",
+"company": "Energy Transfer",
+"source": "fortune500",
+"rank": 53
+},
+{
+"domain": "pg.com",
+"company": "Procter & Gamble",
+"source": "fortune500",
+"rank": 54
+},
+{
+"domain": "sysco.com",
+"company": "Sysco",
+"source": "fortune500",
+"rank": 55
+},
+{
+"domain": "americanexpress.com",
+"company": "American Express",
+"source": "fortune500",
+"rank": 56
+},
+{
+"domain": "albertsons.com",
+"company": "Albertsons",
+"source": "fortune500",
+"rank": 57
+},
+{
+"domain": "adm.com",
+"company": "Archer Daniels Midland",
+"source": "fortune500",
+"rank": 58
+},
+{
+"domain": "metlife.com",
+"company": "MetLife",
+"source": "fortune500",
+"rank": 59
+},
+{
+"domain": "hcahealthcare.com",
+"company": "HCA Healthcare",
+"source": "fortune500",
+"rank": 60
+},
+{
+"domain": "lockheedmartin.com",
+"company": "Lockheed Martin",
+"source": "fortune500",
+"rank": 61
+},
+{
+"domain": "newyorklife.com",
+"company": "New York Life Insurance",
+"source": "fortune500",
+"rank": 62
+},
+{
+"domain": "capitalone.com",
+"company": "Capital One Financial",
+"source": "fortune500",
+"rank": 63
+},
+{
+"domain": "allstate.com",
+"company": "Allstate",
+"source": "fortune500",
+"rank": 64
+},
+{
+"domain": "cat.com",
+"company": "Caterpillar",
+"source": "fortune500",
+"rank": 65
+},
+{
+"domain": "caterpillar.com",
+"company": "Caterpillar",
+"source": "fortune500",
+"rank": 65
+},
+{
+"domain": "ibm.com",
+"company": "IBM",
+"source": "fortune500",
+"rank": 66
+},
+{
+"domain": "lilly.com",
+"company": "Eli Lilly",
+"source": "fortune500",
+"rank": 67
+},
+{
+"domain": "merck.com",
+"company": "Merck",
+"source": "fortune500",
+"rank": 68
+},
+{
+"domain": "nationwide.com",
+"company": "Nationwide",
+"source": "fortune500",
+"rank": 69
+},
+{
+"domain": "broadcom.com",
+"company": "Broadcom",
+"source": "fortune500",
+"rank": 70
+},
+{
+"domain": "delta.com",
+"company": "Delta Air Lines",
+"source": "fortune500",
+"rank": 71
+},
+{
+"domain": "publix.com",
+"company": "Publix Super Markets",
+"source": "fortune500",
+"rank": 72
+},
+{
+"domain": "pfizer.com",
+"company": "Pfizer",
+"source": "fortune500",
+"rank": 73
+},
+{
+"domain": "tdsynnex.com",
+"company": "TD Synnex",
+"source": "fortune500",
+"rank": 74
+},
+{
+"domain": "conocophillips.com",
+"company": "ConocoPhillips",
+"source": "fortune500",
+"rank": 75
+},
+{
+"domain": "galaxy.com",
+"company": "Galaxy Digital",
+"source": "fortune500",
+"rank": 76
+},
+{
+"domain": "abbvie.com",
+"company": "AbbVie",
+"source": "fortune500",
+"rank": 77
+},
+{
+"domain": "prudential.com",
+"company": "Prudential Financial",
+"source": "fortune500",
+"rank": 78
+},
+{
+"domain": "tjx.com",
+"company": "TJX",
+"source": "fortune500",
+"rank": 79
+},
+{
+"domain": "pfgc.com",
+"company": "Performance Food Group",
+"source": "fortune500",
+"rank": 80
+},
+{
+"domain": "united.com",
+"company": "United Airlines Holdings",
+"source": "fortune500",
+"rank": 81
+},
+{
+"domain": "oracle.com",
+"company": "Oracle",
+"source": "fortune500",
+"rank": 82
+},
+{
+"domain": "cisco.com",
+"company": "Cisco Systems",
+"source": "fortune500",
+"rank": 83
+},
+{
+"domain": "hp.com",
+"company": "HP",
+"source": "fortune500",
+"rank": 84
+},
+{
+"domain": "charter.com",
+"company": "Charter Communications",
+"source": "fortune500",
+"rank": 85
+},
+{
+"domain": "spectrum.com",
+"company": "Charter Communications",
+"source": "fortune500",
+"rank": 85
+},
+{
+"domain": "aa.com",
+"company": "American Airlines Group",
+"source": "fortune500",
+"rank": 86
+},
+{
+"domain": "tysonfoods.com",
+"company": "Tyson Foods",
+"source": "fortune500",
+"rank": 87
+},
+{
+"domain": "intel.com",
+"company": "Intel",
+"source": "fortune500",
+"rank": 88
+},
+{
+"domain": "enterpriseproducts.com",
+"company": "Enterprise Products Partners",
+"source": "fortune500",
+"rank": 89
+},
+{
+"domain": "ingrammicro.com",
+"company": "Ingram Micro Holding",
+"source": "fortune500",
+"rank": 90
+},
+{
+"domain": "gd.com",
+"company": "General Dynamics",
+"source": "fortune500",
+"rank": 91
+},
+{
+"domain": "uber.com",
+"company": "Uber Technologies",
+"source": "fortune500",
+"rank": 92
+},
+{
+"domain": "usaa.com",
+"company": "USAA",
+"source": "fortune500",
+"rank": 93
+},
+{
+"domain": "tiaa.org",
+"company": "TIAA",
+"source": "fortune500",
+"rank": 94
+},
+{
+"domain": "libertymutual.com",
+"company": "Liberty Mutual Insurance Group",
+"source": "fortune500",
+"rank": 95
+},
+{
+"domain": "travelers.com",
+"company": "Travelers",
+"source": "fortune500",
+"rank": 96
+},
+{
+"domain": "bms.com",
+"company": "Bristol-Myers Squibb",
+"source": "fortune500",
+"rank": 97
+},
+{
+"domain": "coca-cola.com",
+"company": "Coca-Cola",
+"source": "fortune500",
+"rank": 98
+},
+{
+"domain": "nike.com",
+"company": "Nike",
+"source": "fortune500",
+"rank": 99
+},
+{
+"domain": "massmutual.com",
+"company": "Massachusetts Mutual Life",
+"source": "fortune500",
+"rank": 100
+},
+{
+"domain": "geaerospace.com",
+"company": "GE Aerospace",
+"source": "fortune500",
+"rank": 101
+},
+{
+"domain": "deere.com",
+"company": "Deere",
+"source": "fortune500",
+"rank": 102
+},
+{
+"domain": "plains.com",
+"company": "Plains GP Holdings",
+"source": "fortune500",
+"rank": 103
+},
+{
+"domain": "molinahealthcare.com",
+"company": "Molina Healthcare",
+"source": "fortune500",
+"rank": 104
+},
+{
+"domain": "netflix.com",
+"company": "Netflix",
+"source": "fortune500",
+"rank": 105
+},
+{
+"domain": "thermofisher.com",
+"company": "Thermo Fisher Scientific",
+"source": "fortune500",
+"rank": 106
+},
+{
+"domain": "abbott.com",
+"company": "Abbott Laboratories",
+"source": "fortune500",
+"rank": 107
+},
+{
+"domain": "qualcomm.com",
+"company": "Qualcomm",
+"source": "fortune500",
+"rank": 108
+},
+{
+"domain": "northwesternmutual.com",
+"company": "Northwestern Mutual",
+"source": "fortune500",
+"rank": 109
+},
+{
+"domain": "usbank.com",
+"company": "U.S. Bancorp",
+"source": "fortune500",
+"rank": 110
+},
+{
+"domain": "dollargeneral.com",
+"company": "Dollar General",
+"source": "fortune500",
+"rank": 111
+},
+{
+"domain": "northropgrumman.com",
+"company": "Northrop Grumman",
+"source": "fortune500",
+"rank": 112
+},
+{
+"domain": "bestbuy.com",
+"company": "Best Buy",
+"source": "fortune500",
+"rank": 113
+},
+{
+"domain": "salesforce.com",
+"company": "Salesforce",
+"source": "fortune500",
+"rank": 114
+},
+{
+"domain": "bny.com",
+"company": "Bank of New York (BNY)",
+"source": "fortune500",
+"rank": 115
+},
+{
+"domain": "bnymellon.com",
+"company": "Bank of New York (BNY)",
+"source": "fortune500",
+"rank": 115
+},
+{
+"domain": "honeywell.com",
+"company": "Honeywell International",
+"source": "fortune500",
+"rank": 116
+},
+{
+"domain": "pmi.com",
+"company": "Philip Morris International",
+"source": "fortune500",
+"rank": 117
+},
+{
+"domain": "cbre.com",
+"company": "CBRE Group",
+"source": "fortune500",
+"rank": 118
+},
+{
+"domain": "visa.com",
+"company": "Visa",
+"source": "fortune500",
+"rank": 119
+},
+{
+"domain": "dow.com",
+"company": "Dow",
+"source": "fortune500",
+"rank": 120
+},
+{
+"domain": "usfoods.com",
+"company": "US Foods Holding",
+"source": "fortune500",
+"rank": 121
+},
+{
+"domain": "mondelezinternational.com",
+"company": "Mondelez International",
+"source": "fortune500",
+"rank": 122
+},
+{
+"domain": "lithia.com",
+"company": "Lithia Motors",
+"source": "fortune500",
+"rank": 123
+},
+{
+"domain": "gevernova.com",
+"company": "GE Vernova",
+"source": "fortune500",
+"rank": 124
+},
+{
+"domain": "micron.com",
+"company": "Micron Technology",
+"source": "fortune500",
+"rank": 125
+},
+{
+"domain": "wbd.com",
+"company": "Warner Bros. Discovery",
+"source": "fortune500",
+"rank": 126
+},
+{
+"domain": "warnerbros.com",
+"company": "Warner Bros. Discovery",
+"source": "fortune500",
+"rank": 126
+},
+{
+"domain": "starbucks.com",
+"company": "Starbucks",
+"source": "fortune500",
+"rank": 127
+},
+{
+"domain": "world-kinect.com",
+"company": "World Kinect",
+"source": "fortune500",
+"rank": 128
+},
+{
+"domain": "amgen.com",
+"company": "Amgen",
+"source": "fortune500",
+"rank": 129
+},
+{
+"domain": "chsinc.com",
+"company": "CHS",
+"source": "fortune500",
+"rank": 130
+},
+{
+"domain": "amd.com",
+"company": "Advanced Micro Devices",
+"source": "fortune500",
+"rank": 131
+},
+{
+"domain": "coupang.com",
+"company": "Coupang",
+"source": "fortune500",
+"rank": 132
+},
+{
+"domain": "hpe.com",
+"company": "Hewlett Packard Enterprise",
+"source": "fortune500",
+"rank": 133
+},
+{
+"domain": "drhorton.com",
+"company": "D.R. Horton",
+"source": "fortune500",
+"rank": 134
+},
+{
+"domain": "lennar.com",
+"company": "Lennar",
+"source": "fortune500",
+"rank": 135
+},
+{
+"domain": "pnc.com",
+"company": "PNC Financial Services Group",
+"source": "fortune500",
+"rank": 136
+},
+{
+"domain": "cummins.com",
+"company": "Cummins",
+"source": "fortune500",
+"rank": 137
+},
+{
+"domain": "oneok.com",
+"company": "Oneok",
+"source": "fortune500",
+"rank": 138
+},
+{
+"domain": "paypal.com",
+"company": "PayPal Holdings",
+"source": "fortune500",
+"rank": 139
+},
+{
+"domain": "guidewell.com",
+"company": "GuideWell Mutual Holding",
+"source": "fortune500",
+"rank": 140
+},
+{
+"domain": "mastercard.com",
+"company": "Mastercard",
+"source": "fortune500",
+"rank": 141
+},
+{
+"domain": "nucor.com",
+"company": "Nucor",
+"source": "fortune500",
+"rank": 142
+},
+{
+"domain": "apollo.com",
+"company": "Apollo Global Management",
+"source": "fortune500",
+"rank": 143
+},
+{
+"domain": "penskeautomotive.com",
+"company": "Penske Automotive Group",
+"source": "fortune500",
+"rank": 144
+},
+{
+"domain": "duke-energy.com",
+"company": "Duke Energy",
+"source": "fortune500",
+"rank": 145
+},
+{
+"domain": "unfi.com",
+"company": "United Natural Foods",
+"source": "fortune500",
+"rank": 146
+},
+{
+"domain": "ferguson.com",
+"company": "Ferguson Enterprises",
+"source": "fortune500",
+"rank": 147
+},
+{
+"domain": "arrow.com",
+"company": "Arrow Electronics",
+"source": "fortune500",
+"rank": 148
+},
+{
+"domain": "nrg.com",
+"company": "NRG Energy",
+"source": "fortune500",
+"rank": 149
+},
+{
+"domain": "truist.com",
+"company": "Truist Financial",
+"source": "fortune500",
+"rank": 150
+},
+{
+"domain": "jabil.com",
+"company": "Jabil",
+"source": "fortune500",
+"rank": 151
+},
+{
+"domain": "southerncompany.com",
+"company": "Southern",
+"source": "fortune500",
+"rank": 152
+},
+{
+"domain": "gilead.com",
+"company": "Gilead Sciences",
+"source": "fortune500",
+"rank": 153
+},
+{
+"domain": "pbfenergy.com",
+"company": "PBF Energy",
+"source": "fortune500",
+"rank": 154
+},
+{
+"domain": "paramount.com",
+"company": "Paramount Skydance",
+"source": "fortune500",
+"rank": 155
+},
+{
+"domain": "kkr.com",
+"company": "KKR",
+"source": "fortune500",
+"rank": 156
+},
+{
+"domain": "quantaservices.com",
+"company": "Quanta Services",
+"source": "fortune500",
+"rank": 157
+},
+{
+"domain": "paccar.com",
+"company": "Paccar",
+"source": "fortune500",
+"rank": 158
+},
+{
+"domain": "medline.com",
+"company": "Medline",
+"source": "fortune500",
+"rank": 159
+},
+{
+"domain": "appliedmaterials.com",
+"company": "Applied Materials",
+"source": "fortune500",
+"rank": 160
+},
+{
+"domain": "thehartford.com",
+"company": "Hartford Insurance Group",
+"source": "fortune500",
+"rank": 161
+},
+{
+"domain": "carmax.com",
+"company": "CarMax",
+"source": "fortune500",
+"rank": 162
+},
+{
+"domain": "southwest.com",
+"company": "Southwest Airlines",
+"source": "fortune500",
+"rank": 163
+},
+{
+"domain": "bakerhughes.com",
+"company": "Baker Hughes",
+"source": "fortune500",
+"rank": 164
+},
+{
+"domain": "schwab.com",
+"company": "Charles Schwab",
+"source": "fortune500",
+"rank": 165
+},
+{
+"domain": "autonation.com",
+"company": "AutoNation",
+"source": "fortune500",
+"rank": 166
+},
+{
+"domain": "nexteraenergy.com",
+"company": "NextEra Energy",
+"source": "fortune500",
+"rank": 167
+},
+{
+"domain": "marshmclennan.com",
+"company": "Marsh & McLennan",
+"source": "fortune500",
+"rank": 168
+},
+{
+"domain": "mmc.com",
+"company": "Marsh & McLennan",
+"source": "fortune500",
+"rank": 168
+},
+{
+"domain": "bookingholdings.com",
+"company": "Booking Holdings",
+"source": "fortune500",
+"rank": 169
+},
+{
+"domain": "mcdonalds.com",
+"company": "McDonald's",
+"source": "fortune500",
+"rank": 170
+},
+{
+"domain": "hfsinclair.com",
+"company": "HF Sinclair",
+"source": "fortune500",
+"rank": 171
+},
+{
+"domain": "aig.com",
+"company": "AIG",
+"source": "fortune500",
+"rank": 172
+},
+{
+"domain": "oxy.com",
+"company": "Occidental Petroleum",
+"source": "fortune500",
+"rank": 173
+},
+{
+"domain": "marriott.com",
+"company": "Marriott International",
+"source": "fortune500",
+"rank": 174
+},
+{
+"domain": "jll.com",
+"company": "Jones Lang LaSalle",
+"source": "fortune500",
+"rank": 175
+},
+{
+"domain": "internationalpaper.com",
+"company": "International Paper",
+"source": "fortune500",
+"rank": 176
+},
+{
+"domain": "fcx.com",
+"company": "Freeport-McMoRan",
+"source": "fortune500",
+"rank": 177
+},
+{
+"domain": "constellationenergy.com",
+"company": "Constellation Energy",
+"source": "fortune500",
+"rank": 178
+},
+{
+"domain": "wm.com",
+"company": "Waste Management",
+"source": "fortune500",
+"rank": 179
+},
+{
+"domain": "livenationentertainment.com",
+"company": "Live Nation Entertainment",
+"source": "fortune500",
+"rank": 180
+},
+{
+"domain": "livenation.com",
+"company": "Live Nation Entertainment",
+"source": "fortune500",
+"rank": 180
+},
+{
+"domain": "stryker.com",
+"company": "Stryker",
+"source": "fortune500",
+"rank": 181
+},
+{
+"domain": "dollartree.com",
+"company": "Dollar Tree",
+"source": "fortune500",
+"rank": 182
+},
+{
+"domain": "3m.com",
+"company": "3M",
+"source": "fortune500",
+"rank": 183
+},
+{
+"domain": "kraftheinzcompany.com",
+"company": "Kraft Heinz",
+"source": "fortune500",
+"rank": 184
+},
+{
+"domain": "pge.com",
+"company": "PG&E",
+"source": "fortune500",
+"rank": 185
+},
+{
+"domain": "danaher.com",
+"company": "Danaher",
+"source": "fortune500",
+"rank": 186
+},
+{
+"domain": "up.com",
+"company": "Union Pacific",
+"source": "fortune500",
+"rank": 187
+},
+{
+"domain": "genpt.com",
+"company": "Genuine Parts",
+"source": "fortune500",
+"rank": 188
+},
+{
+"domain": "exeloncorp.com",
+"company": "Exelon",
+"source": "fortune500",
+"rank": 189
+},
+{
+"domain": "blackrock.com",
+"company": "BlackRock",
+"source": "fortune500",
+"rank": 190
+},
+{
+"domain": "block.xyz",
+"company": "Block",
+"source": "fortune500",
+"rank": 191
+},
+{
+"domain": "adobe.com",
+"company": "Adobe",
+"source": "fortune500",
+"rank": 192
+},
+{
+"domain": "rgare.com",
+"company": "Reinsurance Group of America",
+"source": "fortune500",
+"rank": 193
+},
+{
+"domain": "sherwin-williams.com",
+"company": "Sherwin-Williams",
+"source": "fortune500",
+"rank": 194
+},
+{
+"domain": "wesco.com",
+"company": "WESCO International",
+"source": "fortune500",
+"rank": 195
+},
+{
+"domain": "lear.com",
+"company": "Lear",
+"source": "fortune500",
+"rank": 196
+},
+{
+"domain": "synchrony.com",
+"company": "Synchrony",
+"source": "fortune500",
+"rank": 197
+},
+{
+"domain": "amphenol.com",
+"company": "Amphenol",
+"source": "fortune500",
+"rank": 198
+},
+{
+"domain": "rossstores.com",
+"company": "Ross Stores",
+"source": "fortune500",
+"rank": 199
+},
+{
+"domain": "newmont.com",
+"company": "Newmont",
+"source": "fortune500",
+"rank": 200
+},
+{
+"domain": "eogresources.com",
+"company": "EOG Resources",
+"source": "fortune500",
+"rank": 201
+},
+{
+"domain": "statestreet.com",
+"company": "State Street",
+"source": "fortune500",
+"rank": 202
+},
+{
+"domain": "macys.com",
+"company": "Macy's",
+"source": "fortune500",
+"rank": 203
+},
+{
+"domain": "group1auto.com",
+"company": "Group 1 Automotive",
+"source": "fortune500",
+"rank": 204
+},
+{
+"domain": "cdw.com",
+"company": "CDW",
+"source": "fortune500",
+"rank": 205
+},
+{
+"domain": "avnet.com",
+"company": "Avnet",
+"source": "fortune500",
+"rank": 206
+},
+{
+"domain": "halliburton.com",
+"company": "Halliburton",
+"source": "fortune500",
+"rank": 207
+},
+{
+"domain": "supermicro.com",
+"company": "Super Micro Computer",
+"source": "fortune500",
+"rank": 208
+},
+{
+"domain": "aep.com",
+"company": "American Electric Power",
+"source": "fortune500",
+"rank": 209
+},
+{
+"domain": "l3harris.com",
+"company": "L3Harris Technologies",
+"source": "fortune500",
+"rank": 210
+},
+{
+"domain": "bd.com",
+"company": "Becton Dickinson",
+"source": "fortune500",
+"rank": 211
+},
+{
+"domain": "carrier.com",
+"company": "Carrier Global",
+"source": "fortune500",
+"rank": 212
+},
+{
+"domain": "bjs.com",
+"company": "BJ's Wholesale Club",
+"source": "fortune500",
+"rank": 213
+},
+{
+"domain": "tenethealth.com",
+"company": "Tenet Healthcare",
+"source": "fortune500",
+"rank": 214
+},
+{
+"domain": "fiserv.com",
+"company": "Fiserv",
+"source": "fortune500",
+"rank": 215
+},
+{
+"domain": "cognizant.com",
+"company": "Cognizant Technology Solutions",
+"source": "fortune500",
+"rank": 216
+},
+{
+"domain": "gehealthcare.com",
+"company": "GE HealthCare Technologies",
+"source": "fortune500",
+"rank": 217
+},
+{
+"domain": "adp.com",
+"company": "Automatic Data Processing",
+"source": "fortune500",
+"rank": 218
+},
+{
+"domain": "colgatepalmolive.com",
+"company": "Colgate-Palmolive",
+"source": "fortune500",
+"rank": 219
+},
+{
+"domain": "carvana.com",
+"company": "Carvana",
+"source": "fortune500",
+"rank": 220
+},
+{
+"domain": "altria.com",
+"company": "Altria Group",
+"source": "fortune500",
+"rank": 221
+},
+{
+"domain": "bostonscientific.com",
+"company": "Boston Scientific",
+"source": "fortune500",
+"rank": 222
+},
+{
+"domain": "cheniere.com",
+"company": "Cheniere Energy",
+"source": "fortune500",
+"rank": 223
+},
+{
+"domain": "parker.com",
+"company": "Parker-Hannifin",
+"source": "fortune500",
+"rank": 224
+},
+{
+"domain": "kimberly-clark.com",
+"company": "Kimberly-Clark",
+"source": "fortune500",
+"rank": 225
+},
+{
+"domain": "amfam.com",
+"company": "American Family Insurance Group",
+"source": "fortune500",
+"rank": 226
+},
+{
+"domain": "generalmills.com",
+"company": "General Mills",
+"source": "fortune500",
+"rank": 227
+},
+{
+"domain": "edisonintl.com",
+"company": "Edison International",
+"source": "fortune500",
+"rank": 228
+},
+{
+"domain": "autozone.com",
+"company": "AutoZone",
+"source": "fortune500",
+"rank": 229
+},
+{
+"domain": "ameriprise.com",
+"company": "Ameriprise Financial",
+"source": "fortune500",
+"rank": 230
+},
+{
+"domain": "intuit.com",
+"company": "Intuit",
+"source": "fortune500",
+"rank": 231
+},
+{
+"domain": "guardianlife.com",
+"company": "Guardian Life Ins. Co. of America",
+"source": "fortune500",
+"rank": 232
+},
+{
+"domain": "clevelandcliffs.com",
+"company": "Cleveland-Cliffs",
+"source": "fortune500",
+"rank": 233
+},
+{
+"domain": "globalp.com",
+"company": "Global Partners",
+"source": "fortune500",
+"rank": 234
+},
+{
+"domain": "aramark.com",
+"company": "Aramark",
+"source": "fortune500",
+"rank": 235
+},
+{
+"domain": "corebridgefinancial.com",
+"company": "Corebridge Financial",
+"source": "fortune500",
+"rank": 236
+},
+{
+"domain": "loews.com",
+"company": "Loews",
+"source": "fortune500",
+"rank": 237
+},
+{
+"domain": "lamresearch.com",
+"company": "Lam Research",
+"source": "fortune500",
+"rank": 238
+},
+{
+"domain": "goodyear.com",
+"company": "Goodyear Tire & Rubber",
+"source": "fortune500",
+"rank": 239
+},
+{
+"domain": "pacificlife.com",
+"company": "Pacific Life",
+"source": "fortune500",
+"rank": 240
+},
+{
+"domain": "auto-owners.com",
+"company": "Auto-Owners Insurance",
+"source": "fortune500",
+"rank": 241
+},
+{
+"domain": "kiewit.com",
+"company": "Peter Kiewit Sons'",
+"source": "fortune500",
+"rank": 242
+},
+{
+"domain": "lfg.com",
+"company": "Lincoln National",
+"source": "fortune500",
+"rank": 243
+},
+{
+"domain": "steeldynamics.com",
+"company": "Steel Dynamics",
+"source": "fortune500",
+"rank": 244
+},
+{
+"domain": "emerson.com",
+"company": "Emerson Electric",
+"source": "fortune500",
+"rank": 245
+},
+{
+"domain": "asburyauto.com",
+"company": "Asbury Automotive Group",
+"source": "fortune500",
+"rank": 246
+},
+{
+"domain": "manpowergroup.com",
+"company": "ManpowerGroup",
+"source": "fortune500",
+"rank": 247
+},
+{
+"domain": "grainger.com",
+"company": "W.W. Grainger",
+"source": "fortune500",
+"rank": 248
+},
+{
+"domain": "edwardjones.com",
+"company": "Jones Financial (Edward Jones)",
+"source": "fortune500",
+"rank": 249
+},
+{
+"domain": "oreillyauto.com",
+"company": "O'Reilly Automotive",
+"source": "fortune500",
+"rank": 250
+},
+{
+"domain": "vistracorp.com",
+"company": "Vistra",
+"source": "fortune500",
+"rank": 251
+},
+{
+"domain": "ti.com",
+"company": "Texas Instruments",
+"source": "fortune500",
+"rank": 252
+},
+{
+"domain": "mgmresorts.com",
+"company": "MGM Resorts International",
+"source": "fortune500",
+"rank": 253
+},
+{
+"domain": "corteva.com",
+"company": "Corteva",
+"source": "fortune500",
+"rank": 254
+},
+{
+"domain": "uhsinc.com",
+"company": "Universal Health Services",
+"source": "fortune500",
+"rank": 255
+},
+{
+"domain": "pultegroup.com",
+"company": "PulteGroup",
+"source": "fortune500",
+"rank": 256
+},
+{
+"domain": "omnicomgroup.com",
+"company": "Omnicom Group",
+"source": "fortune500",
+"rank": 257
+},
+{
+"domain": "dicks.com",
+"company": "Dick's Sporting Goods",
+"source": "fortune500",
+"rank": 258
+},
+{
+"domain": "devonenergy.com",
+"company": "Devon Energy",
+"source": "fortune500",
+"rank": 259
+},
+{
+"domain": "leidos.com",
+"company": "Leidos Holdings",
+"source": "fortune500",
+"rank": 260
+},
+{
+"domain": "aflac.com",
+"company": "Aflac",
+"source": "fortune500",
+"rank": 261
+},
+{
+"domain": "targaresources.com",
+"company": "Targa Resources",
+"source": "fortune500",
+"rank": 262
+},
+{
+"domain": "murphyusa.com",
+"company": "Murphy USA",
+"source": "fortune500",
+"rank": 263
+},
+{
+"domain": "lpl.com",
+"company": "LPL Financial Holdings",
+"source": "fortune500",
+"rank": 264
+},
+{
+"domain": "emcorgroup.com",
+"company": "EMCOR Group",
+"source": "fortune500",
+"rank": 265
+},
+{
+"domain": "kindermorgan.com",
+"company": "Kinder Morgan",
+"source": "fortune500",
+"rank": 266
+},
+{
+"domain": "conedison.com",
+"company": "Consolidated Edison",
+"source": "fortune500",
+"rank": 267
+},
+{
+"domain": "keurigdrpepper.com",
+"company": "Keurig Dr Pepper",
+"source": "fortune500",
+"rank": 268
+},
+{
+"domain": "republicservices.com",
+"company": "Republic Services",
+"source": "fortune500",
+"rank": 269
+},
+{
+"domain": "markel.com",
+"company": "Markel Group",
+"source": "fortune500",
+"rank": 270
+},
+{
+"domain": "farmers.com",
+"company": "Farmers Insurance Exchange",
+"source": "fortune500",
+"rank": 271
+},
+{
+"domain": "dominionenergy.com",
+"company": "Dominion Energy",
+"source": "fortune500",
+"rank": 272
+},
+{
+"domain": "landolakes.com",
+"company": "Land O'Lakes",
+"source": "fortune500",
+"rank": 273
+},
+{
+"domain": "iqvia.com",
+"company": "IQVIA Holdings",
+"source": "fortune500",
+"rank": 274
+},
+{
+"domain": "fox.com",
+"company": "Fox",
+"source": "fortune500",
+"rank": 275
+},
+{
+"domain": "foxcorporation.com",
+"company": "Fox",
+"source": "fortune500",
+"rank": 275
+},
+{
+"domain": "aecom.com",
+"company": "AECOM",
+"source": "fortune500",
+"rank": 276
+},
+{
+"domain": "chrobinson.com",
+"company": "C.H. Robinson Worldwide",
+"source": "fortune500",
+"rank": 277
+},
+{
+"domain": "bitgo.com",
+"company": "Bitgo Holdings",
+"source": "fortune500",
+"rank": 278
+},
+{
+"domain": "unitedrentals.com",
+"company": "United Rentals",
+"source": "fortune500",
+"rank": 279
+},
+{
+"domain": "ecolab.com",
+"company": "Ecolab",
+"source": "fortune500",
+"rank": 280
+},
+{
+"domain": "itw.com",
+"company": "Illinois Tool Works",
+"source": "fortune500",
+"rank": 281
+},
+{
+"domain": "caseys.com",
+"company": "Casey's General Stores",
+"source": "fortune500",
+"rank": 282
+},
+{
+"domain": "raymondjames.com",
+"company": "Raymond James Financial",
+"source": "fortune500",
+"rank": 283
+},
+{
+"domain": "ppg.com",
+"company": "PPG Industries",
+"source": "fortune500",
+"rank": 284
+},
+{
+"domain": "dteenergy.com",
+"company": "DTE Energy",
+"source": "fortune500",
+"rank": 285
+},
+{
+"domain": "corning.com",
+"company": "Corning",
+"source": "fortune500",
+"rank": 286
+},
+{
+"domain": "principal.com",
+"company": "Principal Financial",
+"source": "fortune500",
+"rank": 287
+},
+{
+"domain": "mutualofomaha.com",
+"company": "Mutual of Omaha",
+"source": "fortune500",
+"rank": 288
+},
+{
+"domain": "kohls.com",
+"company": "Kohl's",
+"source": "fortune500",
+"rank": 289
+},
+{
+"domain": "tractorsupply.com",
+"company": "Tractor Supply",
+"source": "fortune500",
+"rank": 290
+},
+{
+"domain": "whirlpoolcorp.com",
+"company": "Whirlpool",
+"source": "fortune500",
+"rank": 291
+},
+{
+"domain": "fluor.com",
+"company": "Fluor",
+"source": "fortune500",
+"rank": 292
+},
+{
+"domain": "gap.com",
+"company": "Gap",
+"source": "fortune500",
+"rank": 293
+},
+{
+"domain": "spglobal.com",
+"company": "S&P Global",
+"source": "fortune500",
+"rank": 294
+},
+{
+"domain": "ally.com",
+"company": "Ally Financial",
+"source": "fortune500",
+"rank": 295
+},
+{
+"domain": "bldr.com",
+"company": "Builders FirstSource",
+"source": "fortune500",
+"rank": 296
+},
+{
+"domain": "sonicautomotive.com",
+"company": "Sonic Automotive",
+"source": "fortune500",
+"rank": 297
+},
+{
+"domain": "stanleyblackanddecker.com",
+"company": "Stanley Black & Decker",
+"source": "fortune500",
+"rank": 298
+},
+{
+"domain": "kenvue.com",
+"company": "Kenvue",
+"source": "fortune500",
+"rank": 299
+},
+{
+"domain": "kyndryl.com",
+"company": "Kyndryl Holdings",
+"source": "fortune500",
+"rank": 300
+},
+{
+"domain": "diamondbackenergy.com",
+"company": "Diamondback Energy",
+"source": "fortune500",
+"rank": 301
+},
+{
+"domain": "echostar.com",
+"company": "EchoStar",
+"source": "fortune500",
+"rank": 302
+},
+{
+"domain": "textron.com",
+"company": "Textron",
+"source": "fortune500",
+"rank": 303
+},
+{
+"domain": "expediagroup.com",
+"company": "Expedia Group",
+"source": "fortune500",
+"rank": 304
+},
+{
+"domain": "wrberkley.com",
+"company": "W.R. Berkley",
+"source": "fortune500",
+"rank": 305
+},
+{
+"domain": "xcelenergy.com",
+"company": "Xcel Energy",
+"source": "fortune500",
+"rank": 306
+},
+{
+"domain": "firstenergycorp.com",
+"company": "FirstEnergy",
+"source": "fortune500",
+"rank": 307
+},
+{
+"domain": "erieinsurance.com",
+"company": "Erie Insurance Group",
+"source": "fortune500",
+"rank": 308
+},
+{
+"domain": "firstcitizens.com",
+"company": "First Citizens BancShares",
+"source": "fortune500",
+"rank": 309
+},
+{
+"domain": "blackstone.com",
+"company": "Blackstone",
+"source": "fortune500",
+"rank": 310
+},
+{
+"domain": "fnf.com",
+"company": "Fidelity National Financial",
+"source": "fortune500",
+"rank": 311
+},
+{
+"domain": "otis.com",
+"company": "Otis Worldwide",
+"source": "fortune500",
+"rank": 312
+},
+{
+"domain": "amentum.com",
+"company": "Amentum Holdings",
+"source": "fortune500",
+"rank": 313
+},
+{
+"domain": "regeneron.com",
+"company": "Regeneron Pharmaceuticals",
+"source": "fortune500",
+"rank": 314
+},
+{
+"domain": "elcompanies.com",
+"company": "Estee Lauder",
+"source": "fortune500",
+"rank": 315
+},
+{
+"domain": "borgwarner.com",
+"company": "BorgWarner",
+"source": "fortune500",
+"rank": 316
+},
+{
+"domain": "northerntrust.com",
+"company": "Northern Trust",
+"source": "fortune500",
+"rank": 317
+},
+{
+"domain": "viatris.com",
+"company": "Viatris",
+"source": "fortune500",
+"rank": 318
+},
+{
+"domain": "mastec.com",
+"company": "MasTec",
+"source": "fortune500",
+"rank": 319
+},
+{
+"domain": "reliance.com",
+"company": "Reliance",
+"source": "fortune500",
+"rank": 320
+},
+{
+"domain": "westernsouthern.com",
+"company": "Western & Southern Financial Group",
+"source": "fortune500",
+"rank": 321
+},
+{
+"domain": "alaskaair.com",
+"company": "Alaska Air Group",
+"source": "fortune500",
+"rank": 322
+},
+{
+"domain": "brightspringhealth.com",
+"company": "BrightSpring Health Services",
+"source": "fortune500",
+"rank": 323
+},
+{
+"domain": "csx.com",
+"company": "CSX",
+"source": "fortune500",
+"rank": 324
+},
+{
+"domain": "lkqcorp.com",
+"company": "LKQ",
+"source": "fortune500",
+"rank": 325
+},
+{
+"domain": "labcorp.com",
+"company": "Labcorp Holdings",
+"source": "fortune500",
+"rank": 326
+},
+{
+"domain": "ajg.com",
+"company": "Arthur J. Gallagher",
+"source": "fortune500",
+"rank": 327
+},
+{
+"domain": "ventureglobal.com",
+"company": "Venture Global",
+"source": "fortune500",
+"rank": 328
+},
+{
+"domain": "venturegloballng.com",
+"company": "Venture Global",
+"source": "fortune500",
+"rank": 328
+},
+{
+"domain": "doordash.com",
+"company": "DoorDash",
+"source": "fortune500",
+"rank": 329
+},
+{
+"domain": "sempra.com",
+"company": "Sempra",
+"source": "fortune500",
+"rank": 330
+},
+{
+"domain": "davita.com",
+"company": "DaVita",
+"source": "fortune500",
+"rank": 331
+},
+{
+"domain": "eversource.com",
+"company": "Eversource Energy",
+"source": "fortune500",
+"rank": 332
+},
+{
+"domain": "servicenow.com",
+"company": "ServiceNow",
+"source": "fortune500",
+"rank": 333
+},
+{
+"domain": "mtb.com",
+"company": "M&T Bank",
+"source": "fortune500",
+"rank": 334
+},
+{
+"domain": "henryschein.com",
+"company": "Henry Schein",
+"source": "fortune500",
+"rank": 335
+},
+{
+"domain": "gxo.com",
+"company": "GXO Logistics",
+"source": "fortune500",
+"rank": 336
+},
+{
+"domain": "ball.com",
+"company": "Ball",
+"source": "fortune500",
+"rank": 337
+},
+{
+"domain": "unum.com",
+"company": "Unum Group",
+"source": "fortune500",
+"rank": 338
+},
+{
+"domain": "sands.com",
+"company": "Las Vegas Sands",
+"source": "fortune500",
+"rank": 339
+},
+{
+"domain": "entergy.com",
+"company": "Entergy",
+"source": "fortune500",
+"rank": 340
+},
+{
+"domain": "53.com",
+"company": "Fifth Third Bancorp",
+"source": "fortune500",
+"rank": 341
+},
+{
+"domain": "graybar.com",
+"company": "Graybar Electric",
+"source": "fortune500",
+"rank": 342
+},
+{
+"domain": "dxc.com",
+"company": "DXC Technology",
+"source": "fortune500",
+"rank": 343
+},
+{
+"domain": "alcoa.com",
+"company": "Alcoa",
+"source": "fortune500",
+"rank": 344
+},
+{
+"domain": "assurant.com",
+"company": "Assurant",
+"source": "fortune500",
+"rank": 345
+},
+{
+"domain": "ryder.com",
+"company": "Ryder System",
+"source": "fortune500",
+"rank": 346
+},
+{
+"domain": "ice.com",
+"company": "Intercontinental Exchange",
+"source": "fortune500",
+"rank": 347
+},
+{
+"domain": "cinfin.com",
+"company": "Cincinnati Financial",
+"source": "fortune500",
+"rank": 348
+},
+{
+"domain": "chewy.com",
+"company": "Chewy",
+"source": "fortune500",
+"rank": 349
+},
+{
+"domain": "chs.net",
+"company": "Community Health Systems",
+"source": "fortune500",
+"rank": 350
+},
+{
+"domain": "huntington.com",
+"company": "Huntington Bancshares",
+"source": "fortune500",
+"rank": 351
+},
+{
+"domain": "hii.com",
+"company": "Huntington Ingalls Industries",
+"source": "fortune500",
+"rank": 352
+},
+{
+"domain": "wayfair.com",
+"company": "Wayfair",
+"source": "fortune500",
+"rank": 353
+},
+{
+"domain": "lumen.com",
+"company": "Lumen Technologies",
+"source": "fortune500",
+"rank": 354
+},
+{
+"domain": "ulta.com",
+"company": "Ulta Beauty",
+"source": "fortune500",
+"rank": 355
+},
+{
+"domain": "crowncork.com",
+"company": "Crown Holdings",
+"source": "fortune500",
+"rank": 356
+},
+{
+"domain": "airbnb.com",
+"company": "Airbnb",
+"source": "fortune500",
+"rank": 357
+},
+{
+"domain": "aes.com",
+"company": "AES",
+"source": "fortune500",
+"rank": 358
+},
+{
+"domain": "nscorp.com",
+"company": "Norfolk Southern",
+"source": "fortune500",
+"rank": 359
+},
+{
+"domain": "pseg.com",
+"company": "Public Service Enterprise Group",
+"source": "fortune500",
+"rank": 360
+},
+{
+"domain": "kla.com",
+"company": "KLA",
+"source": "fortune500",
+"rank": 361
+},
+{
+"domain": "expandenergy.com",
+"company": "Expand Energy",
+"source": "fortune500",
+"rank": 362
+},
+{
+"domain": "hormel.com",
+"company": "Hormel Foods",
+"source": "fortune500",
+"rank": 363
+},
+{
+"domain": "darden.com",
+"company": "Darden Restaurants",
+"source": "fortune500",
+"rank": 364
+},
+{
+"domain": "citizensbank.com",
+"company": "Citizens Financial Group",
+"source": "fortune500",
+"rank": 365
+},
+{
+"domain": "mosaicco.com",
+"company": "Mosaic",
+"source": "fortune500",
+"rank": 366
+},
+{
+"domain": "hilton.com",
+"company": "Hilton Worldwide Holdings",
+"source": "fortune500",
+"rank": 367
+},
+{
+"domain": "airproducts.com",
+"company": "Air Products & Chemicals",
+"source": "fortune500",
+"rank": 368
+},
+{
+"domain": "jacobs.com",
+"company": "Jacobs Solutions",
+"source": "fortune500",
+"rank": 369
+},
+{
+"domain": "vrtx.com",
+"company": "Vertex Pharmaceuticals",
+"source": "fortune500",
+"rank": 370
+},
+{
+"domain": "jbhunt.com",
+"company": "J.B. Hunt Transport Services",
+"source": "fortune500",
+"rank": 371
+},
+{
+"domain": "boozallen.com",
+"company": "Booz Allen Hamilton Holding",
+"source": "fortune500",
+"rank": 372
+},
+{
+"domain": "williams.com",
+"company": "Williams",
+"source": "fortune500",
+"rank": 373
+},
+{
+"domain": "chipotle.com",
+"company": "Chipotle Mexican Grill",
+"source": "fortune500",
+"rank": 374
+},
+{
+"domain": "yumchina.com",
+"company": "Yum China Holdings",
+"source": "fortune500",
+"rank": 375
+},
+{
+"domain": "hioscar.com",
+"company": "Oscar Health",
+"source": "fortune500",
+"rank": 376
+},
+{
+"domain": "hersheys.com",
+"company": "Hershey",
+"source": "fortune500",
+"rank": 377
+},
+{
+"domain": "motorolasolutions.com",
+"company": "Motorola Solutions",
+"source": "fortune500",
+"rank": 378
+},
+{
+"domain": "equitable.com",
+"company": "Equitable Holdings",
+"source": "fortune500",
+"rank": 379
+},
+{
+"domain": "avisbudgetgroup.com",
+"company": "Avis Budget Group",
+"source": "fortune500",
+"rank": 380
+},
+{
+"domain": "conagrabrands.com",
+"company": "Conagra Brands",
+"source": "fortune500",
+"rank": 381
+},
+{
+"domain": "baxter.com",
+"company": "Baxter International",
+"source": "fortune500",
+"rank": 382
+},
+{
+"domain": "burlington.com",
+"company": "Burlington Stores",
+"source": "fortune500",
+"rank": 383
+},
+{
+"domain": "caesars.com",
+"company": "Caesars Entertainment",
+"source": "fortune500",
+"rank": 384
+},
+{
+"domain": "owenscorning.com",
+"company": "Owens Corning",
+"source": "fortune500",
+"rank": 385
+},
+{
+"domain": "key.com",
+"company": "KeyCorp",
+"source": "fortune500",
+"rank": 386
+},
+{
+"domain": "thrivent.com",
+"company": "Thrivent Financial",
+"source": "fortune500",
+"rank": 387
+},
+{
+"domain": "westlake.com",
+"company": "Westlake",
+"source": "fortune500",
+"rank": 388
+},
+{
+"domain": "wabteccorp.com",
+"company": "Westinghouse Air Brake",
+"source": "fortune500",
+"rank": 389
+},
+{
+"domain": "molsoncoors.com",
+"company": "Molson Coors Beverage",
+"source": "fortune500",
+"rank": 390
+},
+{
+"domain": "lululemon.com",
+"company": "Lululemon athletica",
+"source": "fortune500",
+"rank": 391
+},
+{
+"domain": "fm.com",
+"company": "FM",
+"source": "fortune500",
+"rank": 392
+},
+{
+"domain": "fmglobal.com",
+"company": "FM",
+"source": "fortune500",
+"rank": 392
+},
+{
+"domain": "ebay.com",
+"company": "Ebay",
+"source": "fortune500",
+"rank": 393
+},
+{
+"domain": "expeditors.com",
+"company": "Expeditors Intl. of Washington",
+"source": "fortune500",
+"rank": 394
+},
+{
+"domain": "questdiagnostics.com",
+"company": "Quest Diagnostics",
+"source": "fortune500",
+"rank": 395
+},
+{
+"domain": "analog.com",
+"company": "Analog Devices",
+"source": "fortune500",
+"rank": 396
+},
+{
+"domain": "andersonsinc.com",
+"company": "Andersons",
+"source": "fortune500",
+"rank": 397
+},
+{
+"domain": "gold.com",
+"company": "Gold.com",
+"source": "fortune500",
+"rank": 398
+},
+{
+"domain": "tollbrothers.com",
+"company": "Toll Brothers",
+"source": "fortune500",
+"rank": 399
+},
+{
+"domain": "iff.com",
+"company": "International Flavors & Fragrances",
+"source": "fortune500",
+"rank": 400
+},
+{
+"domain": "welltower.com",
+"company": "Welltower",
+"source": "fortune500",
+"rank": 401
+},
+{
+"domain": "jefferies.com",
+"company": "Jefferies Financial Group",
+"source": "fortune500",
+"rank": 402
+},
+{
+"domain": "autoliv.com",
+"company": "Autoliv",
+"source": "fortune500",
+"rank": 403
+},
+{
+"domain": "mohawkind.com",
+"company": "Mohawk Industries",
+"source": "fortune500",
+"rank": 404
+},
+{
+"domain": "delekus.com",
+"company": "Delek US Holdings",
+"source": "fortune500",
+"rank": 405
+},
+{
+"domain": "fisglobal.com",
+"company": "Fidelity National Information (FIS)",
+"source": "fortune500",
+"rank": 406
+},
+{
+"domain": "accendrahealth.com",
+"company": "Accendra Health",
+"source": "fortune500",
+"rank": 407
+},
+{
+"domain": "americantower.com",
+"company": "American Tower",
+"source": "fortune500",
+"rank": 408
+},
+{
+"domain": "nvrinc.com",
+"company": "NVR",
+"source": "fortune500",
+"rank": 409
+},
+{
+"domain": "interactivebrokers.com",
+"company": "Interactive Brokers Group",
+"source": "fortune500",
+"rank": 410
+},
+{
+"domain": "oshkoshcorp.com",
+"company": "Oshkosh",
+"source": "fortune500",
+"rank": 411
+},
+{
+"domain": "cintas.com",
+"company": "Cintas",
+"source": "fortune500",
+"rank": 412
+},
+{
+"domain": "campbells.com",
+"company": "Campbell's",
+"source": "fortune500",
+"rank": 413
+},
+{
+"domain": "vertiv.com",
+"company": "Vertiv Holdings",
+"source": "fortune500",
+"rank": 414
+},
+{
+"domain": "globalpayments.com",
+"company": "Global Payments",
+"source": "fortune500",
+"rank": 415
+},
+{
+"domain": "cbrands.com",
+"company": "Constellation Brands",
+"source": "fortune500",
+"rank": 416
+},
+{
+"domain": "agcocorp.com",
+"company": "AGCO",
+"source": "fortune500",
+"rank": 417
+},
+{
+"domain": "intuitive.com",
+"company": "Intuitive Surgical",
+"source": "fortune500",
+"rank": 418
+},
+{
+"domain": "acehardware.com",
+"company": "Ace Hardware",
+"source": "fortune500",
+"rank": 419
+},
+{
+"domain": "dana.com",
+"company": "Dana",
+"source": "fortune500",
+"rank": 420
+},
+{
+"domain": "biogen.com",
+"company": "Biogen",
+"source": "fortune500",
+"rank": 421
+},
+{
+"domain": "newscorp.com",
+"company": "News Corp.",
+"source": "fortune500",
+"rank": 422
+},
+{
+"domain": "concentrix.com",
+"company": "Concentrix",
+"source": "fortune500",
+"rank": 423
+},
+{
+"domain": "wecenergygroup.com",
+"company": "WEC Energy Group",
+"source": "fortune500",
+"rank": 424
+},
+{
+"domain": "vfc.com",
+"company": "VF",
+"source": "fortune500",
+"rank": 425
+},
+{
+"domain": "seaboardcorp.com",
+"company": "Seaboard",
+"source": "fortune500",
+"rank": 426
+},
+{
+"domain": "ielp.com",
+"company": "Icahn Enterprises",
+"source": "fortune500",
+"rank": 427
+},
+{
+"domain": "regions.com",
+"company": "Regions Financial",
+"source": "fortune500",
+"rank": 428
+},
+{
+"domain": "thorindustries.com",
+"company": "Thor Industries",
+"source": "fortune500",
+"rank": 429
+},
+{
+"domain": "workday.com",
+"company": "Workday",
+"source": "fortune500",
+"rank": 430
+},
+{
+"domain": "celanese.com",
+"company": "Celanese",
+"source": "fortune500",
+"rank": 431
+},
+{
+"domain": "wdc.com",
+"company": "Western Digital",
+"source": "fortune500",
+"rank": 432
+},
+{
+"domain": "qvcgrp.com",
+"company": "QVC Group",
+"source": "fortune500",
+"rank": 433
+},
+{
+"domain": "qvc.com",
+"company": "QVC Group",
+"source": "fortune500",
+"rank": 433
+},
+{
+"domain": "zoetis.com",
+"company": "Zoetis",
+"source": "fortune500",
+"rank": 434
+},
+{
+"domain": "centerpointenergy.com",
+"company": "CenterPoint Energy",
+"source": "fortune500",
+"rank": 435
+},
+{
+"domain": "equinix.com",
+"company": "Equinix",
+"source": "fortune500",
+"rank": 436
+},
+{
+"domain": "paloaltonetworks.com",
+"company": "Palo Alto Networks",
+"source": "fortune500",
+"rank": 437
+},
+{
+"domain": "apacorp.com",
+"company": "APA",
+"source": "fortune500",
+"rank": 438
+},
+{
+"domain": "oldrepublic.com",
+"company": "Old Republic International",
+"source": "fortune500",
+"rank": 439
+},
+{
+"domain": "comfortsystemsusa.com",
+"company": "Comfort Systems USA",
+"source": "fortune500",
+"rank": 440
+},
+{
+"domain": "jetblue.com",
+"company": "JetBlue Airways",
+"source": "fortune500",
+"rank": 441
+},
+{
+"domain": "pplweb.com",
+"company": "PPL",
+"source": "fortune500",
+"rank": 442
+},
+{
+"domain": "xylem.com",
+"company": "Xylem",
+"source": "fortune500",
+"rank": 443
+},
+{
+"domain": "arista.com",
+"company": "Arista Networks",
+"source": "fortune500",
+"rank": 444
+},
+{
+"domain": "packagingcorp.com",
+"company": "Packaging Corp. of America",
+"source": "fortune500",
+"rank": 445
+},
+{
+"domain": "pvh.com",
+"company": "PVH",
+"source": "fortune500",
+"rank": 446
+},
+{
+"domain": "ovintiv.com",
+"company": "Ovintiv",
+"source": "fortune500",
+"rank": 447
+},
+{
+"domain": "averydennison.com",
+"company": "Avery Dennison",
+"source": "fortune500",
+"rank": 448
+},
+{
+"domain": "transdigm.com",
+"company": "TransDigm Group",
+"source": "fortune500",
+"rank": 449
+},
+{
+"domain": "sprouts.com",
+"company": "Sprouts Farmers Market",
+"source": "fortune500",
+"rank": 450
+},
+{
+"domain": "prologis.com",
+"company": "Prologis",
+"source": "fortune500",
+"rank": 451
+},
+{
+"domain": "franklinresources.com",
+"company": "Franklin Resources",
+"source": "fortune500",
+"rank": 452
+},
+{
+"domain": "franklintempleton.com",
+"company": "Franklin Resources",
+"source": "fortune500",
+"rank": 452
+},
+{
+"domain": "eastman.com",
+"company": "Eastman Chemical",
+"source": "fortune500",
+"rank": 453
+},
+{
+"domain": "abm.com",
+"company": "ABM Industries",
+"source": "fortune500",
+"rank": 454
+},
+{
+"domain": "nov.com",
+"company": "NOV",
+"source": "fortune500",
+"rank": 455
+},
+{
+"domain": "jmsmucker.com",
+"company": "J.M. Smucker",
+"source": "fortune500",
+"rank": 456
+},
+{
+"domain": "securian.com",
+"company": "Securian Financial Group",
+"source": "fortune500",
+"rank": 457
+},
+{
+"domain": "eqt.com",
+"company": "EQT",
+"source": "fortune500",
+"rank": 458
+},
+{
+"domain": "caci.com",
+"company": "CACI International",
+"source": "fortune500",
+"rank": 459
+},
+{
+"domain": "graphicpkg.com",
+"company": "Graphic Packaging Holding",
+"source": "fortune500",
+"rank": 460
+},
+{
+"domain": "advanceautoparts.com",
+"company": "Advance Auto Parts",
+"source": "fortune500",
+"rank": 461
+},
+{
+"domain": "optimum.com",
+"company": "Optimum Communications",
+"source": "fortune500",
+"rank": 462
+},
+{
+"domain": "siriusxm.com",
+"company": "Sirius XM Holdings",
+"source": "fortune500",
+"rank": 463
+},
+{
+"domain": "cmsenergy.com",
+"company": "CMS Energy",
+"source": "fortune500",
+"rank": 464
+},
+{
+"domain": "hertz.com",
+"company": "Hertz Global Holdings",
+"source": "fortune500",
+"rank": 465
+},
+{
+"domain": "ameren.com",
+"company": "Ameren",
+"source": "fortune500",
+"rank": 466
+},
+{
+"domain": "rockwellautomation.com",
+"company": "Rockwell Automation",
+"source": "fortune500",
+"rank": 467
+},
+{
+"domain": "solventum.com",
+"company": "Solventum",
+"source": "fortune500",
+"rank": 468
+},
+{
+"domain": "monsterbevcorp.com",
+"company": "Monster Beverage",
+"source": "fortune500",
+"rank": 469
+},
+{
+"domain": "nasdaq.com",
+"company": "Nasdaq",
+"source": "fortune500",
+"rank": 470
+},
+{
+"domain": "howmet.com",
+"company": "Howmet Aerospace",
+"source": "fortune500",
+"rank": 471
+},
+{
+"domain": "insight.com",
+"company": "Insight Enterprises",
+"source": "fortune500",
+"rank": 472
+},
+{
+"domain": "zimmerbiomet.com",
+"company": "Zimmer Biomet Holdings",
+"source": "fortune500",
+"rank": 473
+},
+{
+"domain": "yum.com",
+"company": "Yum Brands",
+"source": "fortune500",
+"rank": 474
+},
+{
+"domain": "fastenal.com",
+"company": "Fastenal",
+"source": "fortune500",
+"rank": 475
+},
+{
+"domain": "marvell.com",
+"company": "Marvell Technology",
+"source": "fortune500",
+"rank": 476
+},
+{
+"domain": "voya.com",
+"company": "Voya Financial",
+"source": "fortune500",
+"rank": 477
+},
+{
+"domain": "afginc.com",
+"company": "American Financial Group",
+"source": "fortune500",
+"rank": 478
+},
+{
+"domain": "postholdings.com",
+"company": "Post Holdings",
+"source": "fortune500",
+"rank": 479
+},
+{
+"domain": "xpo.com",
+"company": "XPO",
+"source": "fortune500",
+"rank": 480
+},
+{
+"domain": "dupont.com",
+"company": "DuPont",
+"source": "fortune500",
+"rank": 481
+},
+{
+"domain": "sanmina.com",
+"company": "Sanmina",
+"source": "fortune500",
+"rank": 482
+},
+{
+"domain": "taylormorrison.com",
+"company": "Taylor Morrison Home",
+"source": "fortune500",
+"rank": 483
+},
+{
+"domain": "dovercorp.com",
+"company": "Dover",
+"source": "fortune500",
+"rank": 484
+},
+{
+"domain": "vulcanmaterials.com",
+"company": "Vulcan Materials",
+"source": "fortune500",
+"rank": 485
+},
+{
+"domain": "apigroupcorp.com",
+"company": "APi Group",
+"source": "fortune500",
+"rank": 486
+},
+{
+"domain": "ropertech.com",
+"company": "Roper Technologies",
+"source": "fortune500",
+"rank": 487
+},
+{
+"domain": "kbr.com",
+"company": "KBR",
+"source": "fortune500",
+"rank": 488
+},
+{
+"domain": "sonoco.com",
+"company": "Sonoco Products",
+"source": "fortune500",
+"rank": 489
+},
+{
+"domain": "williams-sonoma.com",
+"company": "Williams-Sonoma",
+"source": "fortune500",
+"rank": 490
+},
+{
+"domain": "cmc.com",
+"company": "Commercial Metals",
+"source": "fortune500",
+"rank": 491
+},
+{
+"domain": "moodys.com",
+"company": "Moody's",
+"source": "fortune500",
+"rank": 492
+},
+{
+"domain": "clr.com",
+"company": "Continental Resources",
+"source": "fortune500",
+"rank": 493
+},
+{
+"domain": "irco.com",
+"company": "Ingersoll Rand",
+"source": "fortune500",
+"rank": 494
+},
+{
+"domain": "coreandmain.com",
+"company": "Core & Main",
+"source": "fortune500",
+"rank": 495
+},
+{
+"domain": "coterra.com",
+"company": "Coterra Energy",
+"source": "fortune500",
+"rank": 496
+},
+{
+"domain": "primoriscorp.com",
+"company": "Primoris Services",
+"source": "fortune500",
+"rank": 497
+},
+{
+"domain": "masco.com",
+"company": "Masco",
+"source": "fortune500",
+"rank": 498
+},
+{
+"domain": "somnigroup.com",
+"company": "Somnigroup International",
+"source": "fortune500",
+"rank": 499
+},
+{
+"domain": "resideo.com",
+"company": "Resideo Technologies",
+"source": "fortune500",
+"rank": 500
+},
+{
+"domain": "cargill.com",
+"company": "Cargill",
+"source": "forbes-private",
+"rank": 1
+},
+{
+"domain": "kochind.com",
+"company": "Koch",
+"source": "forbes-private",
+"rank": 2
+},
+{
+"domain": "mars.com",
+"company": "Mars",
+"source": "forbes-private",
+"rank": 4
+},
+{
+"domain": "heb.com",
+"company": "H-E-B Grocery Company",
+"source": "forbes-private",
+"rank": 5
+},
+{
+"domain": "reyesholdings.com",
+"company": "Reyes Holdings",
+"source": "forbes-private",
+"rank": 6
+},
+{
+"domain": "enterprisemobility.com",
+"company": "Enterprise Mobility",
+"source": "forbes-private",
+"rank": 7
+},
+{
+"domain": "fidelity.com",
+"company": "Fidelity Investments",
+"source": "forbes-private",
+"rank": 8
+},
+{
+"domain": "southernglazers.com",
+"company": "Southern Glazer's Wine & Spirits",
+"source": "forbes-private",
+"rank": 9
+},
+{
+"domain": "coxenterprises.com",
+"company": "Cox Enterprises",
+"source": "forbes-private",
+"rank": 10
+},
+{
+"domain": "bechtel.com",
+"company": "Bechtel",
+"source": "forbes-private",
+"rank": 11
+},
+{
+"domain": "gfs.com",
+"company": "Gordon Food Service",
+"source": "forbes-private",
+"rank": 12
+},
+{
+"domain": "jmfamily.com",
+"company": "JM Family Enterprises",
+"source": "forbes-private",
+"rank": 13
+},
+{
+"domain": "meijer.com",
+"company": "Meijer",
+"source": "forbes-private",
+"rank": 14
+},
+{
+"domain": "loves.com",
+"company": "Love's Travel Stops & Country Stores",
+"source": "forbes-private",
+"rank": 15
+},
+{
+"domain": "abcsupply.com",
+"company": "ABC Supply",
+"source": "forbes-private",
+"rank": 16
+},
+{
+"domain": "cswg.com",
+"company": "C&S Wholesale Grocers",
+"source": "forbes-private",
+"rank": 17
+},
+{
+"domain": "wwt.com",
+"company": "World Wide Technology",
+"source": "forbes-private",
+"rank": 18
+},
+{
+"domain": "quiktrip.com",
+"company": "QuikTrip",
+"source": "forbes-private",
+"rank": 19
+},
+{
+"domain": "carahsoft.com",
+"company": "Carahsoft",
+"source": "forbes-private",
+"rank": 20
+},
+{
+"domain": "wawa.com",
+"company": "Wawa",
+"source": "forbes-private",
+"rank": 21
+},
+{
+"domain": "racetrac.com",
+"company": "RaceTrac",
+"source": "forbes-private",
+"rank": 22
+},
+{
+"domain": "mckinsey.com",
+"company": "McKinsey & Company",
+"source": "forbes-private",
+"rank": 25
+},
+{
+"domain": "shi.com",
+"company": "SHI International",
+"source": "forbes-private",
+"rank": 26
+},
+{
+"domain": "bloomberg.com",
+"company": "Bloomberg",
+"source": "forbes-private",
+"rank": 27
+},
+{
+"domain": "kingston.com",
+"company": "Kingston Technology",
+"source": "forbes-private",
+"rank": 28
+},
+{
+"domain": "allegisgroup.com",
+"company": "Allegis Group",
+"source": "forbes-private",
+"rank": 29
+},
+{
+"domain": "friedkin.com",
+"company": "The Friedkin Group",
+"source": "forbes-private",
+"rank": 30
+},
+{
+"domain": "bcg.com",
+"company": "BCG (Boston Consulting Group)",
+"source": "forbes-private",
+"rank": 31
+},
+{
+"domain": "whiting-turner.com",
+"company": "Whiting-Turner Contracting",
+"source": "forbes-private",
+"rank": 32
+},
+{
+"domain": "menards.com",
+"company": "Menards",
+"source": "forbes-private",
+"rank": 33
+},
+{
+"domain": "wegmans.com",
+"company": "Wegmans Food Markets",
+"source": "forbes-private",
+"rank": 34
+},
+{
+"domain": "triconenergy.com",
+"company": "Tricon Energy",
+"source": "forbes-private",
+"rank": 35
+},
+{
+"domain": "hearst.com",
+"company": "Hearst",
+"source": "forbes-private",
+"rank": 36
+},
+{
+"domain": "hy-vee.com",
+"company": "Hy-Vee",
+"source": "forbes-private",
+"rank": 37
+},
+{
+"domain": "scjohnson.com",
+"company": "SC Johnson",
+"source": "forbes-private",
+"rank": 38
+},
+{
+"domain": "spacex.com",
+"company": "SpaceX",
+"source": "forbes-private",
+"rank": 39
+},
+{
+"domain": "structuretone.com",
+"company": "STO Building Group",
+"source": "forbes-private",
+"rank": 40
+},
+{
+"domain": "dotfoods.com",
+"company": "Dot Foods",
+"source": "forbes-private",
+"rank": 42
+},
+{
+"domain": "sheetz.com",
+"company": "Sheetz",
+"source": "forbes-private",
+"rank": 43
+},
+{
+"domain": "simplot.com",
+"company": "JR Simplot",
+"source": "forbes-private",
+"rank": 44
+},
+{
+"domain": "standardindustries.com",
+"company": "Standard Industries",
+"source": "forbes-private",
+"rank": 45
+},
+{
+"domain": "gaf.com",
+"company": "Standard Industries",
+"source": "forbes-private",
+"rank": 45
+},
+{
+"domain": "sammonsenterprises.com",
+"company": "Sammons Enterprises",
+"source": "forbes-private",
+"rank": 46
+},
+{
+"domain": "dpr.com",
+"company": "DPR Construction",
+"source": "forbes-private",
+"rank": 47
+},
+{
+"domain": "ashleyfurniture.com",
+"company": "Ashley Furniture Industries",
+"source": "forbes-private",
+"rank": 48
+},
+{
+"domain": "rndc-usa.com",
+"company": "Republic National Distributing Company",
+"source": "forbes-private",
+"rank": 49
+},
+{
+"domain": "tenaska.com",
+"company": "Tenaska",
+"source": "forbes-private",
+"rank": 50
+},
+{
+"domain": "discounttire.com",
+"company": "Discount Tire",
+"source": "forbes-private",
+"rank": 51
+},
+{
+"domain": "wincofoods.com",
+"company": "WinCo Foods",
+"source": "forbes-private",
+"rank": 52
+},
+{
+"domain": "perduefarms.com",
+"company": "Perdue Farms",
+"source": "forbes-private",
+"rank": 53
+},
+{
+"domain": "flex-n-gate.com",
+"company": "Flex-N-Gate",
+"source": "forbes-private",
+"rank": 54
+},
+{
+"domain": "chick-fil-a.com",
+"company": "Chick-fil-A",
+"source": "forbes-private",
+"rank": 55
+},
+{
+"domain": "kirkland.com",
+"company": "Kirkland & Ellis",
+"source": "forbes-private",
+"rank": 56
+},
+{
+"domain": "hitt.com",
+"company": "HITT Contracting",
+"source": "forbes-private",
+"rank": 57
+},
+{
+"domain": "gianteagle.com",
+"company": "Giant Eagle",
+"source": "forbes-private",
+"rank": 58
+},
+{
+"domain": "breakthrubev.com",
+"company": "Breakthru Beverage Group",
+"source": "forbes-private",
+"rank": 59
+},
+{
+"domain": "southwire.com",
+"company": "Southwire",
+"source": "forbes-private",
+"rank": 60
+},
+{
+"domain": "cng-inc.com",
+"company": "Central National-Gottesman",
+"source": "forbes-private",
+"rank": 61
+},
+{
+"domain": "harborfreight.com",
+"company": "Harbor Freight Tools",
+"source": "forbes-private",
+"rank": 62
+},
+{
+"domain": "henselphelps.com",
+"company": "Hensel Phelps Construction",
+"source": "forbes-private",
+"rank": 63
+},
+{
+"domain": "osigroup.com",
+"company": "OSI Group",
+"source": "forbes-private",
+"rank": 64
+},
+{
+"domain": "capitalgroup.com",
+"company": "Capital Group Companies",
+"source": "forbes-private",
+"rank": 65
+},
+{
+"domain": "fanatics.com",
+"company": "Fanatics",
+"source": "forbes-private",
+"rank": 66
+},
+{
+"domain": "fanaticsinc.com",
+"company": "Fanatics",
+"source": "forbes-private",
+"rank": 66
+},
+{
+"domain": "holderconstruction.com",
+"company": "Holder Construction",
+"source": "forbes-private",
+"rank": 67
+},
+{
+"domain": "uline.com",
+"company": "Uline",
+"source": "forbes-private",
+"rank": 68
+},
+{
+"domain": "basspro.com",
+"company": "Great American Outdoors Group",
+"source": "forbes-private",
+"rank": 69
+},
+{
+"domain": "cabelas.com",
+"company": "Great American Outdoors Group",
+"source": "forbes-private",
+"rank": 69
+},
+{
+"domain": "hobbylobby.com",
+"company": "Hobby Lobby Stores",
+"source": "forbes-private",
+"rank": 70
+},
+{
+"domain": "mansfieldoil.com",
+"company": "Mansfield Energy",
+"source": "forbes-private",
+"rank": 71
+},
+{
+"domain": "urc.com",
+"company": "Red Apple Group",
+"source": "forbes-private",
+"rank": 72
+},
+{
+"domain": "hardrock.com",
+"company": "Hard Rock International",
+"source": "forbes-private",
+"rank": 73
+},
+{
+"domain": "benekeith.com",
+"company": "Ben E Keith",
+"source": "forbes-private",
+"rank": 74
+},
+{
+"domain": "newbalance.com",
+"company": "New Balance",
+"source": "forbes-private",
+"rank": 75
+},
+{
+"domain": "shopmarketbasket.com",
+"company": "Demoulas Super Markets",
+"source": "forbes-private",
+"rank": 76
+},
+{
+"domain": "gilbaneco.com",
+"company": "Gilbane",
+"source": "forbes-private",
+"rank": 77
+},
+{
+"domain": "walshgroup.com",
+"company": "Walsh Group",
+"source": "forbes-private",
+"rank": 78
+},
+{
+"domain": "claycorp.com",
+"company": "Clayco Construction",
+"source": "forbes-private",
+"rank": 79
+},
+{
+"domain": "bain.com",
+"company": "Bain & Company",
+"source": "forbes-private",
+"rank": 80
+},
+{
+"domain": "amwayglobal.com",
+"company": "Amway",
+"source": "forbes-private",
+"rank": 81
+},
+{
+"domain": "jedunn.com",
+"company": "JE Dunn Construction Group",
+"source": "forbes-private",
+"rank": 82
+},
+{
+"domain": "suffolk.com",
+"company": "Suffolk",
+"source": "forbes-private",
+"rank": 83
+},
+{
+"domain": "scoular.com",
+"company": "Scoular",
+"source": "forbes-private",
+"rank": 85
+},
+{
+"domain": "burnsmcd.com",
+"company": "Burns & McDonnell",
+"source": "forbes-private",
+"rank": 86
+},
+{
+"domain": "schreiberfoods.com",
+"company": "Schreiber Foods",
+"source": "forbes-private",
+"rank": 87
+},
+{
+"domain": "mccarthy.com",
+"company": "McCarthy Holdings",
+"source": "forbes-private",
+"rank": 88
+},
+{
+"domain": "pricechopper.com",
+"company": "Northeast Grocery",
+"source": "forbes-private",
+"rank": 89
+},
+{
+"domain": "clarkenterprises.com",
+"company": "Clark Group",
+"source": "forbes-private",
+"rank": 90
+},
+{
+"domain": "kohlercompany.com",
+"company": "Kohler",
+"source": "forbes-private",
+"rank": 91
+},
+{
+"domain": "lw.com",
+"company": "Latham & Watkins",
+"source": "forbes-private",
+"rank": 92
+},
+{
+"domain": "tql.com",
+"company": "TQL - Total Quality Logistics",
+"source": "forbes-private",
+"rank": 93
+},
+{
+"domain": "mortenson.com",
+"company": "Mortenson",
+"source": "forbes-private",
+"rank": 94
+},
+{
+"domain": "thekraftgroup.com",
+"company": "The Kraft Group",
+"source": "forbes-private",
+"rank": 95
+},
+{
+"domain": "brasfieldgorrie.com",
+"company": "Brasfield & Gorrie",
+"source": "forbes-private",
+"rank": 96
+},
+{
+"domain": "asplundh.com",
+"company": "Asplundh Tree Expert",
+"source": "forbes-private",
+"rank": 97
+},
+{
+"domain": "84lumber.com",
+"company": "84 Lumber",
+"source": "forbes-private",
+"rank": 98
+},
+{
+"domain": "pandarg.com",
+"company": "Panda Restaurant Group",
+"source": "forbes-private",
+"rank": 99
+},
+{
+"domain": "shamrockfoods.com",
+"company": "Shamrock Foods",
+"source": "forbes-private",
+"rank": 100
+},
+{
+"domain": "dandh.com",
+"company": "D&H Distributing",
+"source": "forbes-private",
+"rank": 101
+},
+{
+"domain": "walbridge.com",
+"company": "Walbridge",
+"source": "forbes-private",
+"rank": 102
+},
+{
+"domain": "raleys.com",
+"company": "Raley's",
+"source": "forbes-private",
+"rank": 103
+},
+{
+"domain": "wonderful.com",
+"company": "The Wonderful Company",
+"source": "forbes-private",
+"rank": 104
+},
+{
+"domain": "totalwine.com",
+"company": "Total Wine & More",
+"source": "forbes-private",
+"rank": 105
+},
+{
+"domain": "zachrygroup.com",
+"company": "Zachry Group",
+"source": "forbes-private",
+"rank": 106
+},
+{
+"domain": "estes-express.com",
+"company": "Estes Express Lines",
+"source": "forbes-private",
+"rank": 107
+},
+{
+"domain": "richs.com",
+"company": "Rich Products",
+"source": "forbes-private",
+"rank": 108
+},
+{
+"domain": "armadasunset.com",
+"company": "Armada Sunset Holdings",
+"source": "forbes-private",
+"rank": 109
+},
+{
+"domain": "floridacrystalscorp.com",
+"company": "Florida Crystals",
+"source": "forbes-private",
+"rank": 110
+},
+{
+"domain": "asrc.com",
+"company": "Arctic Slope Regional Corporation",
+"source": "forbes-private",
+"rank": 111
+},
+{
+"domain": "epic.com",
+"company": "Epic Systems",
+"source": "forbes-private",
+"rank": 112
+},
+{
+"domain": "cedcareers.com",
+"company": "Consolidated Elec Distributors",
+"source": "forbes-private",
+"rank": 113
+},
+{
+"domain": "kochfoods.com",
+"company": "Koch Foods",
+"source": "forbes-private",
+"rank": 114
+},
+{
+"domain": "hoffmancorp.com",
+"company": "Hoffman",
+"source": "forbes-private",
+"rank": 115
+},
+{
+"domain": "wgyates.com",
+"company": "The Yates Companies",
+"source": "forbes-private",
+"rank": 116
+},
+{
+"domain": "gore.com",
+"company": "W. L. Gore & Associates",
+"source": "forbes-private",
+"rank": 117
+},
+{
+"domain": "crown.com",
+"company": "Crown Equipment",
+"source": "forbes-private",
+"rank": 118
+},
+{
+"domain": "arconational.com",
+"company": "Arco Construction",
+"source": "forbes-private",
+"rank": 119
+},
+{
+"domain": "valvesoftware.com",
+"company": "Valve Corporation",
+"source": "forbes-private",
+"rank": 120
+},
+{
+"domain": "bv.com",
+"company": "Black & Veatch",
+"source": "forbes-private",
+"rank": 121
+},
+{
+"domain": "ilitchholdings.com",
+"company": "Ilitch Holdings",
+"source": "forbes-private",
+"rank": 122
+},
+{
+"domain": "littlecaesars.com",
+"company": "Ilitch Holdings",
+"source": "forbes-private",
+"rank": 122
+},
+{
+"domain": "stripe.com",
+"company": "Stripe",
+"source": "forbes-private",
+"rank": 123
+},
+{
+"domain": "colonialgroupinc.com",
+"company": "Colonial Group",
+"source": "forbes-private",
+"rank": 124
+},
+{
+"domain": "gallo.com",
+"company": "E&J Gallo Winery",
+"source": "forbes-private",
+"rank": 125
+},
+{
+"domain": "jdhco.com",
+"company": "JDH",
+"source": "forbes-private",
+"rank": 126
+},
+{
+"domain": "rencogroup.net",
+"company": "Renco Group",
+"source": "forbes-private",
+"rank": 127
+},
+{
+"domain": "landrysinc.com",
+"company": "Fertitta Entertainment",
+"source": "forbes-private",
+"rank": 128
+},
+{
+"domain": "saltchuk.com",
+"company": "Saltchuk",
+"source": "forbes-private",
+"rank": 129
+},
+{
+"domain": "austin-ind.com",
+"company": "Austin Industries",
+"source": "forbes-private",
+"rank": 130
+},
+{
+"domain": "prattindustries.com",
+"company": "Pratt Industries",
+"source": "forbes-private",
+"rank": 131
+},
+{
+"domain": "swinerton.com",
+"company": "Swinerton",
+"source": "forbes-private",
+"rank": 132
+},
+{
+"domain": "amsted.com",
+"company": "Amsted Industries",
+"source": "forbes-private",
+"rank": 133
+},
+{
+"domain": "fjmgt.com",
+"company": "FJ Management",
+"source": "forbes-private",
+"rank": 134
+},
+{
+"domain": "staterbros.com",
+"company": "Stater Bros",
+"source": "forbes-private",
+"rank": 135
+},
+{
+"domain": "apexoil.com",
+"company": "Apex Oil",
+"source": "forbes-private",
+"rank": 136
+},
+{
+"domain": "alberici.com",
+"company": "Alberici",
+"source": "forbes-private",
+"rank": 137
+},
+{
+"domain": "bartonmalow.com",
+"company": "Barton Malow",
+"source": "forbes-private",
+"rank": 138
+},
+{
+"domain": "brookshires.com",
+"company": "Brookshire Grocery",
+"source": "forbes-private",
+"rank": 139
+},
+{
+"domain": "delawarenorth.com",
+"company": "Delaware North",
+"source": "forbes-private",
+"rank": 140
+},
+{
+"domain": "cocacolaunited.com",
+"company": "Coca-Cola Bottling Co United",
+"source": "forbes-private",
+"rank": 141
+},
+{
+"domain": "gray.com",
+"company": "Gray",
+"source": "forbes-private",
+"rank": 142
+},
+{
+"domain": "hthackney.com",
+"company": "HT Hackney",
+"source": "forbes-private",
+"rank": 143
+},
+{
+"domain": "michels.us",
+"company": "Michels",
+"source": "forbes-private",
+"rank": 144
+},
+{
+"domain": "greatlakescheese.com",
+"company": "Great Lakes Cheese",
+"source": "forbes-private",
+"rank": 145
+},
+{
+"domain": "lockton.com",
+"company": "Lockton Companies",
+"source": "forbes-private",
+"rank": 146
+},
+{
+"domain": "mountaire.com",
+"company": "Mountaire",
+"source": "forbes-private",
+"rank": 147
+},
+{
+"domain": "rlcarriers.com",
+"company": "R+L Carriers",
+"source": "forbes-private",
+"rank": 148
+},
+{
+"domain": "roomstogo.com",
+"company": "Rooms To Go",
+"source": "forbes-private",
+"rank": 149
+},
+{
+"domain": "smyrnareadymix.com",
+"company": "SRM Concrete",
+"source": "forbes-private",
+"rank": 150
+},
+{
+"domain": "tauberoil.com",
+"company": "Tauber Oil",
+"source": "forbes-private",
+"rank": 151
+},
+{
+"domain": "alexlee.com",
+"company": "Alex Lee",
+"source": "forbes-private",
+"rank": 152
+},
+{
+"domain": "consigli.com",
+"company": "Consigli Construction",
+"source": "forbes-private",
+"rank": 153
+},
+{
+"domain": "mosscm.com",
+"company": "Moss & Associates",
+"source": "forbes-private",
+"rank": 154
+},
+{
+"domain": "openai.com",
+"company": "OpenAI",
+"source": "forbes-private",
+"rank": 155
+},
+{
+"domain": "rosendin.com",
+"company": "Rosendin Electric",
+"source": "forbes-private",
+"rank": 156
+},
+{
+"domain": "skadden.com",
+"company": "Skadden, Arps, Slate, Meagher & Flom",
+"source": "forbes-private",
+"rank": 157
+},
+{
+"domain": "sundt.com",
+"company": "Sundt Construction",
+"source": "forbes-private",
+"rank": 158
+},
+{
+"domain": "andersencorporation.com",
+"company": "Andersen Corporation",
+"source": "forbes-private",
+"rank": 159
+},
+{
+"domain": "clarkassociatesinc.biz",
+"company": "Clark Associates",
+"source": "forbes-private",
+"rank": 160
+},
+{
+"domain": "davidweekleyhomes.com",
+"company": "David Weekley Homes",
+"source": "forbes-private",
+"rank": 161
+},
+{
+"domain": "gibsondunn.com",
+"company": "Gibson, Dunn & Crutcher",
+"source": "forbes-private",
+"rank": 162
+},
+{
+"domain": "huntoil.com",
+"company": "Hunt Consolidated/Hunt Oil",
+"source": "forbes-private",
+"rank": 163
+},
+{
+"domain": "leprinofoods.com",
+"company": "Leprino Foods",
+"source": "forbes-private",
+"rank": 164
+},
+{
+"domain": "nfiindustries.com",
+"company": "NFI Industries",
+"source": "forbes-private",
+"rank": 165
+},
+{
+"domain": "orgill.com",
+"company": "Orgill",
+"source": "forbes-private",
+"rank": 166
+},
+{
+"domain": "crowley.com",
+"company": "Crowley",
+"source": "forbes-private",
+"rank": 167
+},
+{
+"domain": "hallmark.com",
+"company": "Hallmark",
+"source": "forbes-private",
+"rank": 168
+},
+{
+"domain": "hphood.com",
+"company": "HP Hood",
+"source": "forbes-private",
+"rank": 169
+},
+{
+"domain": "houchensindustries.com",
+"company": "Houchens Industries",
+"source": "forbes-private",
+"rank": 170
+},
+{
+"domain": "digikey.com",
+"company": "DigiKey",
+"source": "forbes-private",
+"rank": 171
+},
+{
+"domain": "bakermckenzie.com",
+"company": "Baker McKenzie",
+"source": "forbes-private",
+"rank": 172
+},
+{
+"domain": "onealind.com",
+"company": "O'Neal Industries",
+"source": "forbes-private",
+"rank": 173
+},
+{
+"domain": "plastipak.com",
+"company": "Plastipak Holdings",
+"source": "forbes-private",
+"rank": 174
+},
+{
+"domain": "ropesgray.com",
+"company": "Ropes & Gray",
+"source": "forbes-private",
+"rank": 175
+},
+{
+"domain": "ryancompanies.com",
+"company": "Ryan Companies",
+"source": "forbes-private",
+"rank": 176
+},
+{
+"domain": "sidley.com",
+"company": "Sidley Austin",
+"source": "forbes-private",
+"rank": 177
+},
+{
+"domain": "stmtires.com",
+"company": "Southern Tire Mart",
+"source": "forbes-private",
+"rank": 178
+},
+{
+"domain": "murexltd.com",
+"company": "Murex",
+"source": "forbes-private",
+"rank": 179
+},
+{
+"domain": "whitecase.com",
+"company": "White & Case",
+"source": "forbes-private",
+"rank": 180
+},
+{
+"domain": "arthrex.com",
+"company": "Arthrex",
+"source": "forbes-private",
+"rank": 181
+},
+{
+"domain": "ga.com",
+"company": "General Atomics",
+"source": "forbes-private",
+"rank": 182
+},
+{
+"domain": "johnsonbrothers.com",
+"company": "Johnson Brothers Liquor",
+"source": "forbes-private",
+"rank": 183
+},
+{
+"domain": "foodcity.com",
+"company": "K-VA-T Food Stores",
+"source": "forbes-private",
+"rank": 184
+},
+{
+"domain": "schnucks.com",
+"company": "Schnuck Markets",
+"source": "forbes-private",
+"rank": 185
+},
+{
+"domain": "ebscoind.com",
+"company": "EBSCO Industries",
+"source": "forbes-private",
+"rank": 186
+},
+{
+"domain": "morganlewis.com",
+"company": "Morgan Lewis & Bockius",
+"source": "forbes-private",
+"rank": 187
+},
+{
+"domain": "pistongroup.com",
+"company": "Piston Group",
+"source": "forbes-private",
+"rank": 188
+},
+{
+"domain": "rosensdiversifiedinc.com",
+"company": "Rosen's Diversified",
+"source": "forbes-private",
+"rank": 189
+},
+{
+"domain": "simmonsfoods.com",
+"company": "Simmons Foods",
+"source": "forbes-private",
+"rank": 190
+},
+{
+"domain": "jacksonhealthcare.com",
+"company": "Jackson Healthcare",
+"source": "forbes-private",
+"rank": 191
+},
+{
+"domain": "brookshirebrothers.com",
+"company": "Brookshire Brothers",
+"source": "forbes-private",
+"rank": 192
+},
+{
+"domain": "chobani.com",
+"company": "Chobani",
+"source": "forbes-private",
+"rank": 193
+},
+{
+"domain": "dartcontainer.com",
+"company": "Dart Container",
+"source": "forbes-private",
+"rank": 194
+},
+{
+"domain": "dayzim.com",
+"company": "Day & Zimmermann",
+"source": "forbes-private",
+"rank": 195
+},
+{
+"domain": "guttmanenergy.com",
+"company": "Guttman Holdings",
+"source": "forbes-private",
+"rank": 196
+},
+{
+"domain": "lcca.com",
+"company": "Life Care Centers of America",
+"source": "forbes-private",
+"rank": 197
+},
+{
+"domain": "sas.com",
+"company": "SAS",
+"source": "forbes-private",
+"rank": 198
+},
+{
+"domain": "sazerac.com",
+"company": "Sazerac Company",
+"source": "forbes-private",
+"rank": 199
+},
+{
+"domain": "wilburellis.com",
+"company": "Wilbur-Ellis",
+"source": "forbes-private",
+"rank": 200
+},
+{
+"domain": "dish.com",
+"company": "DISH Network / EchoStar",
+"source": "denver-tech",
+"rank": 1
+},
+{
+"domain": "lmco.com",
+"company": "Lockheed Martin Space",
+"source": "denver-tech",
+"rank": 4
+},
+{
+"domain": "centurylink.com",
+"company": "Lumen Technologies (CenturyLink)",
+"source": "denver-tech",
+"rank": 5
+},
+{
+"domain": "westernunion.com",
+"company": "Western Union",
+"source": "denver-tech",
+"rank": 6
+},
+{
+"domain": "trimble.com",
+"company": "Trimble",
+"source": "denver-tech",
+"rank": 8
+},
+{
+"domain": "slack.com",
+"company": "Salesforce",
+"source": "denver-tech",
+"rank": 16
+},
+{
+"domain": "optiv.com",
+"company": "Optiv",
+"source": "denver-tech",
+"rank": 18
+},
+{
+"domain": "vertafore.com",
+"company": "Vertafore",
+"source": "denver-tech",
+"rank": 19
+},
+{
+"domain": "palantir.com",
+"company": "Palantir Technologies",
+"source": "denver-tech",
+"rank": 20
+},
+{
+"domain": "baesystems.com",
+"company": "BAE Systems Space & Mission Systems (formerly Ball Aerospace)",
+"source": "denver-tech",
+"rank": 21
+},
+{
+"domain": "maxar.com",
+"company": "Maxar Technologies",
+"source": "denver-tech",
+"rank": 22
+},
+{
+"domain": "zayo.com",
+"company": "Zayo Group",
+"source": "denver-tech",
+"rank": 23
+},
+{
+"domain": "csgi.com",
+"company": "CSG International",
+"source": "denver-tech",
+"rank": 24
+},
+{
+"domain": "guild.com",
+"company": "Guild",
+"source": "denver-tech",
+"rank": 25
+},
+{
+"domain": "guildeducation.com",
+"company": "Guild",
+"source": "denver-tech",
+"rank": 25
+},
+{
+"domain": "ibotta.com",
+"company": "Ibotta",
+"source": "denver-tech",
+"rank": 26
+},
+{
+"domain": "gusto.com",
+"company": "Gusto",
+"source": "denver-tech",
+"rank": 27
+},
+{
+"domain": "pax8.com",
+"company": "Pax8",
+"source": "denver-tech",
+"rank": 28
+},
+{
+"domain": "angi.com",
+"company": "Angi",
+"source": "denver-tech",
+"rank": 29
+},
+{
+"domain": "twilio.com",
+"company": "Twilio SendGrid",
+"source": "denver-tech",
+"rank": 30
+},
+{
+"domain": "sendgrid.com",
+"company": "Twilio SendGrid",
+"source": "denver-tech",
+"rank": 30
+},
+{
+"domain": "pingidentity.com",
+"company": "Ping Identity",
+"source": "denver-tech",
+"rank": 31
+},
+{
+"domain": "workiva.com",
+"company": "Workiva",
+"source": "denver-tech",
+"rank": 32
+},
+{
+"domain": "datadoghq.com",
+"company": "Datadog",
+"source": "denver-tech",
+"rank": 33
+},
+{
+"domain": "snowflake.com",
+"company": "Snowflake",
+"source": "denver-tech",
+"rank": 34
+},
+{
+"domain": "databricks.com",
+"company": "Databricks",
+"source": "denver-tech",
+"rank": 35
+},
+{
+"domain": "splunk.com",
+"company": "Splunk",
+"source": "denver-tech",
+"rank": 37
+},
+{
+"domain": "zoom.us",
+"company": "Zoom",
+"source": "denver-tech",
+"rank": 39
+},
+{
+"domain": "zoom.com",
+"company": "Zoom",
+"source": "denver-tech",
+"rank": 39
+},
+{
+"domain": "velocityglobal.com",
+"company": "Velocity Global",
+"source": "denver-tech",
+"rank": 40
+},
+{
+"domain": "healthgrades.com",
+"company": "Healthgrades",
+"source": "denver-tech",
+"rank": 41
+},
+{
+"domain": "sierraspace.com",
+"company": "Sierra Space",
+"source": "denver-tech",
+"rank": 42
+},
+{
+"domain": "boomsupersonic.com",
+"company": "Boom Supersonic",
+"source": "denver-tech",
+"rank": 43
+},
+{
+"domain": "boom.aero",
+"company": "Boom Supersonic",
+"source": "denver-tech",
+"rank": 43
+},
+{
+"domain": "ursamajortech.com",
+"company": "Ursa Major",
+"source": "denver-tech",
+"rank": 44
+},
+{
+"domain": "ursamajor.com",
+"company": "Ursa Major",
+"source": "denver-tech",
+"rank": 44
+},
+{
+"domain": "jumpcloud.com",
+"company": "JumpCloud",
+"source": "denver-tech",
+"rank": 45
+},
+{
+"domain": "logrhythm.com",
+"company": "LogRhythm",
+"source": "denver-tech",
+"rank": 46
+},
+{
+"domain": "conga.com",
+"company": "Conga",
+"source": "denver-tech",
+"rank": 47
+},
+{
+"domain": "redcanary.com",
+"company": "Red Canary",
+"source": "denver-tech",
+"rank": 48
+},
+{
+"domain": "automox.com",
+"company": "Automox",
+"source": "denver-tech",
+"rank": 49
+},
+{
+"domain": "strivehealth.com",
+"company": "Strive Health",
+"source": "denver-tech",
+"rank": 50
+},
+{
+"domain": "xactlycorp.com",
+"company": "Xactly",
+"source": "denver-tech",
+"rank": 51
+},
+{
+"domain": "homebot.ai",
+"company": "Homebot",
+"source": "denver-tech",
+"rank": 52
+},
+{
+"domain": "ulalaunch.com",
+"company": "United Launch Alliance (ULA)",
+"source": "denver-tech",
+"rank": null
+},
+{
+"domain": "name.com",
+"company": "Name.com",
+"source": "denver-tech",
+"rank": null
+},
+{
+"domain": "system76.com",
+"company": "System76",
+"source": "denver-tech",
+"rank": null
+},
+{
+"domain": "libertymedia.com",
+"company": "Liberty Media / Liberty Broadband",
+"source": "denver-tech",
+"rank": null
+},
+{
+"domain": "libertybroadband.com",
+"company": "Liberty Media / Liberty Broadband",
+"source": "denver-tech",
+"rank": null
+},
+{
+"domain": ".gov",
+"company": "US government (suffix rule)",
+"source": "gov",
+"rank": null
+},
+{
+"domain": ".mil",
+"company": "US government (suffix rule)",
+"source": "gov",
+"rank": null
+}
+]
