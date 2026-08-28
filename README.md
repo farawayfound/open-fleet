@@ -1,29 +1,55 @@
-# open-fleet
+```
+ ██████╗ ██████╗ ███████╗███╗   ██╗    ███████╗██╗     ███████╗███████╗████████╗
+██╔═══██╗██╔══██╗██╔════╝████╗  ██║    ██╔════╝██║     ██╔════╝██╔════╝╚══██╔══╝
+██║   ██║██████╔╝█████╗  ██╔██╗ ██║    █████╗  ██║     █████╗  █████╗     ██║
+██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║    ██╔══╝  ██║     ██╔══╝  ██╔══╝     ██║
+╚██████╔╝██║     ███████╗██║ ╚████║    ██║     ███████╗███████╗███████╗   ██║
+ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝    ╚═╝     ╚══════╝╚══════╝╚══════╝   ╚═╝
+```
+
+> 🚗💨 Round up your spare machines into one private **fleet** of LLMs.
 
 open-fleet is a self-hosted gateway and installer for running a fleet of
-heterogeneous local-LLM machines — Windows, macOS, and Linux; NVIDIA, AMD,
-Apple Silicon, or CPU-only — behind one OpenAI-compatible, keyed, metered API
+heterogeneous local-LLM machines behind one OpenAI-compatible, keyed, metered API
 with a dashboard. Point it at whatever hardware you already own, run the
 installer on each box, and get a single `/v1` endpoint that routes across all
 of them.
 
-## Why
+## 🧠 Why
 
 - **Heterogeneous hardware, one fleet.** A gaming desktop, a Mac laptop, an
-  old workstation with no GPU at all — open-fleet detects what each box has
+  old workstation with no GPU at all, open-fleet detects what each box has
   (OS, package manager, GPU backend, VRAM) and provisions the right engine for
   it, instead of asking you to standardize the hardware first.
 - **One keyed API.** Every box runs the same gateway. A "hub" gateway holds
   the peer list and routes requests to whichever peer can serve them fastest,
   so any OpenAI-compatible client can point at one URL and one key regardless
-  of which machine ends up answering.
+  of which machine ends up answering. 🎯
 - **Honest capacity.** Context windows are not a slider that lies. Each box
   reports the context window it can *actually* launch a given model with,
   computed from the model's real GGUF geometry against that box's measured
   VRAM — so a request is routed to a box that can hold it, or told plainly
   when it can't.
 
-## Quick start
+## 🏗️ Physical setup
+
+- **Pick one always-on box to be the hub.** The hub holds the peer list and
+  decides which peer answers each request — it doesn't need a GPU
+  (`engine.kind: none` is a perfectly good hub). An asleep hub is an
+  unreachable fleet.
+- **Put every box on one private network** — Tailscale is the easiest (each
+  box gets a stable `100.x` address that survives DHCP leases and renames),
+  but a VPN or a plain LAN works too. The hub reaches each peer at that
+  stable address, never at a public API URL.
+- **Peers listen on `0.0.0.0:8080`** so the hub can call their admin API; the
+  hub itself usually binds `127.0.0.1` (only a reverse proxy on the same box
+  ever calls it). The inference engine stays strictly on loopback — the
+  gateway is the only door.
+- **Keep the address you advertise** (`network.public_api_url`) away from any
+  SSO/login portal — a bearer request answered with a redirect reads as a
+  hang, not a 401.
+
+## 🚀 Quick start
 
 **Linux / macOS:**
 
@@ -47,9 +73,33 @@ Both bootstraps do one job: get to a Python 3.10+ interpreter, then hand off
 to `fleetctl`, the stdlib-only installer underneath. `--dry-run` / `-DryRun`
 runs every real check — the package manager is queried, files are compared,
 services are asked their state — without changing anything, so it's safe to
-run on a machine you're not sure about yet.
+run on a machine you're not sure about yet. 🧯
 
-## What you get after install
+**Deploy from a dev machine.** Keep one checkout, plan each box from its own
+detected facts (never plan one OS from another's), commit the plan, then let
+the box apply it for real:
+
+```bash
+ssh thebox 'cd open-fleet && python3 -m fleetctl detect --json' > facts.json
+python3 -m fleetctl plan --facts facts.json --host thebox --write
+git add hosts/thebox/host.yml && git commit -m "provision thebox"
+ssh thebox 'cd open-fleet && python3 -m fleetctl apply'
+```
+
+**Deploy from the orchestrator box (the hub).** Provision the hub first like
+any other box, then let it act as the control plane: on **each peer**, after
+it has run `apply` at least once (so it has an admin token), tell the hub
+about it:
+
+```bash
+python3 -m fleetctl register --hub <hub-name>
+```
+
+`register` prints the peer's entry (name, tailnet address, admin token) and
+the exact `curl` to paste into the hub; the peer list is the hub's own state.
+Point clients at the **hub's** `/v1` to get fleet-wide routing.
+
+## 🎁 What you get after install
 
 - A gateway listening on `:8080`, with `GET /health` for a liveness check.
 - A dashboard at `/admin/?token=<admin token>`. The admin token is written to
@@ -59,7 +109,7 @@ run on a machine you're not sure about yet.
   this box — commit it, since it's the box's record and the input to every
   future `apply`.
 
-## How it fits together
+## 🧩 How it fits together
 
 Every box runs the same gateway (`gateway/app.py`), which fronts a local
 inference engine and exposes three surfaces: `/v1` (OpenAI-compatible, bearer
@@ -69,7 +119,7 @@ keys), `/admin` (the dashboard, admin token or Cloudflare Access), and
 - **llama.cpp**, behind **llama-swap** (which loads/unloads models on
   demand) — for NVIDIA, AMD, Intel, and Apple Silicon GPUs.
 - **Ollama**, if it's already installed on the box — open-fleet adopts it
-  rather than replacing it.
+  rather than replacing it. 🤝
 - **none** — a routing-only box that serves nothing itself. This is normally
   the hub.
 
@@ -81,9 +131,27 @@ The hub's own dashboard shows the whole fleet; every other box's dashboard
 shows just itself.
 
 The inference engine on each box is bound to loopback; the gateway is the
-only network-facing, authenticated door.
+only network-facing, authenticated door. 🚪🔒
 
-## Supported platforms
+## 📋 Minimum requirements
+
+- **Python 3.10+** for `fleetctl` (stdlib-only — nothing else to install). On
+  Linux/macOS `install.sh` installs one for you. Windows needs an **elevated**
+  PowerShell session to install Python for all users and register the service.
+- **`bash` and `git`** on Linux/macOS; **`git` and an elevated PowerShell**
+  on Windows.
+- **A private network** that the hub can reach every peer over (Tailscale, a
+  VPN, or a LAN) — see **Physical setup**. A single box with no fleet needs no
+  `fleet.yml` at all.
+- **A GPU is optional.** A box with no GPU is a legitimate fleet member — CPU
+  inference, or a routing-only hub that serves nothing.
+- **One always-on box** to act as the hub.
+- **Enough RAM/VRAM for what you want to serve** — open-fleet sizes context
+  windows to real memory, not a slider. Routing classes: `big` (≥32 GB),
+  `gpu` (≥6 GB), `small`, or `fallback` (CPU-only). Model weights need disk
+  space too (often an external drive, or Ollama's own store).
+
+## 🖥️ Supported platforms
 
 | OS | Package family | Engines | GPU backend |
 |---|---|---|---|
@@ -98,7 +166,7 @@ CI runs the unit test suite on Ubuntu, macOS, and Windows, and a full
 detect-plan-apply-verify pass in a container for every apt/dnf/pacman/zypper
 family above.
 
-## Configuration
+## ⚙️ Configuration
 
 Runtime configuration is environment variables prefixed `LLMSTACK_`, written
 into each box's env file by the installer. Where those values come from is
@@ -135,7 +203,7 @@ covering the box's name, network address, engine, model storage path, and how
 much of its GPU it may use. See `docs/examples/` for annotated samples and
 [docs/usage.md](docs/usage.md) for a walkthrough of every field.
 
-## Updating
+## 🔄 Updating
 
 ```bash
 python -m fleetctl update
@@ -146,7 +214,7 @@ service the way that OS supervises it (systemd, a macOS cron keepalive, or a
 Windows scheduled task), and waits for `/health`. `--dry-run` and `--only
 <step>` both work here too.
 
-## Security model
+## 🔐 Security model
 
 - `/v1` is bearer-key auth, checked at the gateway that answers the request.
   Keys can carry an expiry and a request/token budget.
@@ -161,7 +229,7 @@ Windows scheduled task), and waits for `/health`. `--dry-run` and `--only
 - CI runs only on hosted runners. This project does not use or require
   self-hosted CI runners on any fleet machine.
 
-## Development
+## 🛠️ Development
 
 ```bash
 pip install -r gateway/requirements.txt -r gateway/requirements-dev.txt
@@ -169,7 +237,7 @@ ruff check .
 python -m pytest gateway/tests fleetctl/tests
 ```
 
-## Project status, contributing, license
+## 📦 Project status, contributing, license
 
 open-fleet is under active development. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose a change,
