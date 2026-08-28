@@ -47,6 +47,7 @@ import sqlite3
 import socket
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 from contextlib import asynccontextmanager, closing
@@ -1271,11 +1272,38 @@ def load_models() -> list[dict]:
     return out
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """Replace `path` with `text` in one step, without a shared temp name.
+
+    "<name>.tmp" is only safe while exactly one writer exists. Two overlapping
+    calls -- an admin save and the apply queue's rollback, a request and the
+    task that outlived it -- write the same temp file, and whichever replaces
+    second finds nothing to replace: FileNotFoundError, from the code whose
+    whole job is to make the write crash-safe. mkstemp gives every writer its
+    own file, so the loser of a race loses its content, not the process.
+
+    mkstemp also creates at 0600, which would quietly lock out the reader
+    running as another user (llama-swap reads the config this writes), so an
+    existing file's mode is carried over and a new one lands at 0644.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def save_models(models: list[dict]) -> None:
-    MODELS_JSON.parent.mkdir(parents=True, exist_ok=True)
-    tmp = MODELS_JSON.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(models, indent=2))
-    tmp.replace(MODELS_JSON)
+    write_atomic(MODELS_JSON, json.dumps(models, indent=2))
 
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
@@ -1399,10 +1427,7 @@ def render_swap_config(models: list[dict]) -> str:
 
 def write_swap_config(models: list[dict]) -> str:
     text = render_swap_config(models)
-    SWAP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    tmp = SWAP_CONFIG.with_suffix(".yaml.tmp")
-    tmp.write_text(text)
-    tmp.replace(SWAP_CONFIG)
+    write_atomic(SWAP_CONFIG, text)
     return text
 
 
@@ -12647,10 +12672,7 @@ def load_peers() -> list[dict]:
 
 
 def save_peers(peers: list[dict]) -> None:
-    PEERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = PEERS_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(peers, indent=2))
-    tmp.replace(PEERS_PATH)
+    write_atomic(PEERS_PATH, json.dumps(peers, indent=2))
     try:
         PEERS_PATH.chmod(0o600)  # peer admin tokens live in here
     except OSError:
