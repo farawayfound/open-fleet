@@ -2,6 +2,11 @@
 
 One installer for a fleet that is not uniform.
 
+*Written from inside the fleet it describes. The per-machine directories it
+talks about belong to that fleet and are not published — a clone starts with
+none, and grows one per box as you run the installer. See
+[hosts/README.md](../hosts/README.md).*
+
 ## The problem it was written for
 
 Fifteen host directories under `hosts/`, roughly 2,500 lines of bash and
@@ -46,8 +51,8 @@ this box think it has 44 GiB" has an answer with a file name in it.
 What survives into layer 3, after the rest have had their turn, is about a
 dozen values per box: its name, its address, the URL it publishes, which
 engine and backend, where its weights are, how much of the GPU it may use,
-and whether somebody sits in front of it. `hosts/gpu-desktop-1/host.yml` is 71 lines,
-most of them explaining themselves.
+and whether somebody sits in front of it. The gaming desktop's `host.yml` is
+71 lines, most of them explaining themselves.
 
 ## The commands
 
@@ -133,11 +138,11 @@ Every one of these was in the repo already, or was written and then caught.
 **llama.cpp's `/releases/latest` has no binaries in it.** Upstream tags every
 build as a *pre-release*, and GitHub's "latest" deliberately skips those — it
 answers `v0.3.0`, whose only asset is a text file naming the nightly tag.
-`hosts/gpu-desktop-1/install.ps1` asked for `latest` and then filtered for
-`bin-win-vulkan-x64.zip`, so it threw on every run.
-`hosts/apu-tablet-2/install.ps1` had hit this before and was fixed in place;
-gpu-desktop-1's copy of the same block was not. fleetctl lists `/releases` and takes
-the newest that actually carries the asset, and gpu-desktop-1 does now too.
+The gaming desktop's old `install.ps1` asked for `latest` and then filtered
+for `bin-win-vulkan-x64.zip`, so it threw on every run. A tablet's copy of the
+same script had hit this before and was fixed in place; the desktop's was not.
+fleetctl lists `/releases` and takes the newest that actually carries the
+asset, and the desktop's own installer does now too.
 
 **The CUDA runtime is not the CUDA build.**
 `cudart-llama-bin-win-cuda-12.4-x64.zip` contains
@@ -209,7 +214,7 @@ check is an apply.
 **`apply` would have deleted eight secrets from hub.** It rewrites
 `gateway.env` from the plan, and hub's file holds `HF_TOKEN`,
 `LLMSTACK_PUBLIC_INTAKE_TOKEN` and six `LLMSTACK_SMTP_*` values — the mail
-credentials `hosts/hub/daily-brief` sends with. None of them is anything
+credentials the hub's daily-brief job sends with. None of them is anything
 the plan can express. The admin token had a special case for exactly this
 shape of problem, and a rule that names one key does not generalise:
 `LLMSTACK_SMTP_PASSWORD` looks exactly like a key fleetctl writes. The rule is

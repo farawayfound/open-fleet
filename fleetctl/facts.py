@@ -152,6 +152,23 @@ def find_python() -> dict:
             "candidates": tried}
 
 
+def this_python() -> dict:
+    """The running interpreter, in the shape find_python() returns.
+
+    `--quick` exists to skip the readings that shell out, and find_python()
+    runs every candidate to ask its version. This one asks nothing -- but it
+    still has to carry `min`, or `detect --quick` greets a first-time reader
+    with "need >= None" in the first command the docs tell them to run. The
+    venv rule from _python_candidates applies here too: a disposable
+    `.venv/…/python` is not the interpreter a service should be pointed at.
+    """
+    exe = sys.executable
+    if sys.prefix != sys.base_prefix:
+        exe = getattr(sys, "_base_executable", "") or exe
+    return {"exe": exe, "version": platform.python_version(),
+            "min": ".".join(map(str, MIN_PYTHON)), "candidates": []}
+
+
 # --------------------------------------------------------------------------
 # the rest
 # --------------------------------------------------------------------------
@@ -409,8 +426,7 @@ def gather(quick: bool = False) -> dict:
         },
         "service_manager": service_manager(),
         "privilege": {"root": is_root(), "sudo_nopasswd": False if quick else can_sudo()},
-        "python": {"exe": sys.executable, "version": platform.python_version()}
-        if quick else find_python(),
+        "python": this_python() if quick else find_python(),
         "cpu": {"model": hw.cpu_model(), "count": os.cpu_count()},
         "ram_bytes": ram,
         "ram_gb": round(ram / 1024 ** 3, 1) if ram else None,
