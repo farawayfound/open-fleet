@@ -77,6 +77,27 @@
   .pill.no{color:var(--bad);border-color:#5b2530;background:#241216}
   .pill.mid{color:var(--warn);border-color:#5b4325;background:#241d12}
   .pill.dim{color:var(--muted)}
+  /* The routing switch. A switch and not a button because it is showing a
+     state that persists, not offering an action: the position of the knob is
+     the answer to "is the hub sending this box work", readable without
+     clicking anything and without reading a label. */
+  .krow{display:flex;gap:8px;align-items:center;justify-content:space-between;
+        margin-top:8px;padding-top:7px;border-top:1px solid var(--line)}
+  .kstate{font-family:var(--mono);font-size:11px;color:var(--good);margin-right:7px}
+  .kstate.off{color:var(--bad)}
+  .ksw{position:relative;width:38px;height:21px;flex:none;padding:0;border-radius:999px;
+       border:1px solid #255b39;background:#12241a;cursor:pointer;vertical-align:middle;
+       transition:background .15s,border-color .15s}
+  .ksw .kknob{position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;
+              background:var(--good);transition:transform .15s,background .15s}
+  .ksw[aria-checked="true"] .kknob{transform:translateX(17px)}
+  .ksw[aria-checked="false"]{background:#241216;border-color:#5b2530}
+  .ksw[aria-checked="false"] .kknob{background:var(--bad)}
+  .ksw:hover{border-color:var(--accent)}
+  .ksw:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  /* In flight. The knob has already moved -- this only says the hub has not
+     confirmed it yet, so a failure that slides it back is not a surprise. */
+  .ksw.busy{opacity:.55;cursor:progress}
   .row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
   .mono{font-family:var(--mono)}
   .muted{color:var(--muted)}
@@ -114,6 +135,13 @@
   .ldot{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:6px;vertical-align:-1px}
   .machine{cursor:pointer;transition:border-color .15s}
   .machine:hover{border-color:var(--accent)}
+  /* An offline card still carries its last-known numbers, so it has to read
+     as stale at a glance rather than as live telemetry. The killswitch row
+     inside it stays at full strength -- it is the one control that still
+     does something on a box that is down. */
+  .machine.off{opacity:.62}
+  .machine.off:hover{opacity:1}
+  .machine.off .krow{opacity:1}
   .machine .mname{font-size:15px;font-weight:600;font-family:var(--mono)}
   .machine .mrow{display:flex;justify-content:space-between;font-size:12px;
                  color:var(--muted);margin-top:4px;gap:8px}
@@ -202,8 +230,8 @@
     Bandwidth and TFLOPS are spec-sheet estimates; unified-memory boxes count
     their GPU-addressable share under both VRAM and DRAM.</div>
 
-  <h2 class="sec">Online machines <span class="muted" style="text-transform:none">
-    — sorted by memory bandwidth × capacity</span></h2>
+  <h2 class="sec">All machines <span class="muted" style="text-transform:none">
+    — online first by memory bandwidth × capacity; offline shows last-known state</span></h2>
   <div class="grid g3" id="machines"></div>
 
   <h2 class="sec">Network map</h2>
@@ -1594,31 +1622,93 @@ const servingStr = h => {
 };
 
 function renderMachines(hosts) {
-  const on = hosts.filter(h => h.online && (h.specs || {}).role !== "hub")
-    .sort((a, b) => ((b.specs || {}).mem_bw_gbs || 0) - ((a.specs || {}).mem_bw_gbs || 0)
-                 || hostRes(b).ramT - hostRes(a).ramT);
-  const hub = hosts.filter(h => h.online && (h.specs || {}).role === "hub");
-  $("#machines").innerHTML = [...on, ...hub].map(h => {
-    const st = h.status.host, sp = h.specs || {}, r = hostRes(h);
+  const peers = hosts.filter(h => (h.specs || {}).role !== "hub");
+  const up = peers.filter(h => h.online);
+  const down = peers.filter(h => !h.online);
+  const bw = h => (h.specs || {}).mem_bw_gbs || 0;
+  const byRank = (a, b) => bw(b) - bw(a) || hostRes(b).ramT - hostRes(a).ramT;
+  up.sort(byRank); down.sort(byRank);
+  const hub = hosts.filter(h => (h.specs || {}).role === "hub");
+  const card = h => {
+    const st = (h.status && h.status.host) || {};
+    const sp = h.specs || {}, r = hostRes(h);
     const nic = ((st.net || {}).interfaces || [])[0];
     const serving = servingStr(h);
-    return `<div class="card machine" onclick="switchHost('${esc(h.name)}')">
+    const killed = h.routed === false;
+    // No killswitch on the hub, and none on whichever box is serving this
+    // page: `routed` lives in the hub's peers.json, so this box is not in it
+    // and a PUT naming itself would only ever 404. Both are also the two
+    // machines you would least want a stray click to take out of the fleet.
+    const isHub = sp.role === "hub" || h.kind === "self";
+    // Offline cards behave like the offline host pills: there is no live
+    // session to switch to, but the last-known snapshot is worth opening.
+    const open = h.online ? "switchHost" : "showHostDetail";
+    // Status: hub / offline (red) / serving (green) / idle. A killswitched
+    // box carries its state next to it, whether it is up or not.
+    let pill;
+    if (isHub) pill = '<span class="pill dim">hub</span>';
+    else if (!h.online) pill = '<span class="pill no">offline</span>'
+      + (killed ? ' <span class="pill no">killed</span>' : "");
+    else pill = (serving ? '<span class="pill ok">serving</span>' : '<span class="pill dim">idle</span>')
+      + (killed ? ' <span class="pill no">killed</span>' : "");
+    return `<div class="card machine${h.online ? "" : " off"}" onclick="${open}('${esc(h.name)}')">
       <div class="row" style="justify-content:space-between">
         <span class="mname">${esc(h.name)}</span>
-        <span>${sp.role === "hub" ? '<span class="pill dim">hub</span>' : ""}
-          ${serving ? '<span class="pill ok">serving</span>' : '<span class="pill dim">idle</span>'}</span>
+        <span>${pill}</span>
       </div>
       <div class="mrow"><span>${esc(sp.cpu || "")}${sp.gpu ? " · " + esc(sp.gpu) : ""}</span></div>
       ${serving ? `<div class="mrow"><span>serving</span><b style="text-align:right">${serving}</b></div>` : ""}
       <div class="mrow"><span>memory bandwidth</span><b>${sp.mem_bw_gbs ? "~" + sp.mem_bw_gbs + " GB/s" : "–"}</b></div>
       <div class="mrow"><span>DRAM</span><b>${fmtB(r.ramU)} / ${fmtB(r.ramT)}</b></div>
       ${r.vramT ? `<div class="mrow"><span>VRAM</span><b>${fmtB(r.vramU)} / ${fmtB(r.vramT)}</b></div>` : ""}
-      <div class="mrow"><span>CPU · ${st.cpu_count} threads</span><b>${(st.cpu_percent || 0).toFixed(0)}%</b></div>
+      <div class="mrow"><span>CPU · ${st.cpu_count || 0} threads</span><b>${(st.cpu_percent || 0).toFixed(0)}%</b></div>
       ${sp.gpu_tflops ? `<div class="mrow"><span>GPU compute</span><b>${r.tf ? (r.tfU).toFixed(1) + " / " + r.tf + " TF" : "–"}</b></div>` : ""}
       ${nic ? `<div class="mrow"><span>${esc(nic.name)}${nic.wireless === false ? " (wired)" : " (wifi)"}</span>
         <b>${fmtR(nic.rx_rate)} ↓ · ${fmtR(nic.tx_rate)} ↑</b></div>` : ""}
+      ${isHub ? "" : `<div class="krow"><span class="muted">routing</span><span>
+        <span class="kstate${killed ? " off" : ""}">${killed ? "off" : "on"}</span>
+        <button class="ksw" role="switch" aria-checked="${killed ? "false" : "true"}"
+          title="${killed ? KSW_OFF : KSW_ON}" aria-label="routing to ${esc(h.name)}"
+          onclick="event.stopPropagation(); toggleRouting(this, '${esc(h.name)}')"><span class="kknob"></span></button>
+      </span></div>`}
     </div>`;
-  }).join("") || `<div class="card muted">nothing online</div>`;
+  };
+  $("#machines").innerHTML = [...up, ...down, ...hub].map(card).join("")
+    || `<div class="card muted">no machines registered</div>`;
+}
+
+// The killswitch: the switch flips the hub's routing flag for this peer. The
+// box stays registered and visible on this page -- online or not -- but the
+// hub stops sending any request its way until the switch goes back on.
+// This page only ever loads from the hub, so the PUT goes straight at it.
+const KSW_ON = "the hub may route requests to this box";
+const KSW_OFF = "the hub is not sending this box any work";
+
+function setSwitch(btn, on, busy) {
+  btn.setAttribute("aria-checked", on ? "true" : "false");
+  btn.setAttribute("title", on ? KSW_ON : KSW_OFF);
+  btn.classList.toggle("busy", !!busy);
+  const w = btn.parentElement.querySelector(".kstate");
+  if (w) { w.textContent = on ? "on" : "off"; w.classList.toggle("off", !on); }
+}
+
+async function toggleRouting(btn, name) {
+  if (btn.classList.contains("busy")) return;   // one flip in flight at a time
+  const on = btn.getAttribute("aria-checked") === "true";
+  // Move first. A switch whose knob waits on a round trip reads as a switch
+  // that did nothing, which is the whole reason this replaced a button and a
+  // toast: the position of the knob is the feedback, so nothing else has to
+  // announce the result. If the hub refuses, it slides back and says why.
+  setSwitch(btn, !on, true);
+  try {
+    await rawApi("/peers/" + encodeURIComponent(name) + "/routed",
+      {method: "PUT", body: {routed: !on}});
+    setSwitch(btn, !on, false);
+    loadHome();                                  // redraw from the hub's answer
+  } catch (e) {
+    setSwitch(btn, on, false);
+    toast("routing " + name + ": " + e.message, true);
+  }
 }
 
 function renderNetmap(hosts) {

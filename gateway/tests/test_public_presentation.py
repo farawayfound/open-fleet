@@ -310,9 +310,14 @@ def fleet(monkeypatch, *, running=(), fits=None, engine=None, reachable=None):
                          "source": {}} for h in hosts},
         engine=engine or {h: "llama-swap" for h in hosts},
         reachable=set(hosts) if reachable is None else set(reachable),
+        warm={},
     )
     monkeypatch.setattr(gw, "load_peers", lambda: [
         {"name": h, "url": "http://" + h + ":8080", "token": "t"} for h in hosts])
+    # This process is "test-hub", which the spec sheet does not name as the
+    # hub; the loop is hub-only now (see test_preload_dedicated), so say so
+    # the way a fleet with an unlisted hub would.
+    monkeypatch.setenv("LLMSTACK_PRELOAD", "on")
 
     async def _routes(force: bool = False):
         return {}

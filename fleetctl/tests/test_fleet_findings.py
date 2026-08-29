@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -840,3 +841,192 @@ class TestTheHubIsNotAnApiClient:
         e = self.entry(capsys, linux_facts, empty_repo, tmp_path,
                        network__tailnet_ip="100.64.0.36")
         assert e["token"] == "peer-token"
+
+
+class TestAModeIsNotAPermissionOnWindows:
+    """`ctx.write(..., mode=0o600)` reached nothing on the Windows boxes.
+
+    The env file holding LLMSTACK_ADMIN_TOKEN is written with mode 0o600, and
+    on Linux it lands 0640 root:llmstack. On Windows the chmod was skipped --
+    rightly, because a POSIX mode there only toggles the read-only bit and
+    cannot take a group off a file -- and nothing took its place, so the file
+    kept whatever it inherited from its parent. On apu-tablet-2 that is
+    `Authenticated Users: Modify`: every account on the box could read the
+    gateway's admin token, and replace it.
+
+    Why a green suite never noticed: the tests that assert 0o600 all run on
+    the linux_facts fixture. The family comes from the plan rather than from
+    the machine running pytest, so these can prove the Windows half on any
+    runner -- which is what the old ones were missing, not luck.
+    """
+
+    def _ran(self, facts, repo, tmp_path, mode):
+        """The commands write() issues, with the shell stubbed out."""
+        ctx = ctx_for(facts, repo)
+        issued = []
+        ctx.run = lambda argv, **kw: issued.append([str(a) for a in argv])
+        ctx.write(tmp_path / "gateway.env.cmd",
+                  "set LLMSTACK_ADMIN_TOKEN=not-a-real-token\n", mode=mode)
+        return issued
+
+    def test_a_secret_on_windows_gets_its_acl_narrowed(self, windows_facts,
+                                                       empty_repo, tmp_path):
+        issued = self._ran(windows_facts, empty_repo, tmp_path, 0o600)
+        assert issued, "0600 on Windows did nothing at all -- the finding"
+        assert all(c[0] == "icacls" for c in issued)
+        # /reset first: a stranger granted by hand is an explicit entry, and
+        # /inheritance:r alone leaves explicit entries exactly where they are.
+        assert issued[0][2] == "/reset"
+        assert "/inheritance:r" in issued[1], "inherited ACEs are the exposure"
+
+    def test_it_names_sids_rather_than_localised_groups(self, windows_facts,
+                                                        empty_repo, tmp_path):
+        # "Administrators" is not what that group is called on a box installed
+        # in German, and icacls does not translate for you.
+        argv = [c for c in self._ran(windows_facts, empty_repo, tmp_path, 0o600)
+                if "/grant:r" in c][0]
+        assert "*S-1-5-18:(F)" in argv       # SYSTEM -- the gateway runs as it
+        assert "*S-1-5-32-544:(F)" in argv   # Administrators -- fleetctl does
+
+    def test_a_file_meant_to_be_readable_is_left_alone(self, windows_facts,
+                                                       empty_repo, tmp_path):
+        # Wrappers and rendered configs are 0644 on purpose. Narrowing those
+        # would be a different outage, not a fix.
+        assert self._ran(windows_facts, empty_repo, tmp_path, 0o644) == []
+
+    def test_linux_still_gets_the_mode_and_no_icacls(self, linux_facts,
+                                                     empty_repo, tmp_path):
+        assert self._ran(linux_facts, empty_repo, tmp_path, 0o600) == []
+
+    def test_no_icacls_does_not_take_the_apply_down_with_it(self, windows_facts,
+                                                            empty_repo,
+                                                            tmp_path):
+        # subprocess raises FileNotFoundError for a missing binary rather than
+        # returning non-zero, so check=False does not cover it.
+        def gone(argv, **kw):
+            raise FileNotFoundError(2, "No such file or directory", "icacls")
+
+        ctx = ctx_for(windows_facts, empty_repo)
+        ctx.run = gone
+        p = tmp_path / "gateway.env.cmd"
+        assert ctx.write(p, "set LLMSTACK_ADMIN_TOKEN=x\n", mode=0o600) is True
+        assert p.is_file(), "the file must still be written"
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="needs a real Windows ACL to inspect")
+    def test_on_a_real_file_the_broad_groups_are_gone(self, windows_facts,
+                                                      empty_repo, tmp_path):
+        ctx = ctx_for(windows_facts, empty_repo)
+        p = tmp_path / "gateway.env.cmd"
+        ctx.write(p, "set LLMSTACK_ADMIN_TOKEN=not-a-real-token\n", mode=0o600)
+        acl = subprocess.run(["icacls", str(p)], capture_output=True,
+                             text=True).stdout
+        assert "Authenticated Users" not in acl, acl
+        assert "\\Users:" not in acl, acl
+        assert ctx.acl_strangers(p) == []
+        # And the account that wrote it can still read it back -- write()
+        # compares content to decide "unchanged", so a file it cannot read is
+        # a file it rewrites on every run.
+        assert p.read_text(encoding="utf-8").startswith("set ")
+
+
+class TestAnOkThatCannotSeeThePermission:
+    """`fleetctl apply --only envfile` said `ok` about a file every account
+    on the box could read.
+
+    The first fix narrowed the ACL inside write() -- which only runs when the
+    content changed. A box provisioned before that fix has the right content
+    already, so write() never ran, restrict() never ran, and check() compared
+    text and called it ok. Measured in a sandbox on apu-tablet-2, 2026-08-28:
+    widen the ACL by hand, apply, and the ACL is exactly as wide afterwards
+    with a green run in between.
+
+    So the check has to see the permission, and the apply has to fix it on a
+    file it did not write. Both halves are here; the last test proves them
+    against a real ACL where there is one.
+    """
+
+    def _provisioned(self, windows_facts, empty_repo, tmp_path):
+        """A sandbox with the env file already written, icacls stubbed."""
+        ctx = ctx_for(windows_facts, empty_repo, tmp_path)
+        issued = []
+        ctx.run = lambda argv, **kw: issued.append([str(a) for a in argv])
+        step = EnvFile()
+        step.apply(ctx)
+        issued.clear()
+        return ctx, step, issued
+
+    def test_right_content_wide_acl_is_drift_not_ok(self, windows_facts,
+                                                    empty_repo, tmp_path):
+        ctx, step, _ = self._provisioned(windows_facts, empty_repo, tmp_path)
+        ctx.acl_strangers = lambda p: ["NT AUTHORITY\\Authenticated Users"]
+        c = step.check(ctx)
+        assert c.state == DRIFT, c
+        assert "Authenticated Users" in " ".join(c.plan)
+
+    def test_right_content_narrow_acl_is_ok(self, windows_facts, empty_repo,
+                                            tmp_path):
+        ctx, step, _ = self._provisioned(windows_facts, empty_repo, tmp_path)
+        ctx.acl_strangers = lambda p: []
+        assert step.check(ctx).state == OK
+
+    def test_apply_on_unchanged_content_still_narrows(self, windows_facts,
+                                                      empty_repo, tmp_path):
+        ctx, step, issued = self._provisioned(windows_facts, empty_repo,
+                                              tmp_path)
+        step.apply(ctx)
+        assert any("/grant:r" in c for c in issued), \
+            "unchanged content skipped write(), and with it the ACL"
+
+    def test_linux_asks_no_such_question(self, linux_facts, empty_repo,
+                                         tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        assert ctx.acl_strangers(tmp_path / "anything") is None
+        assert ctx.restrict(tmp_path / "anything") is False
+
+    def test_the_hint_speaks_the_box_s_language(self, windows_facts,
+                                                linux_facts, empty_repo):
+        assert "sudo" in ctx_for(linux_facts, empty_repo).elevation_hint()
+        assert "elevated" in ctx_for(windows_facts, empty_repo).elevation_hint()
+
+    def test_the_probe_does_not_inherit_pwsh_s_module_path(self, windows_facts,
+                                                          empty_repo, tmp_path,
+                                                          monkeypatch):
+        # Windows PowerShell launched from pwsh 7 inherits a PSModulePath it
+        # cannot use; Get-Acl then fails to import and the probe reports
+        # nothing. Same command, drift from Git Bash, ok from pwsh.
+        monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+        ctx = ctx_for(windows_facts, empty_repo)
+        p = tmp_path / "gateway.env.cmd"
+        p.write_text("set X=1\n", encoding="utf-8")
+        seen = {}
+
+        def fake_probe(argv, timeout=60, env=None):
+            seen["env"] = env
+            return SimpleNamespace(returncode=0, stdout="ME|S-1-5-21-1\n")
+
+        ctx.probe = fake_probe
+        assert ctx.acl_strangers(p) == []
+        assert seen["env"] is not None
+        assert not any(k.upper() == "PSMODULEPATH" for k in seen["env"])
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="needs a real Windows ACL to inspect")
+    def test_a_hand_widened_file_is_seen_and_narrowed(self, windows_facts,
+                                                      empty_repo, tmp_path):
+        ctx = ctx_for(windows_facts, empty_repo)
+        p = tmp_path / "gateway.env.cmd"
+        text = "set LLMSTACK_ADMIN_TOKEN=not-a-real-token\n"
+        ctx.write(p, text, mode=0o600)
+        assert ctx.acl_strangers(p) == []
+        # What the live boxes look like: an explicit grant to everyone.
+        subprocess.run(["icacls", str(p), "/grant", "*S-1-5-11:(M)"],
+                       check=True, capture_output=True)
+        seen = ctx.acl_strangers(p)
+        assert seen and any("Authenticated Users" in s for s in seen), seen
+        # Unchanged content: write() must not be what anyone relies on.
+        assert ctx.write(p, text, mode=0o600) is False
+        assert ctx.acl_strangers(p), "write() of unchanged content narrowed it?"
+        assert ctx.restrict(p) is True
+        assert ctx.acl_strangers(p) == []
+        assert p.read_text(encoding="utf-8") == text

@@ -848,7 +848,7 @@ class TestPublicCatalogueEndpoints:
         r = client.get("/public/api/models")
         assert r.status_code == 200
         body = r.json()
-        assert len(body["models"]) == 16
+        assert len(body["models"]) == 17
         ids = {m["public_id"] for m in body["models"]}
         assert "gemma4-31b-qat" in ids
         assert "qwen3.8-9b-distill" in ids
