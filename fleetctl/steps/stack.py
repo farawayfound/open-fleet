@@ -354,9 +354,9 @@ class EnvFile(Step):
             # the box off the fleet in a way nothing reports.
             raise RuntimeError(
                 f"{ctx.plan['paths']['envfile']} exists and this account cannot "
-                f"read it ({why}). Re-run with sudo -- writing a new file here "
-                f"would mint a new admin token and break the hub's entry for "
-                f"this peer.")
+                f"read it ({why}); {ctx.elevation_hint()}. Writing a new file "
+                f"here would mint a new admin token and break the hub's entry "
+                f"for this peer.")
         current = current or ""
         m = re.search(r"^(?:set |export )?LLMSTACK_ADMIN_TOKEN=(.*)$", current, re.M)
         if m and m.group(1).strip():
@@ -379,13 +379,24 @@ class EnvFile(Step):
             # by an apply that overwrote it -- see _token().
             return Check(BLOCKED,
                          f"{path} is there and this account cannot read it "
-                         f"({why}); re-run with sudo to compare it")
+                         f"({why}); {ctx.elevation_hint()} to compare it")
         try:
             want = self._render(ctx, self._token(ctx),
                                 self.foreign(ctx, current))
         except RuntimeError as exc:
             return Check(BLOCKED, str(exc))
         if current == want:
+            strangers = ctx.acl_strangers(path)
+            if strangers:
+                # Right content, wrong permission. On Linux the mode came
+                # with the write; on Windows a file written before
+                # Ctx.restrict() existed kept its parent's ACL, and a check
+                # that only compared text said `ok` about an admin token
+                # every local account could read.
+                return Check(DRIFT,
+                             f"readable by {len(strangers)} account(s) beyond "
+                             f"SYSTEM and Administrators",
+                             [f"narrow the ACL (drop {', '.join(strangers)})"])
             return Check(OK, path)
         if current is None:
             return Check(MISSING, "no env file",
@@ -407,6 +418,11 @@ class EnvFile(Step):
         # the grants step, which is the one that knows the account exists.
         if ctx.write(ctx.plan["paths"]["envfile"], text, mode=0o600):
             ctx.did(f"wrote {ctx.plan['paths']['envfile']}")
+        elif ctx.restrict(ctx.plan["paths"]["envfile"]):
+            # Same content, so write() left it alone -- and left its ACL
+            # alone. This is the path a box provisioned before restrict()
+            # existed takes: the file is right, the permission is not.
+            ctx.did(f"narrowed the ACL on {ctx.plan['paths']['envfile']}")
 
 
 def _diff_keys(a: str, b: str) -> list[tuple[str, str]]:
@@ -488,8 +504,14 @@ class Wrappers(Step):
                 "#!/bin/bash\n"
                 f'source "{envf}"\n'
                 f'cd "{p["gateway"]}"\n'
+                # --timeout-graceful-shutdown: the Macs are supervised by cron
+                # and restarted with `pkill -f "uvicorn app:app"`, which is a
+                # plain SIGTERM -- so the drain hook in app.py gets its chance
+                # here too, and an answer in flight ends as a framed 503
+                # instead of a severed socket.
                 f'exec "{py}" app:app --host "$LLMSTACK_BIND" '
-                f'--port "$LLMSTACK_PORT" --proxy-headers --timeout-keep-alive 75\n')
+                f'--port "$LLMSTACK_PORT" --proxy-headers --timeout-keep-alive 75 '
+                f'--timeout-graceful-shutdown 25\n')
             if ctx.plan["engine"]["llama_swap"]:
                 out[shapes.join(ctx.family, binp, "run-llama-swap.sh")] = (
                     "#!/bin/bash\n"

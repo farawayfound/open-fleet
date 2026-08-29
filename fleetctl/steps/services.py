@@ -37,11 +37,28 @@ EnvironmentFile={envfile}
 ExecStart={venv}/bin/uvicorn app:app \\
     --host ${{LLMSTACK_BIND}} --port ${{LLMSTACK_PORT}} \\
     --proxy-headers --forwarded-allow-ips 127.0.0.1 \\
-    --timeout-keep-alive 75
+    --timeout-keep-alive 75 \\
+    --timeout-graceful-shutdown 25
 
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
+
+# Long enough to END the answers in flight, and stated here because the
+# distro default cannot be trusted to be: Mint ships
+# DefaultTimeoutStopSec=10s in /etc/systemd/system.conf.d/50_linuxmint.conf,
+# and on apu-box-1 that turned a routine reconcile deploy into SIGKILL ten
+# seconds into a drain -- two Copilot streams cut mid-body, which reaches a
+# client through cloudflared as ERR_HTTP2_PROTOCOL_ERROR.
+#
+# The two numbers are a pair, and the ORDER matters. uvicorn gives the drain
+# 25 s and then cancels whatever is left; systemd allows 30 s before it
+# resorts to SIGKILL. Keeping uvicorn's the smaller one means the process
+# always gets to finish on its own terms -- the app's SIGTERM hook frames a
+# 503 onto every open stream (see install_drain_signal_handlers in app.py)
+# and exits -- with SIGKILL left as the backstop it should be, not the
+# routine outcome it was.
+TimeoutStopSec=30
 
 # The gateway shells out to `sudo systemctl restart llama-swap` when the model
 # set changes, so privilege escalation cannot be blanket-disabled here. The

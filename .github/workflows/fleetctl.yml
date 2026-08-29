@@ -287,7 +287,7 @@ jobs:
       - name: bash parses
         run: |
           for f in install.sh deploy-gateway.sh push.sh hosts/linux/grants.sh \
-                   gateway/bin/llmstack-gpuconf; do
+                   hosts/darwin/close-ollama-port.sh gateway/bin/llmstack-gpuconf; do
             bash -n "$f" && echo "ok  $f"
           done
       - name: the documented first command works
@@ -312,7 +312,7 @@ jobs:
         shell: pwsh
         run: |
           $errs = $null
-          foreach ($f in @("install.ps1", "hosts/harden-gateway-task.ps1")) {
+          foreach ($f in @("install.ps1", "hosts/windows/harden-gateway-task.ps1")) {
             $null = [System.Management.Automation.Language.Parser]::ParseFile(
               (Resolve-Path $f), [ref]$null, [ref]$errs)
             if ($errs) { $errs | ForEach-Object { $_.Message }; exit 1 }

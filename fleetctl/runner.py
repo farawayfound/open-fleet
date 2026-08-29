@@ -153,7 +153,8 @@ class Ctx:
                              + "\n  ".join(out.splitlines()[-12:]))
         return r
 
-    def probe(self, argv: Sequence[str], timeout: int = 60):
+    def probe(self, argv: Sequence[str], timeout: int = 60,
+              env: dict | None = None):
         """A read-only command whose failure is an answer, not an error.
 
         Always runs, even under --dry-run: a dry run whose checks did not
@@ -162,7 +163,7 @@ class Ctx:
         """
         try:
             return subprocess.run([str(a) for a in argv], capture_output=True,
-                                  text=True, timeout=timeout)
+                                  text=True, timeout=timeout, env=env)
         except Exception:  # noqa: BLE001
             return None
 
@@ -292,7 +293,129 @@ class Ctx:
                 target.chmod(mode)
             except OSError:
                 pass
+        elif not mode & 0o004:
+            self.restrict(target)
         return True
+
+    # Well-known SIDs rather than names: "Administrators" is localised, and
+    # icacls on a non-English install does not answer to the English word.
+    _SECRET_ACL = ("*S-1-5-18:(F)",       # NT AUTHORITY\SYSTEM -- the gateway
+                   "*S-1-5-32-544:(F)")   # BUILTIN\Administrators -- fleetctl
+    # Who may sit on a secret's ACL without that being a finding: the two
+    # above, OWNER RIGHTS (S-1-3-4, an alias for whoever owns the file), and
+    # the account running this -- restrict() says why it keeps itself.
+    _SECRET_SIDS = frozenset({"S-1-5-18", "S-1-5-32-544", "S-1-3-4"})
+
+    def restrict(self, p: str | Path) -> bool:
+        """The Windows half of `mode=0o600`. A no-op elsewhere.
+
+        chmod on Windows toggles the read-only bit and nothing else -- it
+        cannot take a group off a file -- so write() skips it there, and
+        until this existed a secret kept whatever it inherited from its
+        parent. For C:\\llmstack that is `Authenticated Users: Modify`:
+        every account on the box could read the gateway's admin token, and
+        replace it. The mode was never wrong, it just had no effect on half
+        the fleet. Found on apu-tablet-2, 2026-08-28.
+
+        Two icacls calls, and the order is the point. `/reset` throws away
+        every explicit entry -- a stranger somebody granted by hand is
+        explicit, and `/inheritance:r` on its own would have kept it -- and
+        leaves only what the parent hands down; the second call cuts that
+        off and grants exactly the list above. Whatever the file carried
+        before, it ends with these entries and no others.
+
+        The writing account keeps an entry, because write() decides
+        "unchanged" by reading the file back -- an account locked out of its
+        own output cannot tell unchanged from unreadable, so it would rewrite
+        on every run and take idempotence with it.
+
+        Returns whether it ran, so a caller can report "narrowed" only where
+        that means something.
+        """
+        if self.family != "windows":
+            return False
+        target = self.path(p)
+        grants = list(self._SECRET_ACL)
+        user = os.environ.get("USERNAME")
+        if user:
+            grants.append(f"{user}:(F)")
+        try:
+            self.run(["icacls", str(target), "/reset"], check=False)
+            self.run(["icacls", str(target), "/inheritance:r", "/grant:r",
+                      *grants], check=False)
+        except OSError:
+            # No icacls on PATH -- a stripped image, or a System32 that is not
+            # on it. The file is written either way and the narrowing simply
+            # did not take, which is how the chmod above fails too. A secret
+            # that lands wide is a worse outcome than this, but a provisioning
+            # run that dies here is worse than both.
+            return False
+        return True
+
+    def acl_strangers(self, p: str | Path) -> list[str] | None:
+        """Accounts that can reach a secret and have no business there.
+
+        Windows only. None means "could not tell" -- not Windows, no file, or
+        nothing to ask -- and a caller must not read that as clean. Names
+        come back for the report; the comparison is on SIDs, because the
+        English words are not what a German box calls its groups.
+
+        This is what lets a check() SEE the exposure. write() narrows only
+        the file it just wrote, and a file whose content already matches the
+        plan is never written -- so on a box provisioned before restrict()
+        existed the ACL stayed wide and `apply` said `ok` about it. A check
+        that compares text cannot report a permission, and this is the one
+        file where the permission is the point.
+        """
+        if self.family != "windows":
+            return None
+        target = self.path(p)
+        if not target.is_file():
+            return None
+        lit = str(target).replace("'", "''")
+        script = (
+            "$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+            "'ME|' + $me; "
+            f"foreach ($a in (Get-Acl -LiteralPath '{lit}').Access) {{ "
+            "$sid = try { $a.IdentityReference.Translate("
+            "[Security.Principal.SecurityIdentifier]).Value } "
+            "catch { $a.IdentityReference.Value }; "
+            "'ACE|' + $sid + '|' + $a.IdentityReference.Value }"
+        )
+        # Windows PowerShell, not pwsh: it is on every box, and it is what
+        # Get-Acl ships with. Launched from a pwsh 7 shell it inherits a
+        # PSModulePath it cannot use and Get-Acl fails to load -- the probe
+        # then fails, the check says "unknown", and an operator in an
+        # elevated pwsh sees `ok` about a file that is wide open. Measured
+        # on apu-tablet-2: the same command reported drift from Git Bash and
+        # ok from pwsh. The child gets a clean one.
+        env = {k: v for k, v in os.environ.items()
+               if k.upper() != "PSMODULEPATH"}
+        r = self.probe(["powershell", "-NoProfile", "-NonInteractive",
+                        "-Command", script], env=env)
+        if r is None or r.returncode != 0:
+            self.note(f"could not read the ACL of {self.display(p)}; "
+                      f"treating it as unknown, not as clean")
+            return None
+        me = ""
+        rows: list[tuple[str, str]] = []
+        for line in (r.stdout or "").splitlines():
+            parts = line.strip().split("|")
+            if parts[0] == "ME" and len(parts) == 2:
+                me = parts[1]
+            elif parts[0] == "ACE" and len(parts) == 3:
+                rows.append((parts[1], parts[2]))
+        allowed = set(self._SECRET_SIDS)
+        if me:
+            allowed.add(me)
+        return sorted({name for sid, name in rows if sid not in allowed})
+
+    def elevation_hint(self) -> str:
+        """How "re-run with more privilege" is said on this box."""
+        if self.family == "windows":
+            return ("re-run from an elevated shell (Run as administrator, or "
+                    "over ssh)")
+        return "re-run with sudo"
 
     def copy(self, src: str | Path, dst: str | Path, mode: int = 0o644) -> bool:
         source = Path(src)

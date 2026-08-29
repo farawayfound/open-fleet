@@ -42,6 +42,7 @@ import platform
 import re
 import secrets
 import shutil
+import signal
 import smtplib
 import sqlite3
 import socket
@@ -989,7 +990,30 @@ DEFAULT_MODEL_RECORD = {
     # content -- which reads as a broken endpoint from a coding agent. "off"
     # suppresses the thinking phase entirely.
     "reasoning": "auto",
+    # Seconds idle before llama-swap unloads the model; 0 means never. A box
+    # whose job is to hold one model warm sets 0 on that model and nothing
+    # else, so the swap slot is only ever taken from it by an explicit request
+    # for something else -- never by a timer.
     "ttl": 900,
+    # Load at llama-swap start-up, before any request arrives. Rendered as the
+    # swap config's hooks.on_startup.preload. With ttl 0 this is what "warm on
+    # boot" means for a box that serves one model and does nothing else: the
+    # cold load is paid once, when the machine comes up, instead of by whoever
+    # sends the first request after every reboot. Only one enabled model per
+    # box may carry it -- the swap group is exclusive, so a second preload
+    # would just evict the first.
+    "preload": False,
+    # Never evicted. Rendered into its own llama-swap group -- persistent,
+    # non-swapping -- beside the main exclusive group, so a request for any
+    # OTHER model loads that model next to this one instead of in its place.
+    # Implies preload. For a box with a small always-on model (a 9B distill
+    # at ~10 GiB) and a budget that can hold a second, larger model beside
+    # it: the always-on one stops paying a cold load every time somebody
+    # asks for the big one. The box's ctx pins have to leave room for it --
+    # the auto-sizer budgets each model against the whole pool and does not
+    # know a neighbour is resident, so on a box with a persistent model the
+    # other entries are pinned by hand (hosts/apu-tablet-2/register-models.ps1).
+    "persistent": False,
     "extra_flags": "",
     "mmproj": "",
 }
@@ -1379,6 +1403,26 @@ def check_name_collisions(models: list[dict]) -> None:
             seen[name] = mid
 
 
+def check_preload_count(models: list[dict]) -> None:
+    """At most one enabled model may be preloaded at start-up.
+
+    The swap group is exclusive -- one resident model per box -- so a second
+    preload entry does not give a box two warm models, it gives it one cold
+    load immediately followed by another that evicts it. Refusing the save
+    is better than a config that quietly does twice the work for the same
+    result, and it keeps "which model is this box for" a one-line answer."""
+    warm = [str(r.get("id", "")).strip() for r in models
+            if r.get("enabled", True) and r.get("preload")
+            and not r.get("persistent")]
+    if len(warm) > 1:
+        raise HTTPException(
+            400,
+            "only one enabled model may be preloaded into the swap group "
+            "(it holds one model at a time); preload is set on: "
+            + ", ".join(warm) + " -- mark one `persistent` instead if the "
+            "box can hold both")
+
+
 def render_swap_config(models: list[dict]) -> str:
     cfg: dict[str, Any] = {
         "healthCheckTimeout": 900,
@@ -1409,14 +1453,41 @@ def render_swap_config(models: list[dict]) -> str:
     # second load fails or evicts into system RAM mid-request. Exclusive swap
     # makes the "one model at a time" assumption the rest of this stack is
     # built on actually true.
+    live = {str(rec.get("id", "")).strip(): rec for rec in models
+            if rec.get("enabled", True)
+            and str(rec.get("id", "")).strip() in cfg["models"]}
+    # A persistent model lives in its own group that nothing may unload;
+    # everything else shares the exclusive swap group. llama-swap's own
+    # rules: `persistent: true` means other groups cannot evict these,
+    # `exclusive: true` on main means loading a main member evicts every
+    # other NON-persistent group -- so the two coexist by design.
+    pinned = [mid for mid, rec in live.items() if rec.get("persistent")]
+    swappable = [mid for mid in cfg["models"] if mid not in pinned]
     if cfg["models"]:
-        cfg["groups"] = {
-            "main": {
+        cfg["groups"] = {}
+        if pinned:
+            cfg["groups"]["warm"] = {
+                "swap": False,
+                "exclusive": False,
+                "persistent": True,
+                "members": pinned,
+            }
+        if swappable:
+            cfg["groups"]["main"] = {
                 "swap": True,
                 "exclusive": True,
-                "members": list(cfg["models"].keys()),
+                "members": swappable,
             }
-        }
+    # Warm on boot. llama-swap (v250+) loads these the moment it starts, so a
+    # box dedicated to one model answers its first request after a reboot at
+    # full speed instead of paying a 70 GB cold load into it. Persistent
+    # models are always in the list -- resident-forever and cold-until-asked
+    # is a contradiction. In the swap group only the LAST preload survives,
+    # which is why check_preload_count() refuses more than one there.
+    warm = [mid for mid, rec in live.items()
+            if rec.get("preload") or rec.get("persistent")]
+    if warm:
+        cfg["hooks"] = {"on_startup": {"preload": warm}}
     header = (
         "# GENERATED BY THE OPEN-FLEET GATEWAY -- DO NOT EDIT BY HAND.\n"
         "# Source of truth is " + str(MODELS_JSON) + "\n"
@@ -3026,10 +3097,7 @@ def _lmstudio_busy() -> bool:
     until it is closed -- but the llama-swap RESTART that publishes a registry
     change does take the resident model down with it. So the restart waits;
     the next pass a few minutes later will do it."""
-    with _active_lock:
-        return any(
-            r.get("kind") in ("inference", "benchmark") for r in _active.values()
-        )
+    return inflight_work() > 0
 
 
 def _lmstudio_restart_swap() -> str:
@@ -3826,6 +3894,277 @@ async def _public_overview_warm_loop() -> None:
         await asyncio.sleep(max(2.0, 10.0 - (time.time() - started)))
 
 
+# --------------------------------------------------------------------------
+# self-watchdog: a gateway that stops answering must die, not linger
+# --------------------------------------------------------------------------
+#
+# On Windows, one failed accept in uvicorn's proactor event loop ends the
+# accept loop WITHOUT ending the process. Observed on apu-tablet-2 on
+# 2026-08-28: `OSError [WinError 64] The specified network name is no longer
+# available` surfaced in the accept coroutine right as an external-SSD
+# unplug/replug was tearing down the hub's in-flight connections, and after
+# it nothing ever listened on :8080 again -- while every background task
+# kept the process looking alive. The llama-swap /running polls landed, the
+# LM Studio sync ran, the DB kept being written; on the box everything was
+# healthy except the one thing the fleet needs. The hub's status poll got
+# connection refused and the machine read as offline for as long as the
+# zombie lived.
+#
+# Nothing above this process can see that state. Task Scheduler's
+# RestartCount (and systemd's Restart=on-failure alike) only fire when the
+# process EXITS, and a deaf-but-alive gateway never exits. So the gateway
+# watches itself: once loopback /health has answered AND this process owns
+# the listening socket (the arm proves both that the probe can succeed
+# against this bind and that the listener was really ours), consecutive
+# failures mean the HTTP face of the process is gone. The process then exits
+# on purpose -- turning a silent zombie into a crash the supervisor was
+# already configured to heal (RestartCount=3 / Restart=on-failure).
+
+WATCHDOG_PORT = int(os.environ.get("LLMSTACK_PORT", "8080"))
+WATCHDOG_INTERVAL_S = float(os.environ.get("LLMSTACK_WATCHDOG_INTERVAL", "15"))
+WATCHDOG_MAX_MISSES = int(os.environ.get("LLMSTACK_WATCHDOG_MISSES", "3"))
+
+
+def _watchdog_enabled() -> bool:
+    """Env kill-switch, read per-call so a test (or an admin) can flip it
+    without re-importing the module: LLMSTACK_WATCHDOG=off disarms entirely."""
+    return os.environ.get("LLMSTACK_WATCHDOG", "").strip().lower() not in {
+        "0", "off", "false", "no",
+    }
+
+
+def _own_listener_pid() -> bool:
+    """True when THIS process owns a LISTEN socket on the gateway port.
+
+    The arming gate. A probe that only ever fails must never kill: on a box
+    whose bind excludes loopback the /health probe cannot succeed, and a
+    watchdog that armed anyway would restart-loop a working gateway. Requiring
+    our own PID on the listener also keeps the pytest process (and any other
+    python that merely imports this module) permanently disarmed -- it owns
+    no such socket, so the watchdog sleeps for its whole life there. Where
+    the platform will not enumerate connections unprivileged (macOS), this
+    stays False and the watchdog stays dormant: honest silence beats a
+    self-inflicted outage."""
+    try:
+        return any(
+            c.status == psutil.CONN_LISTEN
+            and c.pid == os.getpid()
+            and c.laddr.port == WATCHDOG_PORT
+            for c in psutil.net_connections(kind="inet")
+        )
+    except psutil.Error:
+        return False
+
+
+# Strictly greater than UPSTREAM_HEALTH_BUDGET, and that gap is the whole
+# point. Both sides of this probe used to be 5 s, so a llama-swap that took
+# its time answering made /health arrive at 5.0 s and this give up at 5.0 s --
+# a miss scored against a gateway that was busy doing its job correctly.
+WATCHDOG_TIMEOUT_S = float(os.environ.get("LLMSTACK_WATCHDOG_TIMEOUT", "10"))
+
+
+def _loopback_health_probe() -> str:
+    """'ok', 'slow' (the socket accepted and the answer did not come in
+    time) or 'dead' (refused, reset, or anything else).
+
+    The distinction is the whole point. A listener that accepts and then
+    takes too long is a process under load -- apu-tablet-1 at its commit
+    ceiling while a 73 GB model uploaded to the GPU answered /health in
+    more than ten seconds three times running, and the watchdog killed a
+    gateway that was merely busy (2026-08-29). A listener that refuses is
+    the zombie this exists for."""
+    try:
+        r = httpx.get(f"http://127.0.0.1:{WATCHDOG_PORT}/health",
+                      timeout=WATCHDOG_TIMEOUT_S)
+        return "ok" if r.status_code == 200 else "dead"
+    except (httpx.ReadTimeout, httpx.PoolTimeout, httpx.WriteTimeout):
+        return "slow"
+    except Exception:  # noqa: BLE001 -- a failure IS the signal, not an error
+        return "dead"
+
+
+def _loopback_health_ok() -> bool:
+    return _loopback_health_probe() == "ok"
+
+
+_watchdog_state: dict[str, Any] = {"armed": False, "misses": 0}
+
+
+def _self_watchdog_tick() -> None:
+    """One probe and the decision that follows it. A loop body on purpose:
+    the tests drive this directly rather than guessing at thread timing."""
+    if not _watchdog_enabled():
+        return
+    if draining():
+        # An ORDERLY shutdown looks exactly like the zombie this watchdog
+        # hunts: uvicorn closes the listening socket first and only then waits
+        # for open streams to finish, so from here the listener is gone while
+        # the process lives on. Observed on apu-box-1 on 2026-08-28 as "miss 1 of
+        # 3" seven seconds before systemd's own SIGKILL. Left alone it is a
+        # race the watchdog can win -- os._exit(1) in the middle of a drain,
+        # turning the clean ending below into the severed stream it was
+        # written to prevent.
+        _watchdog_state["misses"] = 0
+        return
+    listening = _own_listener_pid()
+    probe = _loopback_health_probe() if listening else "dead"
+    if probe == "ok":
+        if not _watchdog_state["armed"]:
+            _watchdog_state["armed"] = True
+            log.info(
+                "self-watchdog: /health answered on 127.0.0.1:%d and the "
+                "listener is ours -- armed; %d consecutive failures end "
+                "this process", WATCHDOG_PORT, WATCHDOG_MAX_MISSES,
+            )
+        _watchdog_state["misses"] = 0
+        return
+    if not _watchdog_state["armed"]:
+        return                                    # never proven healthy
+    if probe == "slow":
+        # Accepted, then took too long: a process under load, not a deaf
+        # one. Not a miss, and not a reset either -- a gateway that is
+        # genuinely dying can be slow on its way down, so the count it has
+        # already earned stands until an answer or a refusal settles it.
+        log.warning("self-watchdog: /health accepted but did not answer in "
+                    "%.0fs -- busy, not dead; not counted", WATCHDOG_TIMEOUT_S)
+        return
+    _watchdog_state["misses"] += 1
+    log.error(
+        "self-watchdog: gateway unhealthy (listener=%s) -- miss %d of %d",
+        listening, _watchdog_state["misses"], WATCHDOG_MAX_MISSES,
+    )
+    if _watchdog_state["misses"] >= WATCHDOG_MAX_MISSES:
+        log.error(
+            "self-watchdog: the HTTP accept loop is gone but background "
+            "tasks keep this process alive; exiting on purpose so the "
+            "supervisor's restart-on-failure can bring a listening "
+            "gateway back"
+        )
+        os._exit(1)
+
+
+def _self_watchdog_loop() -> None:
+    while True:
+        try:
+            _self_watchdog_tick()
+        except Exception:  # noqa: BLE001 -- a watchdog must never be the crash
+            log.exception("self-watchdog tick failed")
+        time.sleep(WATCHDOG_INTERVAL_S)
+
+
+# --------------------------------------------------------------------------
+# graceful drain: a restart ENDS the streams, it does not sever them
+# --------------------------------------------------------------------------
+#
+# What a deploy used to do to a box mid-answer, from apu-box-1's journal on
+# 2026-08-28 (the :30 reconcile in deploy-gateway.yml, restarting a gateway
+# with two Copilot streams open):
+#
+#   19:51:38  Stopping llm-gateway.service...
+#   19:51:38  uvicorn: Waiting for connections to close.
+#   19:51:48  State 'stop-sigterm' timed out. Killing.
+#   19:51:48  Killing process 1586 (uvicorn) with signal SIGKILL
+#
+# Ten seconds, because Mint ships DefaultTimeoutStopSec=10s in
+# /etc/systemd/system.conf.d/50_linuxmint.conf and the unit never overrode it.
+# SIGKILL leaves cloudflared holding origin sockets that die mid-body with no
+# HTTP framing at all, so the edge resets the HTTP/2 streams and the client is
+# told `ERR_HTTP2_PROTOCOL_ERROR` -- a transport error for what was really an
+# orderly restart, indistinguishable from a firewall problem. Both of that
+# session's requests failed at the same instant, which is the signature.
+#
+# uvicorn's own lifespan shutdown is NO USE for this: it runs AFTER the
+# connection drain (see Server.shutdown), so by the time it fires the streams
+# have either finished or been cancelled. The signal is the only hook early
+# enough. On SIGTERM we therefore get in first -- mark the process draining,
+# and ask every open stream to stop -- and only then let uvicorn's own handler
+# run. Each relay notices through the same `stop` event the operator's abort
+# button uses, and ends its stream the way it ends every other failure: a
+# framed SSE error, then [DONE]. The client keeps the tokens it already had
+# and sees a reason it can retry on.
+_draining = threading.Event()
+
+
+def draining() -> bool:
+    """True once a shutdown signal has arrived. New work is refused and
+    in-flight work is being wound up."""
+    return _draining.is_set()
+
+
+DRAIN_MESSAGE = ("this gateway is restarting (deploy or supervisor restart); "
+                 "the answer was cut short -- retry")
+
+
+def drain_in_flight() -> int:
+    """Ask every interruptible stream on this box to end, and say how many.
+
+    `drained` rather than a bare abort so the relays can tell this apart from
+    the operator pressing stop on the dashboard: the same mechanism stops the
+    upstream read, but the metering (503, not 499) and the message the client
+    reads are different."""
+    with _active_lock:
+        jobs = [r for r in _active.values()
+                if r.get("kind") in ("inference", "benchmark")]
+    n = 0
+    for rec in jobs:
+        rec["drained"] = True
+        if job_abort(rec):
+            n += 1
+    return n
+
+
+def _begin_drain() -> None:
+    """Runs on the event loop, scheduled from the signal handler."""
+    if _draining.is_set():
+        return
+    _draining.set()
+    try:
+        n = drain_in_flight()
+    except Exception:  # noqa: BLE001 -- never make the shutdown itself fail
+        log.exception("drain: could not wind up in-flight work")
+        return
+    log.info("drain: shutdown signal received; %d in-flight job(s) asked to "
+             "end, new requests now refused with 503", n)
+
+
+def install_drain_signal_handlers() -> None:
+    """Chain a drain in front of uvicorn's exit handler.
+
+    uvicorn installs its own via signal.signal() in capture_signals(), which
+    wraps serve() -- so by the time this runs during lifespan startup, the
+    handler already there IS uvicorn's, and calling it afterwards is what
+    keeps the normal shutdown intact. Nothing is scheduled inline: an asyncio
+    Event set from a signal handler re-enters loop internals at an arbitrary
+    bytecode, so the work goes through call_soon_threadsafe, which is the one
+    documented-safe way back onto the loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:                          # not under a loop (tests)
+        return
+    _prev_handlers: dict[int, Any] = {}
+
+    def chain(signum: int, frame: Any) -> None:
+        try:
+            loop.call_soon_threadsafe(_begin_drain)
+        except RuntimeError:                      # loop already closed
+            pass
+        prev = _prev_handlers.get(signum)
+        if callable(prev):
+            prev(signum, frame)
+
+    for signame in ("SIGTERM", "SIGINT"):
+        sig = getattr(signal, signame, None)
+        if sig is None:
+            continue
+        try:
+            _prev_handlers[int(sig)] = signal.signal(sig, chain)
+        except (ValueError, OSError):
+            # Not the main thread, or a platform that will not take it. The
+            # drain is an improvement on being killed, never a requirement.
+            log.warning("drain: could not hook %s; a restart will cut streams "
+                        "the way it always did", signame)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Starlette 1.x dropped on_event(); lifespan is the supported hook.
@@ -3876,6 +4215,16 @@ async def lifespan(_: FastAPI):
     # hold it, so the first request against a fresh key is not a cold load.
     # Idle on a box with no peers -- see preload_orchestrator().
     preload = asyncio.create_task(_preload_loop())
+    # Before the watchdog, so a signal arriving in the first instants of a
+    # short-lived process still finds the drain hooked rather than half of it.
+    install_drain_signal_handlers()
+    # A plain thread ON PURPOSE: its whole point is to keep judging the
+    # process when the event loop is the thing that died. See the block above
+    # _self_watchdog_loop for the apu-tablet-2 zombie this closes.
+    if _watchdog_enabled():
+        threading.Thread(
+            target=_self_watchdog_loop, name="self-watchdog", daemon=True,
+        ).start()
     try:
         yield
     finally:
@@ -3900,16 +4249,32 @@ app = FastAPI(
 )
 
 
+# How long /health may spend asking the ENGINE whether it is alive. It has to
+# stay comfortably under WATCHDOG_TIMEOUT_S, because this handler is what the
+# self-watchdog probes: at the 5 s both once used, a llama-swap wedged for a
+# few seconds made the handler answer at 5.0 s and the watchdog give up at
+# 5.0 s, scoring a miss against a gateway that was streaming tokens perfectly
+# well. Three of those in a row and it would have killed itself. The engine's
+# state is a FIELD in this response, never the reason it fails to arrive.
+UPSTREAM_HEALTH_BUDGET = 3.0
+
+
 @app.get("/health")
 async def health() -> dict:
     up = "unknown"
     try:
         assert client is not None
-        r = await client.get("/health", timeout=5.0)
+        r = await client.get("/health", timeout=UPSTREAM_HEALTH_BUDGET)
         up = "ok" if r.status_code < 500 else "degraded"
     except Exception:  # noqa: BLE001
         up = "down"
     out = {"status": "ok", "upstream": up, "time": now()}
+    # What the deployer reads before it restarts anything: a box mid-stream is
+    # deferred to the next reconcile instead of being SIGKILLed at whatever
+    # DefaultTimeoutStopSec the distro happens to ship (10s on Mint). A bare
+    # count is all it is -- how much work is in flight, never whose or what --
+    # which is why it can live on an endpoint that has no authentication.
+    out["inflight"] = inflight_work()
     # Only on a gated box, so /health stays byte-for-byte what it was
     # everywhere else -- this endpoint is unauthenticated and is what the
     # tunnel health checks read.
@@ -3940,7 +4305,11 @@ _routes_cache: dict[str, Any] = {"t": 0.0, "map": {}, "cands": {},
                                  # (host, model) -> {bytes, fit, moe, source}
                                  "meta": {},
                                  # host -> "llama-swap" | "ollama" | "none"
-                                 "engine": {}}
+                                 "engine": {},
+                                 # host -> the model ids it preloads or keeps
+                                 # resident by its own registry; the preload
+                                 # loop leaves such a box alone
+                                 "warm": {}}
 ROUTE_TTL = 30.0
 
 # Requests in flight per host, this gateway's own traffic only. It cannot see
@@ -4060,6 +4429,23 @@ def _job_close(rec: dict | None) -> None:
     if rec:
         with _active_lock:
             _active.pop(str(rec.get("id", "")), None)
+
+
+def inflight_work() -> int:
+    """How many pieces of UNINTERRUPTIBLE work this box is doing right now.
+
+    Inference and benchmarks only. A download or a batch is resumed from the
+    database after a restart (see active_jobs()), but a token stream and a
+    llama-bench run exist nowhere but this process: killing either throws away
+    everything it had already produced, and on the client side a severed
+    stream is not even a legible error -- through cloudflared it reaches a
+    browser as ERR_HTTP2_PROTOCOL_ERROR, which says nothing about what
+    happened. This is the same predicate the llama-swap restart already defers
+    on, named once so /health, the deployer and that restart cannot drift into
+    disagreeing about what "busy" means."""
+    with _active_lock:
+        return sum(1 for r in _active.values()
+                   if r.get("kind") in ("inference", "benchmark"))
 
 
 def _hard_kill(proc: Any) -> None:
@@ -4615,6 +5001,17 @@ async def upstream_catalogue() -> dict:
     }
 
 
+def local_warm_ids() -> set[str]:
+    """The model ids this box preloads at start-up or keeps resident by its
+    own registry -- what it is FOR. Reported to the hub in served-models so
+    the featured-model preload loop leaves a dedicated box alone; a hub
+    that pinned its own favourite onto every capable box is how a 125B got
+    evicted every ten minutes from the machine that exists to hold it."""
+    return {str(m.get("id", "")).strip() for m in load_models()
+            if m.get("enabled", True) and (m.get("preload") or m.get("persistent"))
+            and str(m.get("id", "")).strip()}
+
+
 def local_capacity() -> dict[str, int]:
     """Decode slots per model id (and alias) from this box's own registry.
     Upstream-managed catalogues (Ollama) publish nothing, so their models
@@ -4727,10 +5124,13 @@ def known_model_ctx() -> dict[str, dict[str, int]]:
     disclosed reduction. Filtering on read means retiring a box needs no
     cleanup step and cannot be forgotten. An ECLIPSED peer -- the dormant half
     of a dual-boot machine whose other half is up -- stops counting too, for
-    the same reason a removed one does: see eclipsed_hosts()."""
+    the same reason a removed one does: see eclipsed_hosts(). So does a
+    KILLSWITCHED one: the hub has been told not to route to it, so whatever
+    window it remembers is a window this fleet will not serve, and leaving it
+    in would advertise a ceiling and then reduce every request down from it."""
     if time.time() - _known_ctx_cache["t"] < 30.0:
         return _known_ctx_cache["map"]
-    live = {p["name"] for p in load_peers() if p.get("name")} | {HOST_NAME}
+    live = {p["name"] for p in routeable_peers() if p.get("name")} | {HOST_NAME}
     live -= eclipsed_hosts()
     out: dict[str, dict[str, int]] = {}
     for r in db_query("SELECT host, model, ctx FROM model_ctx"):
@@ -5082,6 +5482,9 @@ async def _peer_served(p: dict) -> dict:
                              if str(m).strip()}
             out["running"] = {str(m).strip() for m in d.get("running") or []
                               if str(m).strip()}
+            # Absent on an older gateway, which reads as "no job of its own".
+            out["warm"] = {str(m).strip() for m in d.get("warm") or []
+                           if str(m).strip()}
             caps = d.get("capacity") or {}
             if isinstance(caps, dict):
                 out["capacity"] = {str(k): max(1, int(v or 1))
@@ -5139,16 +5542,22 @@ async def model_routes(force: bool = False) -> dict[str, str]:
         if isinstance(local_meta.get(m), dict):
             meta[("", m)] = local_meta[m]
     running[HOST_NAME] = set(await upstream_running_ids())
+    warm: dict[str, set[str]] = {HOST_NAME: local_warm_ids()}
     try:
         engine[HOST_NAME] = str(engine_info().get("kind") or "")
     except Exception:  # noqa: BLE001
         engine[HOST_NAME] = ""
     reachable: set[str] = {HOST_NAME}
-    peers = load_peers()
+    # The killswitch: a peer whose routed flag is off stays registered and
+    # visible on the fleet page, but is NOT a candidate for any route. The
+    # filter is why the toggle has teeth -- without it, a killed box would
+    # just keep answering the _peer_served() probe and stay in the table.
+    peers = routeable_peers()
     if peers:
         served = await asyncio.gather(*(_peer_served(p) for p in peers))
         for p, d in zip(peers, served):
             running[p["name"]] = d["running"]
+            warm[p["name"]] = set(d.get("warm") or set())
             if d.get("online"):
                 reachable.add(p["name"])
             if d.get("engine"):
@@ -5163,7 +5572,8 @@ async def model_routes(force: bool = False) -> dict[str, str]:
                     meta[(p["name"], m)] = d["meta"][m]
     _routes_cache.update(t=time.time(), map=routes, cands=cands,
                          cap=cap, running=running, ctx=ctx,
-                         reachable=reachable, meta=meta, engine=engine)
+                         reachable=reachable, meta=meta, engine=engine,
+                         warm=warm)
     remember_model_ctx(ctx)
     return routes
 
@@ -5358,6 +5768,18 @@ async def openai_proxy(path: str, request: Request):
     assert client is not None
     endpoint = "/v1/" + path
     started = time.time()
+
+    # Refuse rather than start. uvicorn stops ACCEPTING on a shutdown signal,
+    # but a client already holding a keep-alive connection can still send the
+    # next request down it, and a completion begun here has seconds to live --
+    # it would be drained before its first token. A 503 with Retry-After is
+    # something every OpenAI SDK already knows how to back off on; half a
+    # stream is not.
+    if draining():
+        record_usage(key, "", endpoint, False, 503, None, None,
+                     int((time.time() - started) * 1000))
+        return JSONResponse(DRAINED_BODY, status_code=503,
+                            headers={"retry-after": DRAIN_RETRY_AFTER})
 
     # A key that has ever had a public_keys row reaches exactly two routes
     # (contract 1.9h) -- a 5/day Fleet Pass key must not be able to spool a
@@ -5761,9 +6183,10 @@ async def openai_proxy(path: str, request: Request):
             untrack()
         _job_close(job)
         await _quiet_close(resp, peer_client)
-        record_usage(key, model, endpoint, stream, 499, None, None,
+        record_usage(key, model, endpoint, stream,
+                     503 if job.get("drained") else 499, None, None,
                      int((time.time() - started) * 1000))
-        return JSONResponse(ABORTED_BODY, status_code=499)
+        return _stopped_response(job)
 
     if resp is None and ctx_reject is not None and not upstream_failed:
         # Every candidate that could have taken this request has a context
@@ -5836,10 +6259,12 @@ async def openai_proxy(path: str, request: Request):
             # 499, the nginx spelling of "the client went away" -- except here
             # the client is us, on the operator's behalf. Metered like any
             # other outcome: an aborted runaway still cost the box the tokens
-            # it had already produced.
-            record_usage(key, model, endpoint, False, 499, None, None,
+            # it had already produced. A drain is the other way round: nobody
+            # asked for this one to stop, so it meters as the 503 it is.
+            record_usage(key, model, endpoint, False,
+                         503 if job.get("drained") else 499, None, None,
                          int((time.time() - started) * 1000), host=served_by)
-            return JSONResponse(ABORTED_BODY, status_code=499)
+            return _stopped_response(job)
         usage = None
         out_body = raw_out
         try:
@@ -5919,6 +6344,20 @@ async def openai_proxy(path: str, request: Request):
                     yield b"data: [DONE]\n\n"
                     break
                 if cut:
+                    if job.get("drained"):
+                        # A restart, not the dashboard's stop button. Same
+                        # framing as the broken-upstream case above and for
+                        # the same reason: the alternative is the socket
+                        # simply stopping, which reaches a browser-based
+                        # client as ERR_HTTP2_PROTOCOL_ERROR and tells whoever
+                        # reads it to go and check their firewall. 503 says
+                        # "ask again in a moment", which is the truth.
+                        status_out = 503
+                        err = {"error": {"message": DRAIN_MESSAGE,
+                                         "type": "unavailable",
+                                         "code": "gateway_restarting"}}
+                        yield ("data: " + json.dumps(err) + "\n\n").encode()
+                        yield b"data: [DONE]\n\n"
                     break
                 if ttft is None:
                     ttft = int((time.time() - started) * 1000)
@@ -5944,7 +6383,10 @@ async def openai_proxy(path: str, request: Request):
             await _quiet_close(resp, peer_client)
             _job_close(job)
             record_usage(key, model, endpoint, True,
-                         499 if job["aborted"] else status_out,
+                         # A drain already set status_out to 503; only the
+                         # operator's abort is a 499.
+                         499 if (job["aborted"] and not job.get("drained"))
+                         else status_out,
                          usage, ttft,
                          int((time.time() - started) * 1000), host=served_by,
                          fallback_from=(fallback["requested"] if fallback else ""))
@@ -6004,6 +6446,28 @@ ABORTED_BODY = {
     }
 }
 
+DRAINED_BODY = {
+    "error": {
+        "message": DRAIN_MESSAGE,
+        "type": "unavailable",
+        "code": "gateway_restarting",
+    }
+}
+
+# Long enough that a client's own backoff lands after systemd's RestartSec=3
+# and the startup, short enough to be worth honouring.
+DRAIN_RETRY_AFTER = "10"
+
+
+def _stopped_response(job: dict) -> JSONResponse:
+    """The body for a non-streaming request that was stopped, whichever lever
+    stopped it. A drain is a 503 the caller should retry; the dashboard's stop
+    button is a 499 it should not."""
+    if job.get("drained"):
+        return JSONResponse(DRAINED_BODY, status_code=503,
+                            headers={"retry-after": DRAIN_RETRY_AFTER})
+    return JSONResponse(ABORTED_BODY, status_code=499)
+
 
 def Response_bytes(data: bytes, status: int, headers: dict):
     from fastapi.responses import Response as _R
@@ -6037,6 +6501,14 @@ async def native_proxy(path: str, request: Request):
     endpoint = "/api/" + path
     started = time.time()
     metered = path.split("/")[0] in METERED_NATIVE
+
+    # Same refusal as openai_proxy: a restart is seconds away, so do not begin.
+    if draining():
+        if metered:
+            record_usage(key, "", endpoint, False, 503, None, None,
+                         int((time.time() - started) * 1000))
+        return JSONResponse(DRAINED_BODY, status_code=503,
+                            headers={"retry-after": DRAIN_RETRY_AFTER})
 
     # A public key is not for Ollama's native API at all -- the whole surface
     # is 403, same rule as openai_proxy (contract 1.9h).
@@ -7204,12 +7676,12 @@ PUBLIC_MODELS_SEED: list[dict] = [
      "arch": "dense", "params_b": 31, "active_b": 31,
      "fleet_ids": ["gemma4-31b-qat"], "allow_primary": 1, "allow_worker": 0,
      "ctx_max": 131072, "ctx_default": 16384, "sort": 10,
-     "description": "Google's largest open Gemma 4, quantization-aware trained. Strong general reasoning."},
+     "description": "Google's largest open Gemma 4, quantisation-aware trained so 4-bit costs it little. Even-tempered prose, image input, dependable structured output -- and Apache 2.0 since Gemma 4."},
     {"public_id": "gemma4-26b-a4b", "family": "Gemma", "name": "Gemma 4 26B-A4B (QAT)", "vendor": "Google",
      "arch": "moe", "params_b": 26, "active_b": 4,
      "fleet_ids": ["gemma-4-26b", "gemma4:26b"], "allow_primary": 1, "allow_worker": 1,
      "ctx_max": 131072, "ctx_default": 16384, "sort": 20,
-     "description": "Mixture-of-experts Gemma 4: 26B total, 4B active -- fast for its size."},
+     "description": "Mixture-of-experts Gemma 4: 26B stored, 4B active. Cheap per token, though slower in practice than the active count suggests."},
     {"public_id": "gemma4-12b", "family": "Gemma", "name": "Gemma 4 12B (QAT)", "vendor": "Google",
      "arch": "dense", "params_b": 12, "active_b": 12,
      "fleet_ids": ["gemma4:12b-it-qat"], "allow_primary": 0, "allow_worker": 1,
@@ -7219,69 +7691,74 @@ PUBLIC_MODELS_SEED: list[dict] = [
      "arch": "dense", "params_b": 8, "active_b": 4,
      "fleet_ids": ["gemma4:e4b"], "allow_primary": 0, "allow_worker": 1,
      "ctx_max": 32768, "ctx_default": 8192, "sort": 40,
-     "description": "Gemma 4 'effective 4B' -- small, quick, good for sub-tasks."},
+     "description": "Gemma 4 'effective 4B' -- small, quick, image input included. Good for sub-tasks and anything that has to run on-device."},
     {"public_id": "qwen3.8-27b", "family": "Qwen", "name": "Qwen 3.8 27B", "vendor": "Alibaba Qwen",
      "arch": "dense", "params_b": 27, "active_b": 27,
      "fleet_ids": ["qwen3.8-27b"], "allow_primary": 1, "allow_worker": 0,
      "ctx_max": 262144, "ctx_default": 16384, "sort": 50,
-     "description": "Dense 27B Qwen 3.8 -- the fleet's strongest prose model."},
+     "description": "Qwen's August 2026 dense flagship, and the one you can actually host: 262k trained context, image and video in, Apache 2.0. The fleet's strongest prose and reasoning model -- and its most verbose."},
+    {"public_id": "qwen3.8-flash-next", "family": "Qwen", "name": "Qwen 3.8 Flash-Next", "vendor": "Alibaba Qwen",
+     "arch": "moe", "params_b": 125, "active_b": 6,
+     "fleet_ids": ["qwen3.8-flash-next"], "allow_primary": 1, "allow_worker": 0,
+     "ctx_max": 196608, "ctx_default": 16384, "sort": 55,
+     "description": "Qwen's preview of the Qwen4 architecture, out 2026-08-26: 125B stored, 6B active, with hybrid linear/sparse attention that keeps a long window cheap. Held at two bits on the one box with the memory for it -- around 28 tokens a second, and new enough that its quirks are still being found."},
     {"public_id": "qwen3.6-35b-a3b", "family": "Qwen", "name": "Qwen 3.6 35B-A3B", "vendor": "Alibaba Qwen",
      "arch": "moe", "params_b": 35, "active_b": 3,
      "fleet_ids": ["qwen3.6-35b"], "allow_primary": 1, "allow_worker": 1,
      "ctx_max": 262144, "ctx_default": 16384, "sort": 60,
-     "description": "Mixture-of-experts Qwen 3.6: 35B total, 3B active."},
+     "description": "April 2026 mixture of experts: 35B stored, 3B active, so it answers at a small model's pace on any box that can hold it. Apache 2.0, 262k context."},
     {"public_id": "qwen3.8-9b-distill", "family": "Qwen", "name": "Qwen 3.8 9B Distill",
      "vendor": "community (empero-ai Qwen 3.8 distill)",
      "arch": "dense", "params_b": 9, "active_b": 9,
      "fleet_ids": ["hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M", "qwen3.8-9B", "Qwen3.8-9B", "empero-ai-qwen3.8-9b-distill"],
      "allow_primary": 0, "allow_worker": 1,
      "ctx_max": 262144, "ctx_default": 8192, "sort": 65,
-     "description": "Qwen 3.8-Max distilled into a dense 9B -- resident default on the Apple-silicon and CPU boxes since 2026-08; quick prefill."},
+     "description": "Qwen 3.8-Max distilled into a dense 9B by the community (empero-ai) -- not an Alibaba release. Resident default on the Apple-silicon and CPU boxes since 2026-08; quick prefill, light on memory."},
     {"public_id": "qwen3.5-4b", "family": "Qwen", "name": "Qwen 3.5 4B", "vendor": "Alibaba Qwen",
      "arch": "dense", "params_b": 4, "active_b": 4,
      "fleet_ids": ["qwen3.5:4b", "qwen3.5-4b"], "allow_primary": 0, "allow_worker": 1,
      "ctx_max": 262144, "ctx_default": 8192, "sort": 70,
-     "description": "Small dense Qwen for fast sub-agent work."},
+     "description": "Small dense Qwen from the 3.5 line. Fast sub-agent work, classification and tool calls -- not the one to reason with."},
     {"public_id": "qwopus3.6-35b", "family": "Qwen", "name": "Qwopus 3.6 35B-A3B",
      "vendor": "community (Qwen 3.6 fine-tune)", "arch": "moe", "params_b": 35, "active_b": 3,
      "fleet_ids": ["qwopus3.6-35b-coder", "Qwopus3.6-35B", "Qwopus3.6-A3B"],
      "allow_primary": 1, "allow_worker": 1, "ctx_max": 262144, "ctx_default": 16384, "sort": 80,
-     "description": "Coding-leaning Qwen 3.6 MoE fine-tune."},
+     "description": "Community coding fine-tune of the Qwen 3.6 mixture of experts (35B stored, 3B active) with multi-token prediction. Leans to code and patches."},
     {"public_id": "nemotron3-super-120b", "family": "Nemotron", "name": "Nemotron 3 Super 120B-A12B", "vendor": "NVIDIA",
      "arch": "moe", "params_b": 120, "active_b": 12,
      "fleet_ids": ["nemotron3-super-120b"], "allow_primary": 1, "allow_worker": 0,
      "ctx_max": 131072, "ctx_default": 16384, "sort": 90,
-     "description": "The fleet's largest model. Cold load takes minutes -- expect a fallback when it is not resident."},
+     "description": "NVIDIA's 120B-A12B hybrid Mamba/transformer, built for throughput on long agent runs rather than for benchmark wins. The fleet's largest model: a cold load takes minutes, so expect a fallback when it is not resident."},
     {"public_id": "nemotron3.5-lightning-30b", "family": "Nemotron", "name": "Nemotron 3.5 Lightning 30B-A3B", "vendor": "NVIDIA",
      "arch": "moe", "params_b": 30, "active_b": 3,
      "fleet_ids": ["nemotron3.5-lightning-30b"], "allow_primary": 1, "allow_worker": 1,
      "ctx_max": 131072, "ctx_default": 16384, "sort": 100,
-     "description": "Fast MoE with a thinking phase; good writer."},
+     "description": "August 2026 Nemotron: 30B stored, 3B active, with a thinking phase. Fast, and a good writer."},
     {"public_id": "nemotron-3-nano-4b", "family": "Nemotron", "name": "Nemotron 3 Nano 4B", "vendor": "NVIDIA",
      "arch": "dense", "params_b": 4, "active_b": 4,
      "fleet_ids": ["nemotron-3-nano:4b"], "allow_primary": 0, "allow_worker": 1,
      "ctx_max": 131072, "ctx_default": 8192, "sort": 110,
-     "description": "Small dense Nemotron for sub-tasks."},
+     "description": "Small dense Nemotron for sub-tasks and tool calls."},
     {"public_id": "nemotron-mini-4b", "family": "Nemotron", "name": "Nemotron Mini 4B", "vendor": "NVIDIA",
      "arch": "dense", "params_b": 4, "active_b": 4,
      "fleet_ids": ["nemotron-mini:4b"], "allow_primary": 0, "allow_worker": 1,
      "ctx_max": 8192, "ctx_default": 4096, "sort": 120,
-     "description": "Tiny, instant, 4k context."},
+     "description": "Tiny, instant, 4k context. The floor of the fleet."},
     {"public_id": "muse-glimmer-30b", "family": "Muse", "name": "Muse Glimmer 30B", "vendor": "Meta",
      "arch": "dense", "params_b": 30, "active_b": 30,
      "fleet_ids": ["muse-glimmer-30b"], "allow_primary": 1, "allow_worker": 1,
      "ctx_max": 131072, "ctx_default": 16384, "sort": 130,
-     "description": "Dense 30B agentic model; thorough, not fast."},
+     "description": "Meta's dense 30B agent model, distilled from Muse Spark and released Apache 2.0. Excellent tool use for its size and it fits anywhere -- but it hallucinates measurably more than the Qwen of the same size, so not the one to ask for facts."},
     {"public_id": "deepseek-v4-flash", "family": "DeepSeek", "name": "DeepSeek V4 Flash", "vendor": "DeepSeek",
-     "arch": "moe", "params_b": 250, "active_b": 12,
+     "arch": "moe", "params_b": 284, "active_b": 13,
      "fleet_ids": ["deepseek-v4-flash"], "allow_primary": 1, "allow_worker": 0,
      "ctx_max": 163840, "ctx_default": 8192, "sort": 140,
-     "description": "Large MoE (parameter counts approximate). The slowest cold load in the fleet."},
+     "description": "DeepSeek V4 Flash (0731): 284B stored, 13B active, MIT-licensed, built for long context and agentic work. Runs here at a low bit rate on the one box that can hold it -- the slowest cold load in the fleet."},
     {"public_id": "glm-4.7-flash", "family": "GLM", "name": "GLM-4.7-Flash", "vendor": "Z.ai",
      "arch": "moe", "params_b": 30, "active_b": 3,
      "fleet_ids": ["glm-4.7-flash"], "allow_primary": 1, "allow_worker": 1,
      "ctx_max": 262144, "ctx_default": 16384, "sort": 150,
-     "description": "30B-A3B MoE: a capable, efficient general and tool-calling model."},
+     "description": "Z.ai's 30B-A3B mixture of experts: capable and efficient at general chat and tool calling for the memory it occupies."},
 ]
 
 PUBLIC_SEED_PATH = Path(
@@ -7402,6 +7879,11 @@ _PRE_HARDWARE_CTX_MAX: dict[str, int] = {
     # seed that carried it shipped with, recorded so a future raise of its
     # ctx_max still migrates instead of silently pinning every box.
     "glm-4.7-flash": 262144,
+    # qwen3.8-flash-next joined 2026-08-28, same reasoning. Its ceiling is the
+    # largest window the box that holds it actually launches with: the Vulkan
+    # flash-attention path stalls on this architecture, so its KV cache is f16
+    # rather than q8_0 and the window is what that leaves room for.
+    "qwen3.8-flash-next": 196608,
 }
 
 
@@ -9302,11 +9784,25 @@ def preload_capable(cand: str, fleet_id: str) -> bool:
 
 
 def preload_orchestrator() -> bool:
-    """Whether this box is the one that drives the loop -- the one with peers,
-    which is the operational definition of the hub. A single box with no fleet
-    behind it has nothing to orchestrate and is already resident with whatever
-    it last served."""
-    return bool(load_peers())
+    """Whether this box is the one that drives the loop: the fleet's hub, with
+    peers to drive.
+
+    "Has peers" alone used to be the whole test, on the theory that only the
+    hub has any. On 2026-08-29 three boxes did -- hub, gpu-laptop-1 (given
+    apu-box-1 as a peer for the public tour) and apu-box-1 (given three so its
+    workers could leave) -- and each ran this loop, each pinning the featured
+    27B onto every capable box every ten minutes. On apu-box-1 that evicted the
+    125B it exists to hold, on a timer, and nobody had asked for anything.
+    The spec sheet already names the hub (`role: hub`); that is the test now.
+    LLMSTACK_PRELOAD=off disarms it anywhere, and =on forces it for a fleet
+    whose hub is not on the sheet."""
+    flag = os.environ.get("LLMSTACK_PRELOAD", "").strip().lower()
+    if flag in ("0", "off", "false", "no"):
+        return False
+    if flag in ("1", "on", "true", "yes"):
+        return bool(load_peers())
+    hub = str(load_specs().get(HOST_NAME, {}).get("role") or "") == "hub"
+    return hub and bool(load_peers())
 
 
 def preload_plan() -> list[dict]:
@@ -9338,6 +9834,17 @@ def preload_plan() -> list[dict]:
                 # Deliberately not noted: a box that cannot hold the model is
                 # not passing anything over, and listing every small box as
                 # "skipped" would bury the states that matter.
+                continue
+            own = _routes_cache.get("warm", {}).get(host) or set()
+            if own and fid not in own:
+                # The box has a job of its own -- a model it preloads or
+                # keeps resident (models.json `preload` / `persistent`) --
+                # and it is not this one. Touching it would evict what it
+                # exists to hold. Its owner decided what it is warm with.
+                seen.add(host)
+                _preload_note("dedicated", "holds " + ", ".join(sorted(own)),
+                              host=host, cand=cand, fleet_id=fid,
+                              public_id=pid, resident=False)
                 continue
             seen.add(host)
             st = _preload_state.get(host) or {}
@@ -11421,6 +11928,9 @@ APPLY_KEY = "model_apply"
 # A cold load of a 20 GB model off mac-laptop-1's external USB drive is minutes, and
 # llama-swap's own healthCheckTimeout is 900s. Generous, but bounded.
 VERIFY_TIMEOUT = float(os.environ.get("LLMSTACK_VERIFY_TIMEOUT", "420") or 420)
+# How long a refused connection right after the llama-swap restart is "not
+# listening yet" rather than "refused" -- see _try_load().
+VERIFY_CONNECT_GRACE = float(os.environ.get("LLMSTACK_VERIFY_CONNECT_GRACE", "15") or 15)
 _verify_task: "asyncio.Task | None" = None
 
 # What an engine says when the weights plus the KV cache do not fit. Matched
@@ -11493,10 +12003,30 @@ async def _try_load(mid: str, want_ctx: int, job: dict) -> tuple[bool, str]:
     assert client is not None
     quoted = quote(mid, safe="")
     deadline = time.time() + VERIFY_TIMEOUT
+
+    async def trigger_load() -> Any:
+        # The save restarted llama-swap a moment ago, and for the first
+        # second or so nothing is listening on its port. That used to be
+        # invisible -- a bare llama-swap listens the instant it starts -- but
+        # one with a start-up preload hook begins loading BEFORE it listens,
+        # and the connect failure that followed was read as "engine refused
+        # the load" and rolled a perfectly good change back (apu-box-1,
+        # 2026-08-29). A refused connection inside that window is "not up
+        # yet"; only one that persists is a verdict.
+        assert client is not None
+        until = time.time() + VERIFY_CONNECT_GRACE
+        while True:
+            try:
+                return await client.get("/upstream/" + quoted + "/health",
+                                        timeout=VERIFY_TIMEOUT)
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if time.time() >= until:
+                    raise
+                await asyncio.sleep(1.0)
+
     # Fired and then polled rather than awaited: a cold load outlives any
     # sensible single request timeout, and /running is where the progress is.
-    trigger = asyncio.ensure_future(
-        client.get("/upstream/" + quoted + "/health", timeout=VERIFY_TIMEOUT))
+    trigger = asyncio.ensure_future(trigger_load())
 
     async def resident() -> bool:
         try:
@@ -11720,6 +12250,7 @@ async def api_models_put(request: Request, admin: dict = Depends(require_admin))
             raise HTTPException(400, "model " + mid + " has no path")
         clean.append(merged)
     check_name_collisions(clean)
+    check_preload_count(clean)
     # Captured before the write, so a rollback has somewhere to roll back TO.
     before = {str(r.get("id")): r for r in load_models()}
     save_models(clean)
@@ -12671,6 +13202,26 @@ def load_peers() -> list[dict]:
     return [p for p in data if isinstance(p, dict) and p.get("name") and p.get("url")]
 
 
+def peer_routed(p: dict) -> bool:
+    """The killswitch state of a peer record. Missing means routed: the flag
+    postdates every peers.json in the fleet, and a box that has never been
+    touched by the toggle must route exactly as it always did."""
+    v = p.get("routed", True)
+    if v is False:
+        return False
+    if isinstance(v, str) and v.strip().lower() in ("false", "0", "off", "no"):
+        return False
+    return True
+
+
+def routeable_peers() -> list[dict]:
+    """load_peers() filtered to the ones the routing table may use. A peer
+    whose killswitch is off stays registered, stays on the fleet page with
+    its live/last-known status intact, and is simply not a candidate for any
+    route, warm-up or preload until the toggle is flipped back."""
+    return [p for p in load_peers() if peer_routed(p)]
+
+
 def save_peers(peers: list[dict]) -> None:
     write_atomic(PEERS_PATH, json.dumps(peers, indent=2))
     try:
@@ -12698,6 +13249,7 @@ async def api_fleet(admin: dict = Depends(require_admin)) -> dict:
             "kind": "peer",
             "url": p["url"],
             "api_url": p.get("api_url", ""),
+            "routed": peer_routed(p),
             "online": ok,
         }
 
@@ -12816,9 +13368,15 @@ DEFAULT_SPECS: dict[str, dict] = {
     "gpu-laptop-1":   {"ram_gb": 32, "vram_gb": 8, "mem_bw_gbs": 224, "gpu_tflops": 18,
                    "cpu": "Ryzen 9 6900HS", "gpu": "RX 6700S",
                    "klass": "gpu", "always_on": 1},
+    # A laptop that comes and goes. Ranked behind gpu-laptop-1 (always_on 1) in
+    # the GPU tier on purpose: with no rank at all it sorted FIRST there (an
+    # unranked box defaults to 0), so whenever it was awake it took the 9B
+    # distill's traffic off the always-on box -- and dropped it mid-day when
+    # the lid closed. The hub's demo policy already preferred gpu-laptop-1; this
+    # makes every keyed /v1 request agree with it.
     "gpu-laptop-2":    {"ram_gb": 32, "vram_gb": 8, "mem_bw_gbs": 256, "gpu_tflops": 20,
                    "cpu": "Ryzen AI 9 365", "gpu": "RTX 4070 Laptop (Ollama)",
-                   "klass": "gpu"},
+                   "klass": "gpu", "rank": 2},
     # A gaming desktop that lends the fleet its idle hours. It is the only
     # peer that can be online, healthy and still advertise nothing: its
     # gateway runs with LLMSTACK_AVAILABILITY_FILE set, and a watchdog closes
@@ -12952,6 +13510,7 @@ async def _gather_fleet_overview() -> dict:
             "name": HOST_NAME,
             "kind": "self",
             "online": True,
+            "routed": True,
             "api_url": PUBLIC_API_URL,
             "specs": specs.get(HOST_NAME, {}),
             "status": status,
@@ -12962,6 +13521,7 @@ async def _gather_fleet_overview() -> dict:
             "name": p["name"],
             "kind": "peer",
             "online": False,
+            "routed": peer_routed(p),
             "api_url": p.get("api_url", ""),
             "specs": specs.get(p["name"], {}),
             "status": None,
@@ -13118,6 +13678,10 @@ async def api_served_models(admin: dict = Depends(require_admin)) -> dict:
         # warm-up button's download path are built on.
         "meta": meta,
         "engine": engine,
+        # What this box keeps warm on its own account (models.json preload /
+        # persistent). The hub's preload loop does not touch a box that
+        # names something here other than the featured model.
+        "warm": sorted(local_warm_ids()),
     }
 
 
@@ -13146,6 +13710,11 @@ async def api_peers(admin: dict = Depends(require_admin)) -> list[dict]:
             "url": p["url"],
             "api_url": p.get("api_url", ""),
             "has_token": bool(p.get("token")),
+            # The killswitch: False means the hub refuses to route to this
+            # peer, whatever it advertises. Absent on an older peers.json
+            # means routed, which is why every reader goes through
+            # peer_routed() rather than p["routed"].
+            "routed": peer_routed(p),
         }
         for p in load_peers()
     ]
@@ -13177,11 +13746,47 @@ async def api_peers_put(request: Request, admin: dict = Depends(require_admin)) 
                 "api_url": str(p.get("api_url", "")).strip(),
                 # minted lazily by peer_inference_key(); preserved across edits
                 "inference_key": existing.get(name, {}).get("inference_key", ""),
+                # The peer editor's form never sends this field -- it is owned
+                # by the killswitch toggle on the home page -- so an edit made
+                # with a box killed must not silently re-route it, and a PUT
+                # cannot kill a box either.
+                "routed": peer_routed(existing[name]) if name in existing
+                          else True,
             }
         )
     save_peers(clean)
     _routes_cache["t"] = 0.0  # peer set changed; rebuild the routing table
     return {"saved": len(clean)}
+
+
+@app.put("/admin/api/peers/{name}/routed")
+async def api_peer_routed(name: str, request: Request,
+                          admin: dict = Depends(require_admin)) -> dict:
+    """The killswitch, set from the home page's machine cards.
+
+    The ONLY thing that changes 'routed' -- the peers form's PUT preserves it
+    on purpose, so a box a human has killed stays killed across any other
+    edit. The effect is immediate: the routing table is invalidated here, and
+    model_routes() re-reads the flag on every refresh (routeable_peers())."""
+    payload = await request.json()
+    routed = payload.get("routed")
+    if not isinstance(routed, bool):
+        raise HTTPException(400, "expected {routed: true|false}")
+    if not SAFE_PEER.match(name):
+        raise HTTPException(400, "bad peer name")
+    peers = load_peers()
+    if not any(p["name"] == name for p in peers):
+        raise HTTPException(404, "unknown peer: " + name)
+    for p in peers:
+        if p["name"] == name:
+            p["routed"] = routed
+    save_peers(peers)
+    _routes_cache["t"] = 0.0
+    # And the remembered context ceilings, which are cached for 30s of their
+    # own: a killed box must stop advertising a window the hub will not route
+    # to before the next catalogue read, not half a minute after it.
+    _known_ctx_cache["t"] = 0.0
+    return {"name": name, "routed": routed}
 
 
 @app.api_route(
