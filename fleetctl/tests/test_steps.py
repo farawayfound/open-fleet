@@ -322,6 +322,52 @@ class TestServiceUnits:
                 assert "pgrep -qf 'uvicorn app:app'" in line
 
 
+class TestTheLlamaSwapKeepaliveMatchesALiveEngine:
+    """Regression pin for the mac-laptop-1 incident: run-llama-swap.sh execs the
+    llama-swap binary, so no live process ever carries the wrapper's own
+    filename. A keepalive that pgreps for 'run-llama-swap' matches nothing
+    (or its own cron shell) and spawns a doomed duplicate llama-swap every
+    five minutes -- each duplicate's start-up preload is what orphaned a
+    21 GB llama-server on mac-laptop-1 before the duplicate failed to bind the
+    port."""
+
+    # What run-llama-swap.sh's final `exec` line hands the kernel -- the argv
+    # a LIVE engine process carries, as ps/pgrep would see it.
+    WRAPPER_ARGV = ("/opt/llmstack/bin/llama-swap "
+                     "-config /opt/llmstack/etc/llama-swap.yaml")
+
+    def test_the_pattern_is_a_substring_of_the_wrapper_s_exec_d_argv(
+            self, darwin_facts, empty_repo, tmp_path):
+        from fleetctl.steps.services import Services
+
+        ctx = ctx_for(darwin_facts, empty_repo, tmp_path)
+        assert ctx.plan["platform"]["service"] == "cron"
+        assert ctx.plan["engine"]["llama_swap"]
+
+        swap_lines = [line for tag, line in Services()._cron_lines(ctx)
+                      if "llama-swap" in tag]
+        assert swap_lines
+        for line in swap_lines:
+            assert "pgrep -qf 'bin/llama-swap -config'" in line
+            pattern = line.split("pgrep -qf '", 1)[1].split("'", 1)[0]
+            # It would actually match a live engine, not just look plausible.
+            assert pattern in self.WRAPPER_ARGV
+            # And it can never match the wrapper's own filename -- that is
+            # the pattern that started this incident.
+            assert "run-llama-swap" not in pattern
+
+    def test_the_gateway_keepalive_is_unaffected(self, darwin_facts,
+                                                  empty_repo, tmp_path):
+        from fleetctl.steps.services import Services
+
+        ctx = ctx_for(darwin_facts, empty_repo, tmp_path)
+        gw_lines = [line for tag, line in Services()._cron_lines(ctx)
+                    if "gateway" in tag]
+        assert gw_lines
+        for line in gw_lines:
+            assert "pgrep -qf 'uvicorn app:app'" in line
+
+
 class TestWindowsWrappers:
     def test_the_engine_wrapper_pins_the_visible_device(self, windows_facts,
                                                         empty_repo, tmp_path):

@@ -27,6 +27,7 @@ for a step it never ran would be worse than no sandbox.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -294,7 +295,7 @@ class Ctx:
             except OSError:
                 pass
         elif not mode & 0o004:
-            self.restrict(target)
+            self._narrow(target)
         return True
 
     # Well-known SIDs rather than names: "Administrators" is localised, and
@@ -332,25 +333,67 @@ class Ctx:
         Returns whether it ran, so a caller can report "narrowed" only where
         that means something.
         """
+        return self._narrow(self.path(p))
+
+    def _narrow(self, target: Path) -> bool:
+        """restrict(), for a path already resolved through path().
+
+        write() has one of those in hand, and handing it back to restrict()
+        resolved it twice: under `--root sandbox` the second pass produced
+        sandbox/sandbox/C/..., icacls reported a file it could not find, and
+        the file just written kept its parent's ACL. The absolute-root runs
+        here hid it -- their narrowing came from apply() on an unchanged
+        file, which resolves once -- and CI's relative root did not.
+        """
         if self.family != "windows":
             return False
-        target = self.path(p)
         grants = list(self._SECRET_ACL)
-        user = os.environ.get("USERNAME")
-        if user:
-            grants.append(f"{user}:(F)")
+        me = self._self_grant()
+        if me:
+            grants.append(me)
         try:
-            self.run(["icacls", str(target), "/reset"], check=False)
-            self.run(["icacls", str(target), "/inheritance:r", "/grant:r",
-                      *grants], check=False)
-        except OSError:
+            for argv in (["icacls", str(target), "/reset"],
+                         ["icacls", str(target), "/inheritance:r", "/grant:r",
+                          *grants]):
+                r = self.run(argv, check=False)
+                out = ((r.stdout or "") + (r.stderr or "")).strip() if r else ""
+                if r is not None and (r.returncode != 0 or
+                                      re.search(r"Failed processing [1-9]", out)):
+                    # check=False because a failure here must not end the
+                    # run -- but it must not be silent either: the check
+                    # that follows will report the file still open, and
+                    # "why" is only ever in icacls' own output. It does not
+                    # always say it with the exit code, hence the text.
+                    self.note(f"icacls could not narrow {target} "
+                              f"(exit {r.returncode}): "
+                              + " | ".join(out.splitlines()[-3:]))
+                    return False
+        except OSError as exc:
             # No icacls on PATH -- a stripped image, or a System32 that is not
             # on it. The file is written either way and the narrowing simply
             # did not take, which is how the chmod above fails too. A secret
             # that lands wide is a worse outcome than this, but a provisioning
             # run that dies here is worse than both.
+            self.note(f"icacls could not narrow {target}: {exc}")
             return False
         return True
+
+    def _self_grant(self) -> str:
+        """The running account as icacls wants it: by SID where whoami can
+        say, by name where it cannot.
+
+        USERNAME is what the caller was told it is; the token is what it is.
+        On a hosted runner the two came apart -- the grant went to a name
+        the ACL check did not recognise as itself, and every apply reported
+        one stranger it had just added. whoami reads the token.
+        """
+        r = self.probe(["whoami", "/user", "/fo", "csv", "/nh"])
+        if r is not None and r.returncode == 0:
+            m = re.search(r'"(S-1-[0-9-]+)"\s*$', (r.stdout or "").strip())
+            if m:
+                return f"*{m.group(1)}:(F)"
+        user = os.environ.get("USERNAME")
+        return f"{user}:(F)" if user else ""
 
     def acl_strangers(self, p: str | Path) -> list[str] | None:
         """Accounts that can reach a secret and have no business there.
@@ -376,6 +419,9 @@ class Ctx:
         script = (
             "$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
             "'ME|' + $me; "
+            "try { 'USER|' + ([Security.Principal.NTAccount]$env:USERNAME)"
+            ".Translate([Security.Principal.SecurityIdentifier]).Value } "
+            "catch { }; "
             f"foreach ($a in (Get-Acl -LiteralPath '{lit}').Access) {{ "
             "$sid = try { $a.IdentityReference.Translate("
             "[Security.Principal.SecurityIdentifier]).Value } "
@@ -397,17 +443,16 @@ class Ctx:
             self.note(f"could not read the ACL of {self.display(p)}; "
                       f"treating it as unknown, not as clean")
             return None
-        me = ""
+        # Both the token's SID and USERNAME's: whichever restrict() managed
+        # to grant is us, not a stranger.
+        allowed = set(self._SECRET_SIDS)
         rows: list[tuple[str, str]] = []
         for line in (r.stdout or "").splitlines():
             parts = line.strip().split("|")
-            if parts[0] == "ME" and len(parts) == 2:
-                me = parts[1]
+            if parts[0] in ("ME", "USER") and len(parts) == 2 and parts[1]:
+                allowed.add(parts[1])
             elif parts[0] == "ACE" and len(parts) == 3:
                 rows.append((parts[1], parts[2]))
-        allowed = set(self._SECRET_SIDS)
-        if me:
-            allowed.add(me)
         return sorted({name for sid, name in rows if sid not in allowed})
 
     def elevation_hint(self) -> str:

@@ -78,8 +78,10 @@ def on_darwin(monkeypatch, tmp_path):
 class TestDarwinRestart:
     def test_restart_kills_the_engine_and_relaunches_the_runner(
             self, monkeypatch, on_darwin):
-        # pgrep: gone after the kill, then present after the relaunch.
-        rec = Recorder(alive=[1, 0])
+        # pgrep: gone after the kill, still gone at the orphan-reap check
+        # (which then pkills any leftover llama-server -- see
+        # test_darwin_orphan_reap.py), then present after the relaunch.
+        rec = Recorder(alive=[1, 1, 0])
         pop = FakePopen()
         monkeypatch.setattr(gw.subprocess, "run", rec)
         monkeypatch.setattr(gw.subprocess, "Popen", pop)
@@ -94,7 +96,7 @@ class TestDarwinRestart:
         gone from the process it becomes. `pgrep -f run-llama-swap` -- what the
         cron line itself uses -- matches only the /bin/sh wrapper above it, and
         killing by that orphans a live llama-swap still holding :8081."""
-        rec = Recorder(alive=[1, 0])
+        rec = Recorder(alive=[1, 1, 0])
         monkeypatch.setattr(gw.subprocess, "run", rec)
         monkeypatch.setattr(gw.subprocess, "Popen", FakePopen())
         gw.service_control("restart", "llama-swap")
@@ -104,7 +106,7 @@ class TestDarwinRestart:
 
     def test_the_engine_is_detached_so_a_gateway_restart_cannot_take_it_down(
             self, monkeypatch, on_darwin):
-        rec = Recorder(alive=[1, 0])
+        rec = Recorder(alive=[1, 1, 0])
         pop = FakePopen()
         monkeypatch.setattr(gw.subprocess, "run", rec)
         monkeypatch.setattr(gw.subprocess, "Popen", pop)

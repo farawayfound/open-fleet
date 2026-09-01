@@ -205,6 +205,18 @@ def cmd_plan(args) -> int:
     return 1 if problems else 0
 
 
+def _flush_notes(ctx: Ctx) -> None:
+    # Before every way out of _run_steps, not only the one at the bottom. A
+    # step that failed to narrow a file left a note saying why, and the
+    # UNCHANGED return that followed threw the run away with the note still
+    # in it -- three CI rounds to learn what one line would have said.
+    if ctx.notes:
+        print()
+        for note in ctx.notes:
+            print(YELLOW(f"  note: {note}"))
+        ctx.notes.clear()
+
+
 def _run_steps(ctx: Ctx, args, *, apply_it: bool) -> int:
     chosen = steps_mod.selected(ctx, args.only)
     worst = 0
@@ -259,6 +271,7 @@ def _run_steps(ctx: Ctx, args, *, apply_it: bool) -> int:
                         continue
                 except (StepFailed, Exception) as exc:  # noqa: BLE001
                     print(f"  {RED('FAILED')}  {step.id:<16} {exc}")
+                    _flush_notes(ctx)
                     return 2
                 after = step.check(ctx)
                 if after.state in NEEDS_WORK:
@@ -268,13 +281,11 @@ def _run_steps(ctx: Ctx, args, *, apply_it: bool) -> int:
                     # like from the outside.
                     print(f"  {RED('UNCHANGED')} {step.id:<16} "
                           f"still {after.state}: {after.detail}")
+                    _flush_notes(ctx)
                     return 2
                 worst = 0 if worst == 1 else worst
 
-    if ctx.notes:
-        print()
-        for note in ctx.notes:
-            print(YELLOW(f"  note: {note}"))
+    _flush_notes(ctx)
     if ctx.dry_run and planned:
         print()
         print(CYAN(f"  {len(planned)} action(s) a real apply would take"))

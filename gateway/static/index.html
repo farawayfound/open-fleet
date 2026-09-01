@@ -36,6 +36,28 @@
   nav button.on{color:#04121a;background:var(--accent);font-weight:600}
   main{padding:22px;max-width:1400px;margin:0 auto}
   section{display:none} section.on{display:block}
+  /* A tab whose subject has grown past a screenful of scrolling gets its own
+     vertical nav and one pane per subject -- the Public tab was eight screens
+     deep, so a card in the middle of it (auto-issue, say) was findable only
+     by knowing it was there. */
+  .subwrap{display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;align-items:start}
+  .subnav{position:sticky;top:66px;display:flex;flex-direction:column;gap:2px;
+          background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:8px}
+  .subnav button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+                 background:transparent;border:1px solid transparent;color:var(--muted);
+                 padding:7px 11px;border-radius:7px;cursor:pointer;font:inherit;font-size:13px}
+  .subnav button:hover{color:var(--fg);background:var(--panel2)}
+  .subnav button.on{color:var(--fg);background:var(--panel2);border-color:var(--line);
+                    font-weight:600;box-shadow:inset 2px 0 0 var(--accent)}
+  .subnav .n{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .subnav button.on .n{color:var(--fg)}
+  .pane{display:none} .pane.on{display:block}
+  @media(max-width:900px){
+    .subwrap{grid-template-columns:minmax(0,1fr)}
+    .subnav{position:static;flex-direction:row;flex-wrap:wrap}
+    .subnav button{width:auto}
+    .subnav button.on{box-shadow:none}
+  }
   .grid{display:grid;gap:14px}
   .g4{grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
   .g3{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
@@ -76,6 +98,11 @@
   .pill.ok{color:var(--good);border-color:#255b39;background:#12241a}
   .pill.no{color:var(--bad);border-color:#5b2530;background:#241216}
   .pill.mid{color:var(--warn);border-color:#5b4325;background:#241d12}
+  /* a name that means different models on different boxes -- see
+     renderAliasConflicts() */
+  .warnbox{margin-top:10px;padding:10px 12px;border:1px solid #5b4325;
+    border-radius:9px;background:#211a11;font-size:12px;line-height:1.55}
+  .clashrow{margin-top:8px;padding-top:8px;border-top:1px solid #3a2f1d}
   .pill.dim{color:var(--muted)}
   /* The routing switch. A switch and not a button because it is showing a
      state that persists, not offering an action: the position of the knob is
@@ -136,12 +163,24 @@
   .machine{cursor:pointer;transition:border-color .15s}
   .machine:hover{border-color:var(--accent)}
   /* An offline card still carries its last-known numbers, so it has to read
-     as stale at a glance rather than as live telemetry. The killswitch row
-     inside it stays at full strength -- it is the one control that still
-     does something on a box that is down. */
+     as stale at a glance rather than as live telemetry. */
   .machine.off{opacity:.62}
   .machine.off:hover{opacity:1}
-  .machine.off .krow{opacity:1}
+  /* ---- Configurations: two drag lists ----
+     Same live-DOM reordering the host pills use; rows are fatter because a
+     row is a machine, not a shortcut. */
+  .cfglist{display:flex;flex-direction:column;gap:6px;min-height:56px;
+           border-radius:8px}
+  .cfglist.dragover{outline:1px dashed var(--accent);outline-offset:4px}
+  .cfgrow{display:flex;align-items:center;gap:10px;padding:8px 12px;
+          border:1px solid var(--line);border-radius:8px;background:var(--panel2);
+          cursor:grab}
+  .cfgrow:hover{border-color:var(--accent)}
+  .cfgrow.dragging{opacity:.35}
+  .cfgrow.pinned{cursor:default;opacity:.75}
+  .cfgrow .num{font-family:var(--mono);color:var(--muted);min-width:22px}
+  .cfgrow .cname{font-family:var(--mono);font-weight:600;font-size:14px}
+  .cfgrow .grow{flex:1}
   .machine .mname{font-size:15px;font-weight:600;font-family:var(--mono)}
   .machine .mrow{display:flex;justify-content:space-between;font-size:12px;
                  color:var(--muted);margin-top:4px;gap:8px}
@@ -202,6 +241,7 @@
     <button data-t="fleetjobs">Jobs</button>
     <button data-t="teams">Teams</button>
     <button data-t="public">Public</button>
+    <button data-t="config">Configurations</button>
   </nav>
   <nav id="nodenav" style="display:none">
     <button data-t="overview">Overview</button>
@@ -383,6 +423,31 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
 
 <!-- ================= PUBLIC (Fleet Pass) ================= -->
 <section id="public">
+<div class="subwrap">
+  <!-- A div, not a <nav>: showTab() drives every `nav button` on the page as a
+       top-level tab, and these are not that. role=tablist says what it is. -->
+  <div class="subnav" id="pubnav" role="tablist" aria-orientation="vertical"
+       aria-label="Fleet Pass sections">
+    <button role="tab" aria-selected="true" aria-controls="pub-glance" data-p="glance" class="on"
+      >At a glance<span class="n" id="pubn_glance"></span></button>
+    <button role="tab" aria-selected="false" aria-controls="pub-models" data-p="models"
+      >Public models</button>
+    <button role="tab" aria-selected="false" aria-controls="pub-employers" data-p="employers"
+      >Eligible employers</button>
+    <button role="tab" aria-selected="false" aria-controls="pub-keys" data-p="keys"
+      >Issued keys</button>
+    <button role="tab" aria-selected="false" aria-controls="pub-auto" data-p="auto"
+      >Auto-issue<span class="n" id="pubn_auto"></span></button>
+    <button role="tab" aria-selected="false" aria-controls="pub-activity" data-p="activity"
+      >Activity</button>
+    <button role="tab" aria-selected="false" aria-controls="pub-settings" data-p="settings"
+      >Settings</button>
+    <button role="tab" aria-selected="false" aria-controls="pub-aliases" data-p="aliases"
+      >Box aliases</button>
+  </div>
+  <div class="panes">
+
+  <div class="pane on" id="pub-glance" role="tabpanel">
   <h2 class="sec" style="margin-top:0">At a glance</h2>
   <div class="grid g4" id="pubglance"></div>
   <div class="spacer"></div>
@@ -397,7 +462,10 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div style="overflow-x:auto"><table id="pubpendtab"><tbody></tbody></table></div>
   </div>
 
-  <h2 class="sec">Public models</h2>
+  </div>
+
+  <div class="pane" id="pub-models" role="tabpanel">
+  <h2 class="sec" style="margin-top:0">Public models</h2>
   <div class="card" style="overflow-x:auto">
     <div class="tbar">
       <span class="muted" style="font-size:12px">The catalogue clients pick from —
@@ -423,7 +491,10 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div id="pubpreload"></div>
   </div>
 
-  <h2 class="sec">Eligible employers</h2>
+  </div>
+
+  <div class="pane" id="pub-employers" role="tabpanel">
+  <h2 class="sec" style="margin-top:0">Eligible employers</h2>
   <div class="card" style="overflow-x:auto">
     <div class="row" id="pubdomsummary" style="margin-bottom:10px"></div>
     <div class="tbar">
@@ -467,7 +538,10 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     </div>
   </div>
 
-  <h2 class="sec">Issued keys</h2>
+  </div>
+
+  <div class="pane" id="pub-keys" role="tabpanel">
+  <h2 class="sec" style="margin-top:0">Issued keys</h2>
   <div class="card" style="overflow-x:auto">
     <div class="tbar">
       <div class="field"><label class="f">search</label>
@@ -480,6 +554,12 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
           <option value="pending">pending</option>
           <option value="denied">denied</option>
           <option value="revoked">revoked</option>
+        </select></div>
+      <div class="field"><label class="f">source</label>
+        <select id="pk_source" style="width:auto" onchange="PAGE.pubkeys=0;loadPubKeys()">
+          <option value="">any source</option>
+          <option value="auto">auto-issued (connected services)</option>
+          <option value="manual">by hand</option>
         </select></div>
       <button class="act" style="align-self:flex-end" onclick="PAGE.pubkeys=0;loadPubKeys()">Filter</button>
       <span class="muted" id="pubkeysmeta" style="font-size:12px"></span>
@@ -513,8 +593,48 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div class="spacer"></div>
     <button class="act primary" onclick="issuePubKeyByHand()">Issue key</button>
   </div>
+  <div class="spacer"></div>
+  </div>
 
-  <h2 class="sec">Activity</h2>
+  <div class="pane" id="pub-auto" role="tabpanel">
+  <h2 class="sec" style="margin-top:0">Auto-issue for connected services</h2>
+  <div class="card" data-help="auto-issue">
+    <h3>Terms</h3>
+    <p class="hint" style="margin-top:0">A service you run &mdash; a job-search autopilot that hands a
+      recruiter a live key inside a cover letter, say &mdash; mints keys here with no person in the loop:
+      <span class="mono">POST /admin/api/public/keys/auto</span> with the admin token, one key per
+      application or message. The key comes out exactly like an approval (the model below, the lifetime
+      and budgets under Limits) and lands in the table above under source
+      <span class="mono">auto:&lt;service&gt;</span>, where it can be revoked or extended. The raw key is
+      returned once to the caller instead of being e-mailed. The service holds none of these settings
+      &mdash; this card is the only place they live.</p>
+    <div class="row">
+      <div class="field"><label class="f">auto-issue</label>
+        <select id="ps_auto_enabled" style="width:90px"><option value="1">on</option><option value="0">off</option></select></div>
+      <div class="field"><label class="f">auto-issue model</label><select id="ps_auto_model" style="width:auto"></select></div>
+      <div class="field"><label class="f">auto-issue ctx</label>
+        <input class="s" id="ps_auto_ctx" type="number" step="1024"></div>
+      <div class="field"><label class="f">daily cap</label>
+        <input class="s" id="ps_auto_daily_cap" type="number"></div>
+    </div>
+    <div class="spacer"></div>
+    <label class="f">setup text</label>
+    <textarea id="ps_auto_setup" style="min-height:90px"></textarea>
+    <div class="spacer"></div>
+    <div id="pubautoline" class="muted" style="font-size:12px"></div>
+    <div class="spacer"></div>
+    <div class="row">
+      <button class="act primary" onclick="savePubSettings()">Save settings</button>
+      <button class="act" onclick="mintAutoTestKey()">Mint a test key</button>
+      <button class="act" onclick="loadPubAuto()">Refresh</button>
+    </div>
+    <div id="pubautokey" style="margin-top:8px"></div>
+  </div>
+
+  </div>
+
+  <div class="pane" id="pub-activity" role="tabpanel">
+  <h2 class="sec" style="margin-top:0">Activity</h2>
   <div class="card" style="overflow-x:auto">
     <div class="tbar">
       <div class="field"><label class="f">event</label>
@@ -534,7 +654,10 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div id="pubevpager"></div>
   </div>
 
-  <h2 class="sec">Settings</h2>
+  </div>
+
+  <div class="pane" id="pub-settings" role="tabpanel">
+  <h2 class="sec" style="margin-top:0">Settings</h2>
   <div class="card">
     <h3>Limits</h3>
     <div class="row">
@@ -667,7 +790,10 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     </div>
   </div>
 
-  <h2 class="sec">Box aliases</h2>
+  </div>
+
+  <div class="pane" id="pub-aliases" role="tabpanel">
+  <h2 class="sec" style="margin-top:0">Box aliases</h2>
   <div class="card" style="overflow-x:auto">
     <p class="hint" style="margin-top:0" data-help="box aliases">Every host the public overview or the
       Fleet Pass e-mails can name is sanitized to <span class="mono">Box N</span> (the hub as
@@ -675,6 +801,51 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       number is assigned the first time a host is seen and then kept for good, so it does not shuffle
       as peers come and go. This table is the only place on the dashboard that shows the mapping back.</p>
     <table id="pubaliastab"><tbody></tbody></table>
+  </div>
+  </div>
+
+  </div>
+</div>
+</section>
+
+<!-- ================= CONFIGURATIONS (fleet) ================= -->
+<section id="config">
+  <div class="grid g2">
+    <div class="card">
+      <h3>Routing order</h3>
+      <p class="hint">Drag to set which box the fleet prefers. The order breaks
+        ties among boxes that can equally serve a model — a box that must spill
+        a model out of its GPU memory still sits behind one that holds it, and
+        the hub always goes last. Drag a box to <b>Not in use</b> to stop
+        routing to it entirely. Changes save as you drop.</p>
+      <div class="cfglist" id="cfg-order" data-list="order"></div>
+    </div>
+    <div class="card">
+      <h3>Not in use</h3>
+      <p class="hint">The hub sends these boxes nothing, whatever they
+        advertise — the same switch the machine cards used to carry. They stay
+        registered and visible, and drag back into the routing order at any
+        time.</p>
+      <div class="cfglist" id="cfg-out" data-list="out"></div>
+      <div class="spacer"></div>
+      <h3>Reserve boxes</h3>
+      <p class="hint">A <span class="pill dim">reserve</span> box is somebody's
+        personal machine: it stays in the routing order but is chosen only when
+        every other candidate is saturated or cooling, and the warm-up loop
+        never touches it. Click any box in the two lists above to open it and
+        flip its reserve flag there.</p>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <div class="card">
+    <h3>How a request picks its box</h3>
+    <p class="hint" style="margin-bottom:0">In order: a box with a free decode
+      slot beats a saturated one · a box that has not just failed a request
+      beats one cooling down · fleet boxes beat <b>reserve</b> boxes · a box
+      whose GPU holds the whole model beats one that spills · then <b>this
+      order</b> · then whichever is expected to answer soonest. The drag order
+      applies wherever this hub routes; each box's own dashboard still routes
+      its direct traffic with the shipped defaults.</p>
   </div>
 </section>
 
@@ -710,9 +881,23 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <table id="running"><tbody></tbody></table>
       <div class="spacer"></div>
       <div class="row">
+        <select id="loadpick" style="min-width:170px"
+          data-help="load a model"><option value="">— load a model —</option></select>
+        <button class="act" onclick="loadModelNow()">Load</button>
         <button class="act" onclick="unloadAll()">Unload all</button>
         <button class="act" onclick="svcAction('restart','llama-swap')">Restart llama-swap</button>
       </div>
+      <div class="spacer"></div>
+      <div class="row">
+        <span class="muted" style="font-size:12px">warm at startup</span>
+        <select id="warmpick" style="min-width:170px" data-help="warm at startup"></select>
+        <button class="act" onclick="applyWarm()">Set</button>
+      </div>
+      <div class="hint">Loading evicts whatever is resident (one model at a
+        time) and shows up under Active jobs while it runs. <b>Warm at
+        startup</b> is the model this box preloads whenever the engine starts
+        — pick <i>none</i> and the box loads nothing until asked. Setting it
+        restarts llama-swap.</div>
     </div>
   </div>
   <div class="spacer"></div>
@@ -737,9 +922,12 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div class="card">
       <h3>Fleet model routing</h3>
       <table id="routetab"><tbody></tbody></table>
+      <div id="aliasclash" style="display:none"></div>
+      <div id="roles" style="margin-top:10px"></div>
       <div class="hint">Which box answers each model id on this gateway's
         <span class="mono">/v1</span>. A model served here wins over the same id
-        on a peer; anything else is forwarded to the host that has it.</div>
+        on a peer; anything else is forwarded to the host that has it — and when
+        several boxes have it, to whichever the scorer expects to answer soonest.</div>
     </div>
   </div>
   <div class="spacer"></div>
@@ -797,16 +985,22 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <b>Optimize</b> tab.<br>
       <b>think</b> controls hybrid reasoning. On <code>auto</code> these models can
       spend an entire <code>max_tokens</code> budget thinking and return empty
-      content — set <code>off</code> if a client reports blank replies.</p>
+      content — set <code>off</code> if a client reports blank replies.<br>
+      <b>warm</b> is this box's standby policy: <code>startup</code> preloads the
+      model whenever the engine starts (one per box; pair with ttl 0 to keep it
+      for good), <code>always</code> pins it resident beside the swap group so
+      nothing evicts it. The Overview card's “warm at startup” control drives
+      the same flag.</p>
     <div style="overflow-x:auto">
       <table id="mtab">
         <thead><tr>
           <th>On</th><th>Model id</th><th>GGUF</th>
           <th class="num">ctx</th><th class="num">ngl</th><th class="num">n-cpu-moe</th>
-          <th>think</th><th class="num">ttl s</th><th>extra flags</th><th></th>
+          <th>think</th><th class="num">ttl s</th><th>warm</th><th>extra flags</th><th></th>
         </tr></thead>
         <tbody></tbody>
       </table>
+      <div id="converged" class="muted" style="display:none;font-size:12px;margin-top:6px"></div>
     </div>
     <div class="spacer"></div>
     <div class="row">
@@ -1377,10 +1571,10 @@ const archLabel = on => on ? "Show live" : "Show archived";
 // as a whole (Home, Jobs, Teams); a host pill and the node nav belong to one
 // machine. MODE says which level is showing, and the pills only light up when
 // a machine is actually the subject.
-const FLEET_TABS = new Set(["home", "fleetjobs", "teams", "public"]);
+const FLEET_TABS = new Set(["home", "fleetjobs", "teams", "public", "config"]);
 let MODE = "fleet";
 const LOADERS = {home: loadHome, fleetjobs: loadFleetJobs, teams: loadTeams,
-  public: loadPublic,
+  public: loadPublic, config: loadConfig,
   overview: loadStatus, models: loadModels,
   optimize: loadOptimize, library: loadLibrary, keys: loadKeys, agents: loadAgents,
   usage: loadUsage, logs: loadLogs};
@@ -1395,6 +1589,31 @@ function showTab(t) {
   tabLoad(t);
 }
 $$("nav button").forEach(b => b.onclick = () => showTab(b.dataset.t));
+
+// ---- public: one tab, one pane at a time ----
+// The Fleet Pass tab is one subject but eight screens of it, and a card in
+// the middle (the auto-issue terms, the fallback policy) could only be found
+// by scrolling past everything else. Each subject is now its own pane behind
+// the vertical nav, and the chosen one is remembered -- coming back to the
+// tab should land where the work was, not at the top.
+const PUB_PANES = ["glance", "models", "employers", "keys", "auto",
+                   "activity", "settings", "aliases"];
+function showPubPane(p) {
+  if (!PUB_PANES.includes(p)) p = "glance";
+  $$("#pubnav button").forEach(b => {
+    const on = b.dataset.p === p;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-selected", String(on));
+  });
+  for (const k of PUB_PANES) {
+    const el = $("#pub-" + k);
+    if (el) el.classList.toggle("on", k === p);
+  }
+  try { localStorage.setItem("pubpane", p); } catch (e) { /* private mode */ }
+}
+$$("#pubnav button").forEach(b => b.onclick = () => showPubPane(b.dataset.p));
+try { showPubPane(localStorage.getItem("pubpane") || "glance"); }
+catch (e) { showPubPane("glance"); }
 
 // ---- home: pooled resources, machines, network map, fleet storage ----
 let OVERVIEW = null;
@@ -1621,6 +1840,24 @@ const servingStr = h => {
     ? "" : " (" + esc(m.state || "?") + ")")).join(", ") : "";
 };
 
+// The 1-based routing position of every routed, non-reserve, non-hub machine,
+// by the same key the hub's scorer and the Configurations tab use: spec rank,
+// else always_on, else last, then name. Reserve and not-in-use boxes carry a
+// pill instead of a number -- their position is policy, not order.
+function routePositions(hosts) {
+  const key = h => {
+    const s = h.specs || {};
+    const r = s.rank ?? s.always_on;
+    return [r == null ? 1 : 0, r == null ? 0 : r, h.name];
+  };
+  const inOrder = hosts
+    .filter(h => (h.specs || {}).role !== "hub" && h.kind !== "self"
+              && h.routed !== false && !(h.specs || {}).reserve)
+    .sort((a, b) => { const x = key(a), y = key(b);
+      return x[0] - y[0] || x[1] - y[1] || String(x[2]).localeCompare(y[2]); });
+  return Object.fromEntries(inOrder.map((h, i) => [h.name, i + 1]));
+}
+
 function renderMachines(hosts) {
   const peers = hosts.filter(h => (h.specs || {}).role !== "hub");
   const up = peers.filter(h => h.online);
@@ -1629,28 +1866,30 @@ function renderMachines(hosts) {
   const byRank = (a, b) => bw(b) - bw(a) || hostRes(b).ramT - hostRes(a).ramT;
   up.sort(byRank); down.sort(byRank);
   const hub = hosts.filter(h => (h.specs || {}).role === "hub");
+  const pos = routePositions(hosts);
   const card = h => {
     const st = (h.status && h.status.host) || {};
     const sp = h.specs || {}, r = hostRes(h);
     const nic = ((st.net || {}).interfaces || [])[0];
     const serving = servingStr(h);
     const killed = h.routed === false;
-    // No killswitch on the hub, and none on whichever box is serving this
-    // page: `routed` lives in the hub's peers.json, so this box is not in it
-    // and a PUT naming itself would only ever 404. Both are also the two
-    // machines you would least want a stray click to take out of the fleet.
     const isHub = sp.role === "hub" || h.kind === "self";
     // Offline cards behave like the offline host pills: there is no live
     // session to switch to, but the last-known snapshot is worth opening.
     const open = h.online ? "switchHost" : "showHostDetail";
-    // Status: hub / offline (red) / serving (green) / idle. A killswitched
-    // box carries its state next to it, whether it is up or not.
+    // Status: hub / offline (red) / serving (green) / idle -- and where the
+    // killswitch toggle used to sit, the routing policy itself: this box's
+    // position in the routing order, or why it has none. The policy is
+    // edited on the Configurations tab now; these pills mirror it live.
     let pill;
     if (isHub) pill = '<span class="pill dim">hub</span>';
-    else if (!h.online) pill = '<span class="pill no">offline</span>'
-      + (killed ? ' <span class="pill no">killed</span>' : "");
-    else pill = (serving ? '<span class="pill ok">serving</span>' : '<span class="pill dim">idle</span>')
-      + (killed ? ' <span class="pill no">killed</span>' : "");
+    else if (!h.online) pill = '<span class="pill no">offline</span>';
+    else pill = serving ? '<span class="pill ok">serving</span>' : '<span class="pill dim">idle</span>';
+    if (!isHub) {
+      if (killed) pill += ' <span class="pill no" title="the hub is not sending this box any work — Configurations tab">not in use</span>';
+      else if (sp.reserve) pill += ' <span class="pill dim" title="personal box — routed only when every other candidate is busy">reserve</span>';
+      else if (pos[h.name]) pill += ` <span class="pill arch" title="position in the routing order — Configurations tab">routing #${pos[h.name]}</span>`;
+    }
     return `<div class="card machine${h.online ? "" : " off"}" onclick="${open}('${esc(h.name)}')">
       <div class="row" style="justify-content:space-between">
         <span class="mname">${esc(h.name)}</span>
@@ -1665,22 +1904,17 @@ function renderMachines(hosts) {
       ${sp.gpu_tflops ? `<div class="mrow"><span>GPU compute</span><b>${r.tf ? (r.tfU).toFixed(1) + " / " + r.tf + " TF" : "–"}</b></div>` : ""}
       ${nic ? `<div class="mrow"><span>${esc(nic.name)}${nic.wireless === false ? " (wired)" : " (wifi)"}</span>
         <b>${fmtR(nic.rx_rate)} ↓ · ${fmtR(nic.tx_rate)} ↑</b></div>` : ""}
-      ${isHub ? "" : `<div class="krow"><span class="muted">routing</span><span>
-        <span class="kstate${killed ? " off" : ""}">${killed ? "off" : "on"}</span>
-        <button class="ksw" role="switch" aria-checked="${killed ? "false" : "true"}"
-          title="${killed ? KSW_OFF : KSW_ON}" aria-label="routing to ${esc(h.name)}"
-          onclick="event.stopPropagation(); toggleRouting(this, '${esc(h.name)}')"><span class="kknob"></span></button>
-      </span></div>`}
     </div>`;
   };
   $("#machines").innerHTML = [...up, ...down, ...hub].map(card).join("")
     || `<div class="card muted">no machines registered</div>`;
 }
 
-// The killswitch: the switch flips the hub's routing flag for this peer. The
-// box stays registered and visible on this page -- online or not -- but the
-// hub stops sending any request its way until the switch goes back on.
-// This page only ever loads from the hub, so the PUT goes straight at it.
+// The killswitch: flips the hub's routing flag for one peer. It used to be a
+// switch on every machine card; it lives in the Configurations tab's box
+// detail now (and as the drag to "Not in use"), but the endpoint and the
+// switch widget are the same. The box stays registered and visible -- online
+// or not -- the hub just stops sending any request its way.
 const KSW_ON = "the hub may route requests to this box";
 const KSW_OFF = "the hub is not sending this box any work";
 
@@ -1696,19 +1930,186 @@ async function toggleRouting(btn, name) {
   if (btn.classList.contains("busy")) return;   // one flip in flight at a time
   const on = btn.getAttribute("aria-checked") === "true";
   // Move first. A switch whose knob waits on a round trip reads as a switch
-  // that did nothing, which is the whole reason this replaced a button and a
-  // toast: the position of the knob is the feedback, so nothing else has to
-  // announce the result. If the hub refuses, it slides back and says why.
+  // that did nothing: the position of the knob is the feedback, so nothing
+  // else has to announce the result. If the hub refuses, it slides back and
+  // says why.
   setSwitch(btn, !on, true);
   try {
     await rawApi("/peers/" + encodeURIComponent(name) + "/routed",
       {method: "PUT", body: {routed: !on}});
     setSwitch(btn, !on, false);
     loadHome();                                  // redraw from the hub's answer
+    loadConfig();                                // both views mirror one flag
   } catch (e) {
     setSwitch(btn, on, false);
     toast("routing " + name + ": " + e.message, true);
   }
+}
+
+// ---- Configurations: routing order, not-in-use, reserve ----
+// One page for the routing policy. The order list is drag-and-drop (same
+// live-DOM insertBefore idiom the host pills use); dropping saves at once,
+// and the machine cards on Home mirror the result on their next poll.
+let CFG = null;
+let CFGDRAG = null;
+
+async function loadConfig() {
+  const box = $("#cfg-order");
+  if (!box) return;
+  try { CFG = await rawApi("/fleet-config"); }
+  catch (e) {
+    box.innerHTML = `<div class="muted">could not load: ${esc(e.message)}</div>`;
+    $("#cfg-out").innerHTML = "";
+    return;
+  }
+  renderConfig();
+}
+
+function cfgRow(name, idx) {
+  const h = (CFG.hosts || {})[name] || {name};
+  const ov = OVERVIEW && (OVERVIEW.hosts || []).find(x => x.name === name);
+  const online = ov ? ov.online : null;
+  const dot = online == null ? "" :
+    `<span class="pill ${online ? "ok" : "no"}">${online ? "up" : "down"}</span>`;
+  const pin = h.self;  // this box (the hub) routes itself last; not draggable
+  return `<div class="cfgrow${pin ? " pinned" : ""}" data-name="${esc(name)}"
+      ${pin ? "" : `draggable="true" ondragstart="cfgDragStart(event,this)" ondragend="cfgDragEnd()"`}
+      onclick="cfgDetail('${esc(name)}')">
+    <span class="num">${idx != null ? "#" + (idx + 1) : ""}</span>
+    <span class="cname">${esc(name)}</span>
+    <span class="pill dim">${esc(h.klass || "?")}</span>
+    ${h.reserve ? '<span class="pill dim">reserve</span>' : ""}
+    ${h.self ? '<span class="pill dim">this box — always last</span>' : ""}
+    <span class="grow"></span>${dot}
+  </div>`;
+}
+
+// Position numbers count only the boxes that compete in the normal order —
+// reserve boxes and this box itself carry a pill instead, exactly as the
+// Home page's "routing #N" pills do (routePositions), so the two views
+// never show the same box under two different numbers.
+function cfgPosition(name) {
+  if (!CFG) return null;
+  let n = 0;
+  for (const other of CFG.order || []) {
+    const h = (CFG.hosts || {})[other] || {};
+    if (h.self || h.reserve) continue;
+    n++;
+    if (other === name) return n;
+  }
+  return null;
+}
+
+function renderConfig() {
+  const order = CFG.order || [], out = CFG.not_in_use || [];
+  $("#cfg-order").innerHTML =
+    order.map(n => {
+      const p = cfgPosition(n);
+      return cfgRow(n, p == null ? null : p - 1);
+    }).join("")
+    || `<div class="muted">no boxes are routed</div>`;
+  $("#cfg-out").innerHTML = out.map(n => cfgRow(n, null)).join("")
+    || `<div class="muted">every registered box is in use</div>`;
+  if (Object.keys(CFG.hosts || {}).length <= 1)
+    $("#cfg-order").innerHTML += `<div class="hint">This box has no peers —
+      the routing order lives on the hub's dashboard.</div>`;
+}
+
+function cfgDragStart(e, row) {
+  CFGDRAG = row;
+  e.dataTransfer.effectAllowed = "move";
+  try { e.dataTransfer.setData("text/plain", row.dataset.name); } catch (err) {}
+  setTimeout(() => row.classList.add("dragging"), 0);
+}
+
+async function cfgDragEnd() {
+  if (!CFGDRAG) return;
+  CFGDRAG.classList.remove("dragging");
+  CFGDRAG = null;
+  $$(".cfglist").forEach(l => l.classList.remove("dragover"));
+  await saveConfig();
+}
+
+$$(".cfglist").forEach(list => {
+  list.addEventListener("dragover", e => {
+    if (!CFGDRAG) return;
+    e.preventDefault();
+    $$(".cfglist").forEach(l => l.classList.toggle("dragover", l === list));
+    // Insert before the first row whose midpoint is below the cursor; the
+    // hub's own pinned row always stays last in the order list.
+    const rows = [...list.querySelectorAll(".cfgrow:not(.dragging):not(.pinned)")];
+    const after = rows.find(r => e.clientY < r.getBoundingClientRect().top
+                                 + r.getBoundingClientRect().height / 2);
+    const pinned = list.querySelector(".cfgrow.pinned");
+    if (after) list.insertBefore(CFGDRAG, after);
+    else if (pinned) list.insertBefore(CFGDRAG, pinned);
+    else list.appendChild(CFGDRAG);
+  });
+});
+
+async function saveConfig() {
+  const names = list => [...$(list).querySelectorAll(".cfgrow")]
+    .map(r => r.dataset.name);
+  const reserve = {};
+  for (const [n, h] of Object.entries(CFG.hosts || {})) reserve[n] = !!h.reserve;
+  try {
+    CFG = await rawApi("/fleet-config", {method: "PUT", body: {
+      order: names("#cfg-order"),
+      not_in_use: names("#cfg-out"),
+      reserve,
+    }});
+    renderConfig();
+    toast("routing configuration saved");
+    loadHome();                        // the machine cards mirror it
+  } catch (e) {
+    toast("routing configuration: " + e.message, true);
+    loadConfig();                      // fall back to the hub's real state
+  }
+}
+
+function cfgDetail(name) {
+  const h = (CFG && CFG.hosts || {})[name];
+  if (!h) return;
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  back.onclick = e => { if (e.target === back) back.remove(); };
+  const row = (k, v) => `<tr><td class="muted" style="padding-right:14px">${k}</td>
+    <td class="mono">${v}</td></tr>`;
+  back.innerHTML = `<div class="modal">
+    <button class="act close" onclick="this.closest('.modal-back').remove()">×</button>
+    <h3>${esc(name)}</h3>
+    <table>
+      ${row("class", esc(h.klass || "?"))}
+      ${h.cpu ? row("cpu", esc(h.cpu)) : ""}
+      ${h.gpu ? row("gpu", esc(h.gpu)) : ""}
+      ${h.ram_gb ? row("RAM", h.ram_gb + " GB") : ""}
+      ${h.vram_gb ? row("VRAM", h.vram_gb + " GB") : ""}
+      ${row("routing", !h.routed ? "not in use"
+        : h.self ? "always last (this box)"
+        : h.reserve ? "reserve — only when others are busy"
+        : cfgPosition(name) ? "#" + cfgPosition(name) : "unranked")}
+    </table>
+    <div class="spacer"></div>
+    ${h.self ? `<p class="hint">This box serves the dashboard, so it cannot be
+      taken out of its own routing; as the hub it is always the last resort.</p>`
+    : `<div class="krow"><span class="muted">in use</span><span>
+        <span class="kstate${h.routed ? "" : " off"}">${h.routed ? "on" : "off"}</span>
+        <button class="ksw" role="switch" aria-checked="${h.routed ? "true" : "false"}"
+          title="${h.routed ? KSW_ON : KSW_OFF}" aria-label="routing to ${esc(name)}"
+          onclick="toggleRouting(this, '${esc(name)}')"><span class="kknob"></span></button>
+      </span></div>
+      <div class="spacer"></div>
+      <label class="f"><input type="checkbox" style="width:auto" ${h.reserve ? "checked" : ""}
+        onchange="cfgSetReserve('${esc(name)}', this.checked)">
+        reserve — personal box, route to it only when every other candidate is busy</label>`}
+  </div>`;
+  document.body.appendChild(back);
+}
+
+async function cfgSetReserve(name, flag) {
+  if (!CFG || !CFG.hosts || !CFG.hosts[name]) return;
+  CFG.hosts[name].reserve = flag;
+  await saveConfig();
 }
 
 function renderNetmap(hosts) {
@@ -1914,12 +2315,33 @@ async function loadStatus() {
   // that says so.
   const ctxOf = m => m.n_ctx ? fmtN(m.n_ctx) + " ctx" +
     (m.slots > 1 ? ` · ${m.slots} slots (${fmtN(Math.floor(m.n_ctx / m.slots))} each)` : "") : "";
+  const conf = Object.fromEntries((s.models_configured || []).map(c => [c.id, c]));
   $("#running tbody").innerHTML = run.length
     ? run.map(m => `<tr><td class="mono">${esc(m.id)}${
         ctxOf(m) ? `<div class="muted" style="font-size:11px">${esc(ctxOf(m))}</div>` : ""}</td>
         <td style="text-align:right"><span class="pill ${
-          String(m.state).match(/ready|running|loaded/i) ? "ok" : "mid"}">${esc(m.state || "?")}</span></td></tr>`).join("")
+          String(m.state).match(/ready|running|loaded/i) ? "ok" : "mid"}">${esc(m.state || "?")}</span>
+        ${(conf[m.id] || {}).persistent
+          ? '<span class="pill dim" title="persistent — resident from startup; change on the Models tab">pinned</span>'
+          : `<button class="act" onclick="unloadOne('${esc(m.id)}')">unload</button>`}</td></tr>`).join("")
     : `<tr><td class="muted">nothing loaded — llama-swap starts a model on first request</td></tr>`;
+  // The load picker offers what is configured but not resident; the warm
+  // picker mirrors models.json's one `preload` flag (persistent models are
+  // already always resident, so they are shown but not choosable).
+  const resident = new Set(run.map(m => m.id));
+  const ids = (s.models_configured || []);
+  fillPick($("#loadpick"),
+    [{v: "", t: "— load a model —"},
+     ...ids.filter(c => !resident.has(c.id)).map(c => ({v: c.id, t: c.id}))],
+    true);
+  const warmNow = (ids.find(c => c.preload && !c.persistent) || {}).id || "";
+  fillPick($("#warmpick"),
+    [{v: "", t: "none — load on first request"},
+     ...ids.map(c => ({v: c.id, t: c.id + (c.persistent ? " (persistent)" : ""),
+                       d: !!c.persistent}))],
+    false);
+  if (document.activeElement !== $("#warmpick")) $("#warmpick").value = warmNow;
+  watchManualLoad(s.manual_load);
   // Serving card: only present while the box actually has a model resident.
   if (run.length) {
     const ready = run.filter(m => String(m.state).match(/ready|running|loaded/i));
@@ -1995,13 +2417,118 @@ async function loadRoutes() {
   if (!r) { $("#routetab tbody").innerHTML =
     `<tr><td class="muted">routing unavailable</td></tr>`; return; }
   const byHost = {};
-  for (const m of r.models) (byHost[m.host] = byHost[m.host] || []).push(m.model);
+  for (const m of r.models) (byHost[m.host] = byHost[m.host] || []).push(m);
   const hosts = Object.keys(byHost).sort();
+  // A name the fleet disagrees about is drawn on the row of every host that
+  // serves it, because that is where you are looking when you wonder why a
+  // request went somewhere odd.
+  const clash = {};
+  for (const c of r.alias_conflicts || [])
+    for (const [target, hs] of Object.entries(c.targets || {}))
+      for (const h of hs) (clash[h] = clash[h] || {})[c.name] = target;
+  const model = (h, m) => clash[h]?.[m]
+    ? `<span class="pill mid" title="on ${esc(h)} this name means ${
+        esc(clash[h][m])}; other boxes mean something else">${esc(m)} ⚠</span>`
+    : esc(m);
+  // Each model once, by its id; the other names a box answers to for it
+  // (role aliases, an old spelling kept after a rename, an Ollama tag) go
+  // on a second line, so the row reads as "what this box serves" rather
+  // than "every string it accepts".
+  const names = (h, alias) => byHost[h].filter(m => !!m.alias === alias)
+    .map(m => m.model).sort().map(m => model(h, m)).join(", ");
   $("#routetab tbody").innerHTML = hosts.length ? hosts.map(h => `<tr>
       <td class="mono">${esc(h)}${h === r.self ? ' <span class="pill ok">local</span>' : ""}</td>
-      <td class="mono" style="font-size:12px">${byHost[h].sort().map(esc).join(", ")}</td>
+      <td class="mono" style="font-size:12px">${names(h, false) || "<span class=muted>—</span>"}${
+        byHost[h].some(m => m.alias)
+          ? `<div class="muted" style="font-size:11px;margin-top:2px">also answers to: ${names(h, true)}</div>`
+          : ""}</td>
     </tr>`).join("")
     : `<tr><td class="muted">no models served anywhere in the fleet yet</td></tr>`;
+  renderAliasConflicts(r.alias_conflicts || [], r.split_models || []);
+  loadRoles();
+}
+
+// A fleet role (`fast`, `coder`, `deep`…) is a policy, not a name a box
+// serves: each box offers the best model it holds for it and the scorer picks
+// the box. Shown as what a request for the role would get RIGHT NOW, so
+// "why did `fast` go to gpu-desktop-1" has an answer on the page.
+async function loadRoles() {
+  const el = $("#roles");
+  if (!el) return;
+  const r = await api("/roles").catch(() => null);
+  const roles = (r && r.roles) || {};
+  if (!Object.keys(roles).length) { el.innerHTML = ""; return; }
+  const rows = Object.entries(roles).map(([role, d]) => {
+    const best = (d.order || [])[0];
+    const rest = (d.order || []).slice(1).map(o => `${esc(o.host)} · ${esc(o.model)}`).join(", ");
+    const local = Object.entries(d.local_rows || {});
+    return `<tr><td class="mono">${esc(role)}</td>
+      <td style="font-size:12px">${best
+        ? `<span class="mono"><b>${esc(best.host)}</b> · ${esc(best.model)}</span>`
+        : `<span class="muted">nothing in the fleet plays this role right now</span>`}${
+        rest ? `<div class="muted" style="font-size:11px;margin-top:2px">then ${rest}</div>` : ""}${
+        local.length ? `<div class="muted" style="font-size:11px;margin-top:2px">a local <span class="mono">${esc(role)}</span> row is ignored on ${
+          local.map(([h, m]) => `${esc(h)} (${esc(m)})`).join(", ")}</div>` : ""}</td></tr>`;
+  });
+  el.innerHTML = `<div style="font-weight:600;margin-bottom:4px">Fleet roles</div>
+    <table><tbody>${rows.join("")}</tbody></table>
+    <div class="hint">A role is a policy, not a name any box serves
+      (<span class="mono">FLEET_ROLES</span> in the gateway): each box offers the best
+      model it holds for it; among boxes that hold theirs, the one higher on the
+      role's ladder goes first, then the usual order. <span class="mono">fast</span>
+      gets a 3B-active MoE where a card can hold one and the 4B where it cannot;
+      <span class="mono">deep</span> goes to the 120B while the big box is up.</div>`;
+}
+
+// Auto-routing picks the best host for a name by ranking the boxes that serve
+// it. That is only meaningful while they all mean the same model by it — an
+// alias is a per-box models.json row, not a fleet-wide fact. When two boxes
+// disagree, the scorer is comparing machines that are not offering the same
+// thing, so say so here rather than leaving it as a mystery about why a
+// request landed somewhere unexpected.
+function renderAliasConflicts(list, splits) {
+  const box = $("#aliasclash");
+  if (!box) return;
+  if (!list.length && !splits.length) {
+    box.style.display = "none"; box.innerHTML = ""; return;
+  }
+  box.style.display = "";
+  const clashes = !list.length ? "" : `<div class="warnbox">
+    <b>${list.length} name${list.length === 1 ? "" : "s"} mean${
+      list.length === 1 ? "s" : ""} different models on different boxes.</b>
+    Auto-routing ranks every box that serves a name against the others, which
+    only makes sense while they agree what the name is. Until these match,
+    a request for one of them gets whichever box the scorer liked, not a
+    particular model. Fix by renaming the odd one out in that box's Models tab.
+    ${list.map(c => `<div class="clashrow">
+      <span class="mono">${esc(c.name)}</span>${c.is_model_id
+        ? ` <span class="pill mid">shadows a real model id</span>` : ""}
+      <div class="muted" style="margin-top:3px">${
+        Object.entries(c.targets).map(([t, hs]) =>
+          `<span class="mono">${esc(t)}</span> on ${hs.map(esc).join(", ")}`)
+          .join(" &nbsp;·&nbsp; ")}${
+        c.unknown.length ? ` &nbsp;·&nbsp; <i>not reported by ${
+          c.unknown.map(esc).join(", ")} (older gateway)</i>` : ""}</div>
+    </div>`).join("")}</div>`;
+  // The quieter failure of the two, and the more common: nothing is
+  // mis-routed, a box is just never considered.
+  const split = !splits.length ? "" : `<div class="warnbox">
+    <b>${splits.length} model${splits.length === 1 ? " is" : "s are"} served
+    under more than one name.</b> Candidates are grouped by name, so these
+    boxes are never each other's alternatives — a request for one name will
+    not fail over to, or load-balance across, a box holding the same weights
+    under the other. The spellings the fleet already knows are repaired at
+    start-up (<span class="mono">FLEET_MODEL_NAMES</span> in the gateway), so
+    this is a name nobody has claimed yet: add it there and deploy, or rename
+    it on the odd box's Models tab — the old name can stay as an alias.
+    ${splits.map(s => `<div class="clashrow">
+      <span class="mono">${esc(s.repo)}</span>
+      <div class="muted" style="margin-top:3px">${
+        Object.entries(s.names).map(([n, hs]) =>
+          `<span class="mono">${esc(n)}</span> on ${hs.map(esc).join(", ")}`)
+          .join(" &nbsp;·&nbsp; ")}</div>
+    </div>`).join("")}</div>`;
+  box.innerHTML = clashes + split;
 }
 
 // ---- reboot ----
@@ -2081,6 +2608,57 @@ async function rebootHost(host, opts = {}) {
 async function unloadAll() {
   try { await api("/models/unload", {method: "POST"}); toast("unload requested"); loadStatus(); }
   catch (e) { toast(e.message, true); }
+}
+async function unloadOne(id) {
+  try {
+    await api("/models/unload", {method: "POST", body: {model: id}});
+    toast("unloading " + id); loadStatus();
+  } catch (e) { toast(e.message, true); }
+}
+async function loadModelNow() {
+  const id = $("#loadpick").value;
+  if (!id) { toast("pick a model to load", true); return; }
+  try {
+    await api("/models/load", {method: "POST", body: {model: id}});
+    toast("loading " + id + " — it appears above when ready (see Active jobs)");
+    $("#loadpick").value = "";
+    loadStatus();
+  } catch (e) { toast(e.message, true); }
+}
+async function applyWarm() {
+  const id = $("#warmpick").value;
+  try {
+    const r = await api("/models/warm", {method: "PUT", body: {model: id || null}});
+    if (r.restart_rc) toast("saved, but the engine restart failed: "
+      + (r.restart_out || "rc=" + r.restart_rc), true);
+    else if (!r.changed) toast("warm standby unchanged");
+    else toast(id ? id + " now loads at every engine start" :
+      "no model preloads at startup any more");
+    setTimeout(loadStatus, 1500);
+  } catch (e) { toast(e.message, true); }
+}
+// A dashboard-started load reports through /status (manual_load); announce
+// the verdict once rather than making the operator watch the jobs table.
+let LASTLOAD = "";
+function watchManualLoad(ml) {
+  const key = ml && ml.model ? ml.model + "@" + ml.at + ":" + ml.status : "";
+  if (!ml || !ml.model || key === LASTLOAD) return;
+  if (ml.status === "failed") toast("load " + ml.model + " failed: " + (ml.why || "?"), true);
+  else if (ml.status === "ok" && LASTLOAD.startsWith(ml.model + "@")
+           && LASTLOAD.endsWith(":loading")) toast(ml.model + " is loaded");
+  LASTLOAD = key;
+}
+// Rebuild a <select> only when its option set actually changed, keeping the
+// operator's in-progress choice; a 5s poll that rewrites the DOM mid-click
+// makes a dropdown unusable.
+function fillPick(sel, opts, keep) {
+  const sig = opts.map(o => o.v + "|" + o.t + "|" + (o.d ? 1 : 0)).join(";");
+  if (sel.dataset.sig === sig) return;
+  const prev = keep ? sel.value : null;
+  sel.dataset.sig = sig;
+  sel.innerHTML = opts.map(o =>
+    `<option value="${esc(o.v)}"${o.d ? " disabled" : ""}>${esc(o.t)}</option>`).join("");
+  if (prev !== null && [...sel.options].some(o => o.value === prev)) sel.value = prev;
 }
 async function svcAction(a, u) {
   try { const r = await api(`/service/${a}/${u}`, {method: "POST"});
@@ -2230,7 +2808,8 @@ async function loadTeams() {
   if (!d) return;
   await publicKeyIds();
   TEAMS = d.items || [];
-  if (r) FLEETMODELS = (r.models || []).map(m => m.model).sort();
+  // Ids only: an alias is another name for a model already in the list.
+  if (r) FLEETMODELS = [...new Set((r.models || []).filter(m => !m.alias).map(m => m.model))].sort();
   $("#teamarch").textContent = archLabel(arch);
   $("#teammeta").textContent = TEAMS.length
     ? `${TEAMS.length} ${arch ? "archived" : "live"} team(s)` : "";
@@ -2399,7 +2978,8 @@ async function loadPublic() {
   await loadPubSettings();
   await loadPubDomainSummary();
   await Promise.all([loadPubStats(), loadPubPending(), loadPubModels(),
-    loadPubDomains(), loadPubKeys(), loadPubEvents(), loadPubAliases(), loadPubDemo()]);
+    loadPubDomains(), loadPubKeys(), loadPubEvents(), loadPubAliases(), loadPubDemo(),
+    loadPubAuto()]);
 }
 
 // ---- at a glance ----
@@ -2436,6 +3016,8 @@ async function loadPubPending() {
 function renderPubPending() {
   const card = $("#pubpendingcard");
   card.style.display = PUB_PENDING.length ? "" : "none";
+  const badge = $("#pubn_glance");
+  if (badge) badge.textContent = PUB_PENDING.length ? String(PUB_PENDING.length) : "";
   if (!PUB_PENDING.length) return;
   $("#pubpendmeta").textContent = `${PUB_PENDING.length} request(s) waiting on a decision`;
   $("#pubpendtab tbody").innerHTML =
@@ -2764,8 +3346,10 @@ async function loadPubKeys() {
   await settings();
   const lim = psize(), off = PAGE.pubkeys, arch = VIEW.pubkeys;
   const status = $("#pk_status").value, q = $("#pk_q").value.trim();
+  const source = ($("#pk_source") || {}).value || "";
   const url = o => `/public/keys?limit=${lim}&offset=${o}&archived=${arch}`
     + (status ? "&status=" + encodeURIComponent(status) : "")
+    + (source ? "&source=" + encodeURIComponent(source) : "")
     + (q ? "&q=" + encodeURIComponent(q) : "");
   let d = await rawApi(url(off)).catch(e => (toast(e.message, true), null));
   if (!d) return;
@@ -2779,10 +3363,12 @@ function pubKeyActions(k) {
     <button class="act danger" onclick="pubKeyVerb(${k.id},'purge')">delete</button>`;
   if (k.status === "pending") return `<span class="muted" style="font-size:12px">see pending above</span>`;
   if (k.status === "denied") return "";
+  // No address, no resend: an auto-issued key is carried by the service that
+  // minted it, and a replacement would be mailed to nobody.
   return `<button class="act danger" ${k.status === "revoked" ? "disabled" : ""}
       onclick="pubKeyVerb(${k.id},'revoke')">revoke</button>
     <button class="act" onclick="pubKeyVerb(${k.id},'extend')">extend</button>
-    <button class="act" onclick="pubKeyVerb(${k.id},'resend')">resend</button>`;
+    ${k.email ? `<button class="act" onclick="pubKeyVerb(${k.id},'resend')">resend</button>` : ""}`;
 }
 function renderPubKeys() {
   $("#pubkeysarch").textContent = archLabel(VIEW.pubkeys);
@@ -2795,10 +3381,12 @@ function renderPubKeys() {
       <th>expires</th><th>status</th><th></th></tr>` +
     (PUB_KEYS.length ? PUB_KEYS.map(k => {
       const [ld, lh] = pubLimitsFor(k.kind, k);
+      const auto = String(k.source || "").startsWith("auto:");
       return `<tr>
         <td class="mono" style="font-size:11px">${esc((k.created_at || "").replace("T", " ").replace("+00:00", "Z"))}</td>
-        <td>${esc(k.email)}</td>
-        <td style="font-size:12px">${esc(k.company)}</td>
+        <td>${k.email ? esc(k.email) : `<span class="pill dim">${esc(k.source || "no address")}</span>`}</td>
+        <td style="font-size:12px">${esc(k.company)}${auto && k.note
+          ? ` <span class="muted mono" style="font-size:11px">${esc(k.note)}</span>` : ""}</td>
         <td><span class="pill">${esc(k.kind)}</span></td>
         <td class="mono" style="font-size:12px">${pubKeyModels(k)}</td>
         <td class="num">${fmtN(k.ctx)}</td>
@@ -2956,6 +3544,16 @@ function renderPubSettings() {
   put("#ps_demo_prefer", (s.demo_prefer_hosts || []).join(", "));
   put("#ps_demo_exclude", (s.demo_exclude_hosts || []).join(", "));
   put("#ps_demo_prompt", s.demo_system_prompt);
+  putBool("#ps_auto_enabled", s.auto_issue_enabled);
+  const autoSel = $("#ps_auto_model");
+  if (autoSel && autoSel !== document.activeElement) {
+    autoSel.innerHTML = `<option value="">— none —</option>` + PUB_MODELS
+      .filter(m => m.enabled)
+      .map(m => `<option value="${esc(m.public_id)}">${esc(m.name)}</option>`).join("");
+    autoSel.value = s.auto_issue_model || "";
+  }
+  put("#ps_auto_ctx", s.auto_issue_ctx); put("#ps_auto_daily_cap", s.auto_issue_daily_cap);
+  put("#ps_auto_setup", s.auto_issue_setup_text);
   put("#ps_fallback_when", s.fallback_when || "not_resident");
   put("#ps_fallback_tolerance", s.fallback_tolerance);
   putBool("#ps_fallback_notice", s.fallback_notice);
@@ -2994,6 +3592,11 @@ async function savePubSettings() {
     demo_prefer_hosts: $("#ps_demo_prefer").value.split(",").map(x => x.trim()).filter(Boolean),
     demo_exclude_hosts: $("#ps_demo_exclude").value.split(",").map(x => x.trim()).filter(Boolean),
     demo_system_prompt: $("#ps_demo_prompt").value,
+    auto_issue_enabled: $("#ps_auto_enabled").value === "1",
+    auto_issue_model: $("#ps_auto_model").value,
+    auto_issue_ctx: +$("#ps_auto_ctx").value || 0,
+    auto_issue_daily_cap: +$("#ps_auto_daily_cap").value || 0,
+    auto_issue_setup_text: $("#ps_auto_setup").value,
     fallback_when: $("#ps_fallback_when").value,
     fallback_tolerance: +$("#ps_fallback_tolerance").value || 0,
     fallback_notice: $("#ps_fallback_notice").value === "1",
@@ -3006,7 +3609,48 @@ async function savePubSettings() {
   };
   try {
     PUB_SETTINGS = await rawApi("/public/settings", {method: "PUT", body});
-    toast("public settings saved"); renderPubSettings(); loadPubDemo();
+    toast("public settings saved"); renderPubSettings(); loadPubDemo(); loadPubAuto();
+  } catch (e) { toast(e.message, true); }
+}
+// ---- auto-issue (connected services) ----
+// The status line under the card: what a mint would produce right now, and
+// how many keys the services have taken today / hold live.
+async function loadPubAuto() {
+  const el = $("#pubautoline");
+  if (!el) return;
+  const badge = $("#pubn_auto");
+  let a;
+  try {
+    a = await rawApi("/public/auto");
+  } catch (e) {
+    el.textContent = "auto-issue: " + e.message;
+    if (badge) badge.textContent = "";
+    return;
+  }
+  if (badge) badge.textContent = a.enabled ? String(a.live || 0) : "off";
+  const who = (a.by_service || []).map(s => `${esc(s.service)} (${fmtN(s.keys)})`).join(", ");
+  el.innerHTML = (a.enabled ? `<span class="pill ok">on</span>` : `<span class="pill no">off</span>`)
+    + ` &middot; mints <b>${esc(a.model_name || a.model || "—")}</b>`
+    + (a.model && !a.model_enabled ? ` <span class="pill no">model disabled in the catalogue</span>` : "")
+    + ` at ${fmtN(a.ctx)} ctx, ${fmtN(a.key_days)} day(s), ${fmtN(a.limit_day)}/day ${fmtN(a.limit_hour)}/hour`
+    + ` &middot; today ${fmtN(a.issued_today)}/${fmtN(a.daily_cap)} &middot; live ${fmtN(a.live)}`
+    + (who ? ` &middot; services: ${who}` : ` &middot; no service has minted yet`)
+    + ` &middot; base url <span class="mono">${esc(a.base_url || "—")}</span>`;
+}
+// A key minted from the card itself, shown once -- for checking what a
+// connected service is going to receive without involving one.
+async function mintAutoTestKey() {
+  const out = $("#pubautokey");
+  try {
+    const r = await rawApi("/public/keys/auto", {method: "POST",
+      body: {service: "dashboard", ref: "test-" + Date.now(), company: "(test from the dashboard)"}});
+    out.innerHTML = `<div class="hint">Shown once &mdash; this is exactly the bundle a connected service gets back.
+        It is a real key (it counts toward the daily cap and lives the full term); revoke it when you are done.</div>
+      <pre class="mono" style="white-space:pre-wrap;font-size:12px;margin-top:6px">${esc(r.setup_text || "")}\n\nexpires ${esc(r.expires_at)}${r.warm_url ? "\nwarm-up: " + esc(r.warm_url) : ""}</pre>
+      <button class="act danger" onclick="pubKeyVerb(${+r.id},'revoke');this.disabled=true;$('#pubautokey .hint').textContent='revoked.'">Revoke this test key</button>`;
+    PUBKEY_IDS = null;
+    toast("test key minted");
+    loadPubKeys(); loadPubStats(); loadPubEvents(); loadPubAuto();
   } catch (e) { toast(e.message, true); }
 }
 // The demo's own report: the boxes the policy would use right now (real
@@ -3072,7 +3716,25 @@ async function loadModels() {
   renderModels();
   renderUpstream("upstab");
   renderApply(d.apply);
+  renderConverged(d.converged);
   api("/swap-config").then(t => $("#swapyaml").textContent = t).catch(() => {});
+}
+
+// A rename the owner did not type. The gateway converges a record registered
+// under a spelling the fleet has since settled on (`qwen3.8-9B` →
+// `qwen3.8-9b-distill`) when it starts, keeping the old name as an alias;
+// the table above shows the result, and this line says why it changed.
+function renderConverged(c) {
+  const el = $("#converged");
+  if (!el) return;
+  const changes = (c && c.changes) || [];
+  if (!changes.length) { el.style.display = "none"; el.innerHTML = ""; return; }
+  el.style.display = "";
+  el.innerHTML = `At start-up (${esc((c.at || "").replace("T", " ").slice(0, 16))}) the gateway ` +
+    changes.map(x => x.skipped
+      ? `left <span class="mono">${esc(x.id)}</span> alone — the fleet's id for it is <span class="mono">${esc(x.to)}</span>, but ${esc(x.skipped)}`
+      : `renamed <span class="mono">${esc(x.id)}</span> → <span class="mono">${esc(x.to)}</span> (the fleet's id for it; the old name stays as an alias)`
+    ).join("; ") + "." + (c.restart_rc ? ` <b>llama-swap did not restart afterwards (rc=${esc(c.restart_rc)})</b> — restart it from the Overview tab.` : "");
 }
 
 // ---- did the last Save & apply actually load? ----
@@ -3131,7 +3793,8 @@ function renderUpstream(id) {
   if (!UPSTREAM.enabled) { card.style.display = "none"; return; }
   card.style.display = "";
   $("#" + id + " tbody").innerHTML = UPSTREAM.models.length ? UPSTREAM.models.map(m => `
-    <tr><td class="mono">${esc(m.id)}${m.running ? ` <span class="pill ok">resident</span>` : ""}</td>
+    <tr><td class="mono">${esc(m.id)}${m.running ? ` <span class="pill ok">resident</span>` : ""}${
+          m.also ? ` <span class="pill mid" title="the fleet's id for this tag — a request for it is served by the tag">also ${esc(m.also)}</span>` : ""}</td>
         <td>${esc(m.params || "?")}</td>
         <td>${esc(m.quant || "")}</td>
         <td class="num">${fmtB(m.size)}</td>
@@ -3169,13 +3832,25 @@ function renderModels() {
               `<option value="${v}" ${(m.reasoning||"auto") === v ? "selected" : ""}>${v}</option>`).join("")}
           </select></td>
       <td><input class="s" type="number" value="${m.ttl}" onchange="upd(${i},'ttl',+this.value)"></td>
+      <td><select onchange="updWarm(${i},this.value)" style="width:96px"
+            data-help="warm standby">
+            ${[["", "off"], ["preload", "startup"], ["persistent", "always"]].map(([v, t]) =>
+              `<option value="${v}" ${(m.persistent ? "persistent" : m.preload ? "preload" : "") === v ? "selected" : ""}>${t}</option>`).join("")}
+          </select></td>
       <td><input value="${esc(m.extra_flags)}" onchange="upd(${i},'extra_flags',this.value)" style="min-width:160px"></td>
       <td><button class="act danger" onclick="MODELS.splice(${i},1);renderModels()">×</button></td>
-    </tr>`).join("") || `<tr><td colspan="10" class="muted">${UPSTREAM.enabled
+    </tr>`).join("") || `<tr><td colspan="11" class="muted">${UPSTREAM.enabled
       ? "no llama-swap models here — this box is Ollama-managed, see the table above"
       : "no models configured yet — download a GGUF on the Library tab, then add it here"}</td></tr>`;
 }
 const upd = (i, k, v) => { MODELS[i][k] = v; };
+// warm: "" = load on demand; "preload" = load at engine start-up (one per
+// box -- the save refuses two, the swap group holds one model); "persistent"
+// = own warm group, resident forever, nothing may evict it.
+const updWarm = (i, v) => {
+  MODELS[i].preload = v === "preload";
+  MODELS[i].persistent = v === "persistent";
+};
 function addModel() {
   MODELS.push(Object.assign({}, DEFAULTS, {id: "new-model-" + (MODELS.length + 1)}));
   renderModels();
@@ -4007,6 +4682,24 @@ const HELP = {
     + "here. If the GPU stays busy after this empties, that is the reason, and "
     + "<b>Unload all</b> is the next lever."],
   // ---- models ----
+  "load a model": ["Load a model now",
+    "Starts the chosen model on this box immediately, instead of waiting for the "
+    + "first request to pay the cold-load. The swap group holds one model at a "
+    + "time, so whatever is resident is evicted; the load runs as a job under "
+    + "Active jobs and the table above shows it arrive."],
+  "warm at startup": ["Warm standby",
+    "The model this box preloads whenever its engine starts, so it is already "
+    + "answering the moment the box is. One per box &mdash; the swap group holds one "
+    + "model &mdash; and <i>none</i> means the box loads nothing until asked. "
+    + "Setting it restarts llama-swap, which loads the choice right away. The same "
+    + "flag as the <b>warm</b> column on the Models tab."],
+  "warm standby": ["Warm standby",
+    "<b>off</b>: loaded on first request, unloaded after its ttl. <b>startup</b>: "
+    + "preloaded whenever the engine starts and kept for good (pair with ttl 0) "
+    + "&mdash; one per box, the save refuses two. <b>always</b>: its own persistent "
+    + "group beside the swap group; a request for another model loads BESIDE it "
+    + "instead of evicting it, and nothing unloads it. The auto-ctx sizer does not "
+    + "know about a persistent neighbour, so pin the other models' ctx by hand."],
   "on": ["Enabled",
     "Only enabled rows are written into llama-swap.yaml. Turning one off keeps the "
     + "record here but removes the endpoint: the model id stops resolving on "
@@ -4616,6 +5309,24 @@ const HELP = {
   "public:base url": ["Base URL clients are told to use",
     "Defaults to <code>PUBLIC_API_URL</code> when left blank. Only affects what the e-mail "
     + "says &mdash; not where the proxy itself listens."],
+  "public:auto-issue": ["Auto-issue for connected services",
+    "Lets a service you run mint Fleet Pass keys through <code>POST /admin/api/public/keys/auto</code> "
+    + "(admin token). Off refuses every such call with 403; keys already out stay valid until they "
+    + "expire or you revoke them in the table above."],
+  "public:auto-issue model": ["The model every auto-issued key is locked to",
+    "A single-worker key on this catalogue model, exactly like a hand-issued one. The service may ask "
+    + "for a different enabled model per call, but never for a disabled one."],
+  "public:auto-issue ctx": ["Context window stamped on auto-issued keys",
+    "Rounded down to the 1024 grid and never above what the model's hosts can serve &mdash; the "
+    + "service is not told the ceilings, so its ask is clamped rather than refused."],
+  "public:daily cap": ["Auto-issued keys per rolling 24 hours",
+    "Across every connected service. A runaway caller gets 429s, not a drained key budget; the "
+    + "global <b>max live keys</b> under Limits still applies on top."],
+  "public:setup text": ["What the service hands on with the key",
+    "Rendered with <code>{base_url} {key} {model} {expires} {limits}</code> and returned as "
+    + "<code>setup_text</code> in the mint response. The service places it as-is (in a cover letter, a "
+    + "message), so keep it short and keep the User-Agent note &mdash; the CDN blocks the official "
+    + "SDKs' default agent."],
   "public:box aliases": ["Why the public page never says a real hostname",
     "<code>Box N</code> is assigned the first time a host is seen and persisted, so it never "
     + "reshuffles when peers come and go &mdash; the public overview, the models list, and "

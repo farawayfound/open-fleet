@@ -1423,6 +1423,191 @@ def check_preload_count(models: list[dict]) -> None:
             "box can hold both")
 
 
+# ---- one id per model, fleet-wide ------------------------------------------
+#
+# The canonical fleet id of every model that has been registered under more
+# than one name, and each spelling it has been seen under. Candidates for a
+# request are grouped by NAME (model_routes), so two boxes holding the same
+# weights under different names are never each other's alternatives: the
+# better box is simply invisible for that request. split_models() reports
+# that; this is what repairs it. The canonical spelling is the one the
+# llama.cpp boxes and the hub's catalogue already used; the rest are what the
+# fleet grew on its own -- Ollama tags, LM Studio's derived ids, a name typed
+# by hand on one box.
+#
+# Every name here has to be claimed by one row of PUBLIC_MODELS_SEED as well
+# (its fleet_ids), so the catalogue and the routing layer agree on what is
+# one model. tests/test_model_names.py pins that.
+#
+# What is done with it, per box, when the gateway starts -- which is to say
+# on every deploy, and when a box that was off comes back and the reconcile
+# deploy restarts it:
+#   * llama.cpp box: a models.json record whose id is a spelling is RENAMED
+#     to the canonical id, once, and the old id is kept as an alias so
+#     nothing that was calling it breaks (converge_model_names).
+#   * Ollama box: a tag cannot be renamed, so the gateway answers to the
+#     canonical id beside it and rewrites it back to the tag on the way into
+#     the engine (upstream_alias_pairs).
+FLEET_MODEL_NAMES: dict[str, tuple[str, ...]] = {
+    "qwen3.8-9b-distill": (
+        "qwen3.8-9B",                    # gpu-laptop-1, registered by hand
+        "Qwen3.8-9B",                    # mac-desktop-1's Library download
+        "empero-ai-qwen3.8-9b-distill",  # mac-laptop-2: LM Studio's publisher-qualified id
+        "hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M",  # the Ollama tag
+    ),
+    "qwopus3.6-35b-coder": ("Qwopus3.6-35B", "Qwopus3.6-A3B"),
+    "gemma-4-26b": ("gemma4:26b",),
+    "qwen3.5-4b": ("qwen3.5:4b",),
+}
+SPELLING_TO_CANONICAL: dict[str, str] = {
+    s: c for c, spellings in FLEET_MODEL_NAMES.items() for s in spellings}
+
+
+# ---- fleet roles: one word, the best model for it on each box ---------------
+#
+# A role alias used to be a row in each box's models.json: `fast` meant a 4B
+# on gpu-desktop-1, the 35B MoE on server-1, Lightning on mac-laptop-1, the 9B distill on
+# apu-tablet-2, and a request for it through the hub got whichever box the
+# scorer liked -- the best machine for a coin flip. This is the fleet-level
+# meaning. Per role, the models that can play it, best first, by canonical
+# id. Resolving one is a policy, not a lookup (role_pairs): each box offers
+# the best model ON THAT BOX -- the first ladder entry it holds in its own
+# memory, else the first it serves at all -- and the scorer ranks the boxes:
+# among those that hold their model, the one higher on the ladder first
+# (`deep` goes to the 120B on the big box, not to a warm 27B on a laptop),
+# then the usual order; boxes that would spill or run it on CPU last. So
+# `fast` on gpu-desktop-1 is still the 4B, on a card that holds it it is the 35B
+# MoE, and the hub picks the box.
+#
+# Ladders are ordered by how well the model plays the role, not by size:
+# `fast` leads with the 3B-active MoEs because they decode like a 3B and
+# answer like a 35B, and only a box that cannot hold one falls to the 4B.
+# A box's own models.json row of the same name still resolves locally for
+# anything talking to llama-swap directly, but the gateway answers the
+# policy first, so those rows no longer count as conflicts.
+FLEET_ROLES: dict[str, tuple[str, ...]] = {
+    "fast": ("qwen3.6-35b", "nemotron3.5-lightning-30b", "qwen3.8-9b-distill",
+             "qwen3.5-4b", "gemma4:12b-it-qat", "nemotron-3-nano:4b",
+             "qwen3.5:9b", "gemma4:e4b", "nemotron-mini:4b"),
+    "small": ("qwen3.8-9b-distill", "qwen3.5-4b", "gemma4:12b-it-qat",
+              "nemotron-3-nano:4b", "gemma4:e4b", "nemotron-mini:4b"),
+    "default": ("qwen3.8-27b", "qwen3.6-35b", "qwen3.8-9b-distill", "qwen3.5-4b"),
+    "quality": ("qwen3.8-27b", "gemma4-31b-qat", "nemotron3-super-120b",
+                "qwen3.6-35b", "gemma-4-26b"),
+    "deep": ("nemotron3-super-120b", "qwen3.8-flash-next", "deepseek-v4-flash",
+             "qwen3.8-27b", "gemma4-31b-qat", "qwen3.6-35b"),
+    "triage": ("qwen3.6-35b", "nemotron3.5-lightning-30b", "qwen3.8-9b-distill",
+               "qwen3.5-4b"),
+    "classify": ("qwen3-vl-30b-classify", "qwen3-vl-30b", "qwen3.6-35b",
+                 "qwen3.8-9b-distill"),
+    "coder": ("qwen3-coder-30b", "qwopus3.6-35b-coder", "kat-coder-v2.5",
+              "qwen3.6-35b"),
+    "vision": ("qwen3-vl-30b", "qwen3.8-27b", "gemma4-31b-qat", "gemma-4-26b",
+               "gemma4:12b-it-qat"),
+    "qwen": ("qwen3.8-27b", "qwen3.6-35b", "qwen3.8-9b-distill", "qwen3.5-4b",
+             "qwen3.5:9b"),
+    "gemma": ("gemma4-31b-qat", "gemma-4-26b", "gemma4:12b-it-qat", "gemma4:e4b"),
+    "nemotron": ("nemotron3-super-120b", "nemotron3.5-lightning-30b",
+                 "nemotron-3-nano:4b", "nemotron-mini:4b"),
+}
+
+
+def converge_model_names(models: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Rename every record whose id is a known spelling to its canonical id.
+
+    Pure: returns (records, changes) and touches nothing on disk. The old id
+    becomes an alias -- a client configured with `qwen3.8-9B` goes on
+    working; it is only the fleet that stops thinking there are two models --
+    and the canonical id is dropped from the aliases if it was already
+    there, since ids and aliases share one namespace.
+
+    Skipped, with a note, when the canonical id is already taken on this box
+    by ANOTHER record, as an id or an alias: two records for one model is a
+    deliberate variant (a classify build, a different window) and which one
+    is the real one is the owner's call, not a start-up pass's."""
+    taken: dict[str, str] = {}   # name -> the id that owns it
+    for rec in models:
+        # Every record's id, disabled ones included: a rename must not leave
+        # two records with one id, even when one of them is switched off.
+        mid = str(rec.get("id", "")).strip()
+        if mid:
+            taken.setdefault(mid, mid)
+    for rec in models:
+        if not rec.get("enabled", True):
+            continue
+        mid = str(rec.get("id", "")).strip()
+        for a in rec.get("aliases") or []:
+            if isinstance(a, str) and a.strip():
+                taken.setdefault(a.strip(), mid)
+    out: list[dict] = []
+    changes: list[dict] = []
+    for rec in models:
+        mid = str(rec.get("id", "")).strip()
+        canon = SPELLING_TO_CANONICAL.get(mid)
+        if not canon or canon == mid or not rec.get("enabled", True):
+            out.append(rec)
+            continue
+        owner = taken.get(canon)
+        if owner and owner != mid:
+            changes.append({"id": mid, "to": canon, "skipped":
+                            f"{canon!r} already belongs to {owner!r} on this box"})
+            out.append(rec)
+            continue
+        aliases = [a.strip() for a in rec.get("aliases") or []
+                   if isinstance(a, str) and a.strip() and a.strip() != canon]
+        if mid not in aliases:
+            aliases.append(mid)
+        out.append(dict(rec, id=canon, aliases=aliases))
+        changes.append({"id": mid, "to": canon})
+    return out, changes
+
+
+# What the last start-up pass did, for the Models tab: a rename the owner
+# did not type deserves a line on the page that shows the result.
+_converged: dict[str, Any] = {"at": "", "changes": [], "restart_rc": 0}
+
+
+def apply_model_name_convergence() -> list[dict]:
+    """The start-up pass: converge_model_names() over models.json, written
+    back and applied to the engine only when something actually changed.
+
+    Not on an Ollama box -- its catalogue is the engine's, not models.json;
+    see upstream_alias_pairs() for what happens there. The engine is
+    restarted the way Save & apply restarts it, but nothing is queued for
+    verification: the launch command differs only in its --alias string, and
+    a box that is still coming up is no place to start proving loads."""
+    if UPSTREAM_MODELS:
+        return []
+    new, changes = converge_model_names(load_models())
+    for c in changes:
+        if c.get("skipped"):
+            log.warning("model names: not renaming %s -> %s: %s",
+                        c["id"], c["to"], c["skipped"])
+    renamed = [c for c in changes if not c.get("skipped")]
+    if not renamed:
+        if changes:
+            _converged.update(at=now(), changes=changes, restart_rc=0)
+        return changes
+    try:
+        check_name_collisions(new)
+    except HTTPException as exc:
+        log.warning("model names: the rename would collide, left as is: %s",
+                    exc.detail)
+        return changes
+    save_models(new)
+    write_swap_config(new)
+    code, out = service_control("restart", "llama-swap")
+    for c in renamed:
+        log.info("model names: renamed %s -> %s (the old name stays as an alias)",
+                 c["id"], c["to"])
+    if code:
+        log.warning("model names: llama-swap did not restart after the rename "
+                    "(rc=%s): %s", code, (out or "")[-200:])
+    _routes_cache["t"] = 0.0
+    _converged.update(at=now(), changes=changes, restart_rc=code)
+    return changes
+
+
 def render_swap_config(models: list[dict]) -> str:
     cfg: dict[str, Any] = {
         "healthCheckTimeout": 900,
@@ -1536,6 +1721,16 @@ _WIN_TASK_CHILDREN: dict[str, tuple[str, ...]] = {
 # fails on the bound port. Matching the binary invocation instead is exact:
 # "bin/run-llama-swap.sh" does not contain "bin/llama-swap".
 _MAC_SWAP_PATTERN = "bin/llama-swap -config"
+# An orphaned llama-server: its parent llama-swap is gone, so nothing will
+# ever route to it or unload it, but it keeps its Metal/unified memory until
+# someone notices. mac-laptop-1 ran with one for three days (a cron keepalive kept
+# spawning doomed duplicate llama-swaps, each of which began its start-up
+# preload before failing to bind :8081; one preload child survived its
+# parent) and every verify on the box answered HTTP 500 while 21 GB sat
+# squatted. Once llama-swap is confirmed dead, ANY surviving llama-server is
+# such an orphan -- a live llama-swap stops its children on the way out --
+# so reaping by pattern here is exact, not a guess.
+_MAC_SERVER_PATTERN = "bin/llama-server --model"
 _MAC_RUNNER = str(HOME / "bin" / "run-llama-swap.sh")
 _MAC_SWAP_LOG = STATE / "llama-swap.log"
 
@@ -1576,6 +1771,20 @@ def _darwin_service(action: str, unit: str) -> tuple[int, str]:
             except Exception:  # noqa: BLE001
                 break
     if action in ("start", "restart"):
+        try:
+            if subprocess.run(["pgrep", "-f", _MAC_SWAP_PATTERN],
+                              capture_output=True, timeout=10).returncode != 0:
+                # No llama-swap is alive, so any llama-server still running is
+                # an orphan holding memory the incoming engine needs (see
+                # _MAC_SERVER_PATTERN). Windows does the same thing with
+                # taskkill on both image names; Linux gets it from systemd's
+                # cgroup. rc 1 is "nothing matched" -- the state we want.
+                p = subprocess.run(["pkill", "-f", _MAC_SERVER_PATTERN],
+                                   capture_output=True, text=True, timeout=30)
+                if p.returncode == 0:
+                    outs.append("reaped an orphaned llama-server")
+        except Exception:  # noqa: BLE001
+            pass  # reaping is best-effort; the restart itself still proceeds
         if not Path(_MAC_RUNNER).exists():
             return 1, "no runner at " + _MAC_RUNNER
         try:
@@ -2951,9 +3160,13 @@ def _public_ids() -> set[str]:
     means this box really does serve that public model, and requests for the
     public id will now route here too."""
     try:
-        return set(public_catalogue()["by_public"])
+        rows = public_catalogue()["by_public"]
     except Exception:  # noqa: BLE001 -- an empty catalogue is not an error
         return set()
+    # A row that claims its own public id among its fleet ids is saying the
+    # fleet serves the model under that very name -- so a local model taking
+    # it is not a collision, it is the point. Only the others are off limits.
+    return {pid for pid, row in rows.items() if pid not in _row_fleet_ids(row)}
 
 
 def _fleet_id_for(entry: dict, taken: set[str]) -> str:
@@ -4186,6 +4399,13 @@ async def lifespan(_: FastAPI):
     # it never got to prove, rather than leaving it live behind a banner that
     # says it is still being checked.
     reconcile_orphaned_apply()
+    # One id per model across the fleet: a record still registered under a
+    # spelling the fleet has since settled on is renamed here, once. Never
+    # fatal -- a naming pass must not keep a box off the fleet.
+    try:
+        apply_model_name_convergence()
+    except Exception:  # noqa: BLE001
+        log.exception("model name convergence failed; registry left as it was")
     # Fleet Pass: seed the public catalogue and domain lists on a database
     # that has never seen them -- an admin who has since edited or deleted
     # rows is never touched, only an empty table is.
@@ -4304,6 +4524,12 @@ _routes_cache: dict[str, Any] = {"t": 0.0, "map": {}, "cands": {},
                                  "reachable": set(),
                                  # (host, model) -> {bytes, fit, moe, source}
                                  "meta": {},
+                                 # (host, name) -> the canonical model id that
+                                 # name resolves to ON THAT HOST. Aliases are
+                                 # per-box registry entries, so this is the
+                                 # only way to tell whether two boxes offering
+                                 # "triage" are offering the same weights.
+                                 "alias": {},
                                  # host -> "llama-swap" | "ollama" | "none"
                                  "engine": {},
                                  # host -> the model ids it preloads or keeps
@@ -4769,6 +4995,18 @@ def host_class(host: str) -> str:
     return "gpu" if v > 0 else "small"
 
 
+def host_reserved(host: str) -> bool:
+    """Is this box somebody's personal machine? (spec-sheet `reserve`.)
+
+    A reserve box is a full fleet member -- registered, warm with whatever its
+    owner keeps on it, visible everywhere -- that the scorer only picks when
+    every non-reserve candidate is saturated or cooling. Distinct from the
+    killswitch (peers.json `routed`), which removes a box from routing
+    entirely: reserve means "last resort", not "never"."""
+    spec = load_specs().get(host or HOST_NAME, {})
+    return bool(spec.get("reserve"))
+
+
 def host_tier(cand: str, fleet_id: str, role: str = "primary") -> tuple[int, int]:
     """(tier, rank) for one candidate, lower first. `cand` is spelled the way
     the routing table spells it ('' for this box). `role` is 'primary' for a
@@ -4900,8 +5138,47 @@ async def upstream_model_ids() -> set[str]:
     return ids
 
 
+async def upstream_alias_pairs() -> dict[str, str]:
+    """Canonical fleet id -> the Ollama tag it stands for, on an Ollama box.
+
+    A tag cannot be renamed, so the gateway answers to the fleet's canonical
+    id beside it: advertised to the hub as one more served name, with the
+    tag's context ceiling and metadata, and rewritten back to the tag on the
+    way into the engine (the proxy's send step). A tag with no canonical
+    spelling, or whose canonical id is already a real name on this box, is
+    left alone. Empty everywhere but an Ollama box."""
+    if not UPSTREAM_MODELS:
+        return {}
+    tags = await upstream_model_ids()
+    local = local_model_ids()
+    out: dict[str, str] = {}
+    for tag in sorted(tags):
+        canon = SPELLING_TO_CANONICAL.get(tag)
+        if canon and canon != tag and canon not in tags and canon not in local:
+            out.setdefault(canon, tag)
+    return out
+
+
+async def served_canonical_map() -> dict[str, str]:
+    """Every name this box answers to -> the canonical model id behind it,
+    for both engines: models.json ids and aliases (local_alias_map), and on
+    an Ollama box each tag -- to itself, or to the fleet's canonical id when
+    the gateway answers to that id for it. This is what the hub compares
+    boxes by, so the tags have to be in it too: a box that says nothing
+    about a name is read as 'cannot check', never as 'agrees'."""
+    out = local_alias_map()
+    if UPSTREAM_MODELS:
+        for tag in await upstream_model_ids():
+            out.setdefault(tag, tag)
+        for canon, tag in (await upstream_alias_pairs()).items():
+            out[tag] = canon
+            out[canon] = canon
+    return out
+
+
 async def served_model_ids() -> set[str]:
-    return local_model_ids() | await upstream_model_ids()
+    return (local_model_ids() | await upstream_model_ids()
+            | set(await upstream_alias_pairs()))
 
 
 _running_cache: dict[str, Any] = {"t": 0.0, "ids": set()}
@@ -4994,9 +5271,12 @@ async def upstream_catalogue() -> dict:
         _upstream_tags_cache.update(t=now, models=rows)
     ctx = await upstream_model_ctx()
     running = await upstream_running_ids()
+    # tag -> the fleet's canonical id this gateway also answers to for it.
+    also = {tag: canon for canon, tag in (await upstream_alias_pairs()).items()}
     return {
         "enabled": True,
-        "models": [dict(m, ctx=ctx.get(m["id"], 0), running=m["id"] in running)
+        "models": [dict(m, ctx=ctx.get(m["id"], 0), running=m["id"] in running,
+                        also=also.get(m["id"], ""))
                    for m in _upstream_tags_cache["models"]],
     }
 
@@ -5269,6 +5549,29 @@ def local_model_ctx() -> dict[str, int]:
     return out
 
 
+def local_alias_map() -> dict[str, str]:
+    """Every name this box answers to -> the canonical model id behind it.
+
+    An id maps to itself; an alias maps to its record's id. This is what makes
+    a role alias checkable across the fleet: `fast` is not a fleet-wide
+    concept, it is a row in each box's own models.json, and until every box
+    says which weights it means by the word, nothing can notice that two of
+    them disagree. See alias_conflicts()."""
+    out: dict[str, str] = {}
+    for rec in load_models():
+        if not rec.get("enabled", True) or not rec.get("id"):
+            continue
+        mid = str(rec["id"]).strip()
+        if not mid:
+            continue
+        out[mid] = mid
+        for a in rec.get("aliases") or []:
+            name = str(a).strip()
+            if name:
+                out[name] = mid
+    return out
+
+
 def model_source(path: Any) -> dict | None:
     """Where a GGUF came from, read back out of where the Library put it:
     MODELS_DIR/<org>__<repo>/<file>.gguf is exactly what start_download()
@@ -5333,6 +5636,12 @@ async def served_model_meta() -> dict[str, dict]:
         up = dict(_upstream_meta_cache["meta"])
     out = dict(up)
     out.update(local)
+    # The canonical id an Ollama box answers to for a tag is the same
+    # weights, so it carries the tag's metadata -- source included, which is
+    # what lets split_models() see through the two names.
+    for canon, tag in (await upstream_alias_pairs()).items():
+        if tag in out and canon not in out:
+            out[canon] = out[tag]
     return out
 
 
@@ -5451,6 +5760,9 @@ async def served_model_ctx() -> dict[str, int]:
         up = await upstream_model_ctx()
     out = dict(up)
     out.update(local)
+    for canon, tag in (await upstream_alias_pairs()).items():
+        if tag in out and canon not in out:
+            out[canon] = out[tag]
     return out
 
 
@@ -5464,7 +5776,8 @@ async def _peer_served(p: dict) -> dict:
     missing fields simply mean 'unknown', which the scorer treats as
     not-resident and one slot -- the conservative reading."""
     out: dict[str, Any] = {"models": set(), "running": set(), "capacity": {},
-                           "ctx": {}, "meta": {}, "engine": "", "online": False}
+                           "ctx": {}, "meta": {}, "engine": "", "online": False,
+                           "canonical": {}}
     try:
         async with httpx.AsyncClient(timeout=6.0) as c:
             r = await c.get(
@@ -5485,6 +5798,11 @@ async def _peer_served(p: dict) -> dict:
             # Absent on an older gateway, which reads as "no job of its own".
             out["warm"] = {str(m).strip() for m in d.get("warm") or []
                            if str(m).strip()}
+            can = d.get("canonical") or {}
+            if isinstance(can, dict):
+                out["canonical"] = {str(k).strip(): str(v).strip()
+                                    for k, v in can.items()
+                                    if str(k).strip() and str(v).strip()}
             caps = d.get("capacity") or {}
             if isinstance(caps, dict):
                 out["capacity"] = {str(k): max(1, int(v or 1))
@@ -5519,6 +5837,7 @@ async def model_routes(force: bool = False) -> dict[str, str]:
     cap: dict[tuple[str, str], int] = {}
     ctx: dict[tuple[str, str], int] = {}
     meta: dict[tuple[str, str], dict] = {}
+    alias: dict[tuple[str, str], str] = {}
     engine: dict[str, str] = {}
     running: dict[str, set[str]] = {}
     local_caps = local_capacity()
@@ -5533,6 +5852,7 @@ async def model_routes(force: bool = False) -> dict[str, str]:
         local_meta = await asyncio.wait_for(served_model_meta(), CTX_REPORT_BUDGET)
     except Exception:  # noqa: BLE001
         local_meta = {}
+    local_alias = local_alias_map()
     for m in await served_model_ids():
         routes[m] = ""
         cands[m] = [""]
@@ -5541,6 +5861,8 @@ async def model_routes(force: bool = False) -> dict[str, str]:
             ctx[("", m)] = int(local_ctx[m])
         if isinstance(local_meta.get(m), dict):
             meta[("", m)] = local_meta[m]
+        if local_alias.get(m):
+            alias[("", m)] = local_alias[m]
     running[HOST_NAME] = set(await upstream_running_ids())
     warm: dict[str, set[str]] = {HOST_NAME: local_warm_ids()}
     try:
@@ -5570,10 +5892,12 @@ async def model_routes(force: bool = False) -> dict[str, str]:
                     ctx[(p["name"], m)] = int(d["ctx"][m])
                 if isinstance(d.get("meta", {}).get(m), dict):
                     meta[(p["name"], m)] = d["meta"][m]
+                if d.get("canonical", {}).get(m):
+                    alias[(p["name"], m)] = d["canonical"][m]
     _routes_cache.update(t=time.time(), map=routes, cands=cands,
                          cap=cap, running=running, ctx=ctx,
                          reachable=reachable, meta=meta, engine=engine,
-                         warm=warm)
+                         warm=warm, alias=alias)
     remember_model_ctx(ctx)
     return routes
 
@@ -5581,6 +5905,7 @@ async def model_routes(force: bool = False) -> dict[str, str]:
 async def _score_host_model_pairs(
     pairs: list[tuple[str, str]], role: str = "primary",
     prompt_tokens: int = 0, gen_tokens: int = 256, need_ctx: int = 0,
+    fleet_role: str = "",
 ) -> list[tuple[str, str]]:
     """Rank (host, model-id) candidates, best first.
 
@@ -5602,7 +5927,16 @@ async def _score_host_model_pairs(
     last. Factored out of model_hosts() so a Fleet Pass public catalogue
     row -- which can name several fleet ids as the same public model -- can
     rank its candidates across ALL of them at once. Requires `_routes_cache`
-    to already be fresh (the caller awaits model_routes() first)."""
+    to already be fresh (the caller awaits model_routes() first).
+
+    `fleet_role` names the FLEET_ROLES ladder the pairs were built from, and
+    it changes what "best" means: among the boxes that hold their model
+    (tier 0 or 1), the one offering the model HIGHER on the ladder wins, and
+    only then does the usual order apply. Without it `deep` went to a warm
+    27B on a laptop while the 120B sat idle on the big box -- the policy
+    said which model plays the role best, and the ranking ignored it. Boxes
+    that would spill or run it on CPU still sit behind every box that holds
+    it, whatever the ladder says."""
     if len(pairs) <= 1:
         return pairs
     cap = _routes_cache.get("cap", {})
@@ -5628,8 +5962,9 @@ async def _score_host_model_pairs(
         busy = _inflight.get(hname, 0)
         resident = mid in running.get(hname, set())
         tier, rank = host_tier(cand, mid, role)
+        too_small = 0
         if need_ctx and 0 < host_model_ctx(cand, mid) < need_ctx:
-            tier = 5
+            tier, too_small = 5, 1
         est = _est_wall(cand, mid, resident, await tps_for(mid), await pp_for(mid),
                         prompt_tokens, gen_tokens)
         est *= 1.0 + busy / slots
@@ -5637,9 +5972,19 @@ async def _score_host_model_pairs(
             bw = float(specs.get(hname, {}).get("mem_bw_gbs") or 0)
         except (TypeError, ValueError):
             bw = 0.0
+        # For a fleet role: holds-it before spills-it, then the ladder.
+        pref = ((0 if tier <= 1 else 1, role_index(fleet_role, cand, mid))
+                if fleet_role else ())
         key = (
             1 if busy >= slots else 0,          # saturated last
             1 if host_cooling(hname) else 0,    # just failed: last
+            too_small,                          # proven cannot fit: behind
+                                                # even the reserve boxes -- a
+                                                # personal box that CAN answer
+                                                # beats any box that cannot
+            1 if host_reserved(hname) else 0,   # personal box: only when the
+                                                # fleet boxes are busy/failing
+            *pref,                              # the role's own order
             tier, rank,                         # the owner's policy
             round(est, 1),                      # soonest answer first
             -bw,                                # spec-sheet tiebreak
@@ -5648,6 +5993,196 @@ async def _score_host_model_pairs(
         scored.append((key, cand, mid))
     scored.sort(key=lambda t: t[0])
     return [(cand, mid) for _, cand, mid in scored]
+
+
+def alias_conflicts() -> list[dict]:
+    """Names that mean different weights on different boxes.
+
+    The scorer in _score_host_model_pairs() answers "which of these hosts
+    should serve this name". It assumes the candidates are interchangeable --
+    which is true for a real model id, and is an assumption for an alias. A
+    role alias like `fast`, `triage` or `deep` is a row in each box's own
+    models.json, and nothing has ever checked that two boxes mean the same
+    thing by the word. If apu-box-1's `fast` is qwen3.6-35b and mac-desktop-1's `fast`
+    is qwen3.5:9b, both are candidates, both get ranked honestly against
+    their own metadata, and the caller gets whichever box was quicker today.
+    That is not routing to the best machine for the job; it is routing to the
+    best machine for a coin flip.
+
+    Reported rather than repaired, deliberately. Only the fleet's owner knows
+    which meaning is the right one, and a gateway that silently dropped half
+    the candidates would turn a naming mistake into a capacity mystery.
+
+    Requires a fresh `_routes_cache` (callers await model_routes() first). A
+    peer on a gateway too old to report `canonical` contributes nothing and is
+    listed under `unknown`, so "no conflicts" never quietly means "could not
+    check"."""
+    cands = _routes_cache.get("cands", {})
+    alias = _routes_cache.get("alias", {})
+    out = []
+    for name, hosts in sorted(cands.items()):
+        if len(hosts) < 2:
+            continue
+        # A fleet role is answered by policy before any box's row of that
+        # name is consulted, so boxes disagreeing about it changes nothing
+        # a request can see. The roles endpoint lists those rows instead.
+        if name in FLEET_ROLES:
+            continue
+        by_target: dict[str, list[str]] = {}
+        unknown = []
+        for h in hosts:
+            target = alias.get((h, name))
+            if not target:
+                unknown.append(h or HOST_NAME)
+            else:
+                by_target.setdefault(target, []).append(h or HOST_NAME)
+        if len(by_target) > 1:
+            out.append({
+                "name": name,
+                "targets": {t: sorted(hs) for t, hs in sorted(by_target.items())},
+                "unknown": sorted(unknown),
+                # An alias that IS a real model id somewhere is the less
+                # alarming shape: one box is serving the model, another is
+                # pointing the same word at something else.
+                "is_model_id": name in by_target,
+            })
+    return out
+
+
+def split_models() -> list[dict]:
+    """One model, served under different names on different boxes.
+
+    The mirror image of alias_conflicts(), and the more common failure of the
+    two. A conflict at least routes somewhere; this does not route at all --
+    candidates are grouped by NAME, so two boxes holding the same weights
+    under different names are never each other's alternatives. The better box
+    is simply invisible for that request, silently, and the symptom is a
+    fleet that looks half its size.
+
+    Measured on this fleet: gpu-laptop-1 served the 9B distill as `qwen3.8-9B`
+    while apu-tablet-2 served the same file as `qwen3.8-9b-distill`, which is the
+    id the hub publishes -- so the always-on box that was supposed to hold it
+    warm was never a candidate for it.
+
+    Identity is the HuggingFace REPO the weights came from -- the Library's
+    {repo, file} on a llama.cpp box, the `hf.co/...` tag on an Ollama box
+    (_model_repo) -- and not the file: the fleet already serves one model at
+    different quants under one id (qwen3.8-27b is Q5_K_M on apu-box-1 and
+    UD-Q5_K_M on mac-laptop-1), so a Q3 and a Q4 of one repo under two names are
+    two names, not two models. A box whose weights came from neither source
+    reports no repo and is skipped rather than guessed at.
+
+    Grouped by canonical id, and reported only when some box that holds the
+    weights does not answer to every name for them. Two ids for one file on
+    ONE box is a variant the owner built on purpose (the classify build
+    beside the general one on apu-box-1), and both are reachable wherever the
+    weights are; the point of this check is boxes that cannot stand in for
+    each other.
+
+    The fleet-wide spellings this already knows about are repaired rather
+    than reported: FLEET_MODEL_NAMES renames them at start-up on a llama.cpp
+    box and aliases them on an Ollama one. What is left here is a spelling
+    nobody has claimed yet.
+    """
+    cands = _routes_cache.get("cands", {})
+    meta = _routes_cache.get("meta", {})
+    alias = _routes_cache.get("alias", {})
+    # repo -> {canonical id -> {hosts}}
+    seen: dict[str, dict[str, set[str]]] = {}
+    for name, hosts in cands.items():
+        for h in hosts:
+            repo = _model_repo((meta.get((h, name)) or {}).get("source") or {})
+            if not repo:
+                continue
+            # Group by the canonical id, not the name: two boxes that both
+            # call it `fast` on top of the same real id agree, and an alias
+            # sitting beside its own id on one box is not a split.
+            mid = alias.get((h, name)) or name
+            seen.setdefault(repo, {}).setdefault(mid, set()).add(h or HOST_NAME)
+    out = []
+    for repo, by_id in sorted(seen.items()):
+        if len(by_id) < 2:
+            continue
+        everywhere = set().union(*by_id.values())
+        if all(hs == everywhere for hs in by_id.values()):
+            continue
+        out.append({
+            "repo": repo,
+            "names": {mid: sorted(hs) for mid, hs in sorted(by_id.items())},
+        })
+    return out
+
+
+def role_index(role: str, cand: str, name: str) -> int:
+    """Where the model a box serves as `name` sits on the role's ladder --
+    0 for the best -- and one past the end when it is not on it."""
+    ladder = FLEET_ROLES.get(role, ())
+    canon = _routes_cache.get("alias", {}).get((cand, name)) or name
+    canon = SPELLING_TO_CANONICAL.get(canon, canon)
+    return ladder.index(canon) if canon in ladder else len(ladder)
+
+
+def role_pairs(role: str) -> list[tuple[str, str]]:
+    """(host, fleet id) for a fleet role: the best model for it ON EACH BOX.
+
+    Per box, the first ladder entry it holds in its own memory
+    (preload_capable's reading of `fit`, moe_spill_ok included), else the
+    first it serves at all -- a CPU box still plays `fast` with the 3B-active
+    MoE its owner would have picked. One pair per box, spelled the way that
+    box serves the model: a peer that still knows the weights only by an old
+    spelling is addressed by it, since the proxy sends the name the box
+    answers to. The caller ranks the pairs with _score_host_model_pairs like
+    any other candidates. Requires a fresh _routes_cache."""
+    ladder = FLEET_ROLES.get(role)
+    if not ladder:
+        return []
+    cands = _routes_cache.get("cands", {})
+    alias = _routes_cache.get("alias", {})
+    running = _routes_cache.get("running", {})
+    held: dict[str, dict[str, str]] = {}   # host -> canonical id -> served name
+    for name, hosts in cands.items():
+        for h in hosts:
+            canon = alias.get((h, name)) or name
+            canon = SPELLING_TO_CANONICAL.get(canon, canon)
+            if canon not in ladder:
+                continue
+            names = held.setdefault(h, {})
+            cur = names.get(canon)
+            hot = running.get(h or HOST_NAME, set())
+            # The canonical spelling wins when the box serves it -- unless
+            # another name for the same weights is the one actually loaded.
+            # A box that kept an old spelling as a record of its own (the
+            # start-up rename steps aside when the canonical id is taken by
+            # a variant) has two names for one file and only one of them
+            # warm, and sending the cold one would pay a reload for nothing.
+            if cur is None or (name in hot and cur not in hot):
+                names[canon] = name
+            elif cur not in hot and name == canon:
+                names[canon] = name
+    pairs: list[tuple[str, str]] = []
+    for h, names in held.items():
+        fits = [c for c in ladder if c in names and preload_capable(h, names[c])]
+        pick = fits[0] if fits else next(c for c in ladder if c in names)
+        pairs.append((h, names[pick]))
+    return pairs
+
+
+def _model_repo(src: dict) -> str:
+    """The HuggingFace repo a served model's weights came from, read from
+    either engine's idea of a source: the Library's {repo, file} on a
+    llama.cpp box, or an `hf.co/<org>/<repo>:<quant>` tag on an Ollama box.
+    Anything else -- an Ollama library tag like `gemma4:26b`, a hand-placed
+    file -- is '' and is left out rather than guessed at."""
+    repo = str(src.get("repo") or "").strip()
+    if repo:
+        return repo
+    tag = str(src.get("tag") or "").strip()
+    if tag.startswith("hf.co/"):
+        body = tag[len("hf.co/"):].split(":", 1)[0]
+        parts = body.split("/")
+        if len(parts) == 2 and all(parts):
+            return body
+    return ""
 
 
 async def model_hosts(model: str, **kw: Any) -> list[str]:
@@ -5694,16 +6229,30 @@ async def peer_inference_key(peer_name: str) -> str | None:
 
 
 async def fleet_model_list() -> list[dict]:
-    """Union of every model the fleet serves, tagged with its host."""
+    """Union of every model the fleet serves, tagged with its host.
+
+    One entry per MODEL, not per name: a peer's alias (`fast`, `qwen3.8-9B`)
+    is still accepted in a request, it just is not listed beside the id it
+    stands for. A client that lists models and then asks for one of them
+    gets the same answer either way; what it no longer sees is the same
+    weights three times under three spellings."""
     routes = await model_routes()
+    peer_can = _routes_cache.get("alias", {})
     canonical: dict[str, str] = {}
     for rec in load_models():
         if rec.get("enabled", True) and rec.get("id"):
             canonical[str(rec["id"])] = ""
+    # On an Ollama box the canonical id is listed and the tag stands behind it.
+    by_tag = {tag: canon for canon, tag in (await upstream_alias_pairs()).items()}
     for mid in await upstream_model_ids():
-        canonical.setdefault(mid, "")
+        canonical.setdefault(by_tag.get(mid, mid), "")
     for m, host in routes.items():
-        if host and m not in canonical:
+        # A role word is never listed on a peer's say-so: a peer too old to
+        # report what its `fast` row means is not something resolve_targets()
+        # would route to, and a listing must not promise what a request
+        # cannot get. Roles are listed below, from what can really play them.
+        if (host and m not in canonical and m not in FLEET_ROLES
+                and peer_can.get((host, m), m) == m):
             canonical.setdefault(m, host)
     seen, out = set(), []
     for mid, host in canonical.items():
@@ -5718,6 +6267,13 @@ async def fleet_model_list() -> list[dict]:
                 "created": 0,
             }
         )
+    # A fleet role is callable like a model and listed like one, as long as
+    # something in the fleet can play it right now.
+    for role in FLEET_ROLES:
+        if role not in seen and role_pairs(role):
+            seen.add(role)
+            out.append({"id": role, "object": "model", "owned_by": "fleet-role",
+                        "created": 0})
     return sorted(out, key=lambda m: m["id"])
 
 
@@ -5907,9 +6463,17 @@ async def openai_proxy(path: str, request: Request):
     # /v1/models is answered by the hub itself: a client asking what it can use
     # should see the whole fleet, not just this box's catalogue -- except a
     # Fleet Pass key, which only ever gets to see what it may actually call.
+    #
+    # Not metered. A listing is not usage: nothing was generated, no box did
+    # any work, and every budget query already excluded these rows
+    # (BUDGET_REQ_SQL). What recording them did was fill the ledger -- the
+    # downstream-app autopilot probes the hub's catalogue every 30 s as a health
+    # check, and by 2026-08-30 that key had 26,562 usage rows on this hub, all
+    # of them this listing, zero completions -- so a project's usage page read
+    # as busy and the actual completions were needles in it. The key's
+    # last_used_at is still stamped by require_api_key, so "when was this key
+    # last seen" keeps its meaning.
     if path == "models" and request.method == "GET":
-        record_usage(key, "", endpoint, False, 200, None, None,
-                     int((time.time() - started) * 1000))
         pub_key = public_key_for(int(key["id"]))
         if pub_key:
             try:
@@ -5931,10 +6495,16 @@ async def openai_proxy(path: str, request: Request):
         fleet_list = await fleet_model_list()
         seen = {m["id"] for m in fleet_list}
         for pid, row in public_catalogue()["by_public"].items():
-            if row.get("enabled") and pid not in seen:
-                fleet_list.append({"id": pid, "object": "model",
-                                   "owned_by": "fleet-pass", "created": 0})
-                seen.add(pid)
+            if not row.get("enabled") or pid in seen:
+                continue
+            # A public id is one more name for weights the fleet already
+            # lists under their own id (`gemma4-26b-a4b` is `gemma-4-26b`).
+            # It stays callable; it is only listed when it is the sole name.
+            if any(f in seen for f in _row_fleet_ids(row)):
+                continue
+            fleet_list.append({"id": pid, "object": "model",
+                               "owned_by": "fleet-pass", "created": 0})
+            seen.add(pid)
         return JSONResponse({"object": "list",
                             "data": sorted(fleet_list, key=lambda m: m["id"])})
 
@@ -6034,6 +6604,9 @@ async def openai_proxy(path: str, request: Request):
     # A caller that hangs up while the box is still loading used to leave the
     # box loading for nobody; this notices and lets go.
     watcher = _watch_disconnect(request, job)
+    # On an Ollama box the fleet's canonical id is answered to for a tag the
+    # engine only knows by the tag; empty everywhere else.
+    up_alias = await upstream_alias_pairs()
     try:
         for i, (cand, fleet_id) in enumerate(targets):
             more = i < len(targets) - 1
@@ -6073,11 +6646,14 @@ async def openai_proxy(path: str, request: Request):
             # never what the upstream knows the model as -- rewrite the body's
             # `model` to this attempt's real fleet id, per candidate, so a
             # connect failure on one host can retry the next with its own id.
-            # The same rewrite carries a context reduction, when there is one.
+            # The same rewrite carries a context reduction, when there is one,
+            # and turns a canonical id back into the tag this box's own Ollama
+            # knows the model by.
+            send_id = up_alias.get(fleet_id, fleet_id) if not cand else fleet_id
             send_body = body
-            if cand_payload is not None or (model and fleet_id != model):
+            if cand_payload is not None or (model and send_id != model):
                 base = cand_payload if cand_payload is not None else payload
-                send_body = json.dumps({**base, "model": fleet_id}).encode()
+                send_body = json.dumps({**base, "model": send_id}).encode()
                 hdrs["content-length"] = str(len(send_body))
             if cand:
                 pk = await peer_inference_key(cand)
@@ -6525,6 +7101,8 @@ async def native_proxy(path: str, request: Request):
     raw = await request.body()
     model, body = "", raw
     stream = True  # ollama streams by default
+    payload: dict | None = None  # bound even when raw is empty or not JSON,
+                                  # for the context-retry check below
     if raw:
         try:
             payload = json.loads(raw)
@@ -6538,6 +7116,12 @@ async def native_proxy(path: str, request: Request):
                     payload = apply_agent(agent, payload)
                     body = json.dumps(payload).encode()
                 model = str(payload.get("model", ""))
+                # Native Ollama shape, same rule as /v1: the fleet's canonical
+                # id goes to the engine as the tag it knows.
+                tag = (await upstream_alias_pairs()).get(model)
+                if tag:
+                    payload["model"] = tag
+                    body = json.dumps(payload).encode()
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 
@@ -6591,15 +7175,52 @@ async def native_proxy(path: str, request: Request):
                 record_usage(key, model, endpoint, False, 499, None, None,
                              int((time.time() - started) * 1000))
             return JSONResponse(ABORTED_BODY, status_code=499)
+        status = resp.status_code
+        # Ollama takes its context window per request (`options.num_ctx`),
+        # unlike llama.cpp's launch-time -c -- so an oversized window is a
+        # per-call failure here, not a model load an operator watches. Ollama
+        # runs on the same ggml backend llama.cpp does, so a real overfit
+        # fails with the vocabulary _MEM_SIGNS already matches. One retry at
+        # half the window; remembered on success so routing (host_model_ctx,
+        # consulted fleet-wide) stops offering this pair a window it has
+        # already proven too big, instead of failing it again next call.
+        # Streaming requests are not retried here: Ollama streams by default,
+        # and bytes already relayed to the caller cannot be taken back.
+        if metered and status >= 400 and model and isinstance(payload, dict):
+            opts = payload.get("options")
+            try:
+                asked = int(opts.get("num_ctx") or 0) if isinstance(opts, dict) else 0
+            except (TypeError, ValueError):
+                asked = 0
+            overfit = asked and any(
+                s in raw_out.decode("utf-8", "ignore").lower() for s in _MEM_SIGNS)
+            smaller = halve_ctx(asked) if overfit else 0
+            if smaller:
+                retry_payload = dict(payload, options=dict(opts, num_ctx=smaller))
+                retry_body = json.dumps(retry_payload).encode()
+                retry_fwd = dict(fwd)
+                retry_fwd["content-length"] = str(len(retry_body))
+                retry_req = client.build_request(
+                    request.method, endpoint, headers=retry_fwd,
+                    content=retry_body, params=dict(request.query_params))
+                try:
+                    resp2 = await client.send(retry_req)
+                    raw_out, status = resp2.content, resp2.status_code
+                    out_headers = {k: v for k, v in resp2.headers.items()
+                                  if k.lower() not in drop}
+                    if status < 400:
+                        remember_model_ctx({("", model): smaller})
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    pass  # the original failure is still the honest answer
         usage = None
         if metered:
             try:
                 usage = _ollama_usage(json.loads(raw_out))
             except Exception:  # noqa: BLE001
                 pass
-            record_usage(key, model, endpoint, False, resp.status_code, usage,
+            record_usage(key, model, endpoint, False, status, usage,
                          None, int((time.time() - started) * 1000))
-        return Response_bytes(raw_out, resp.status_code, out_headers)
+        return Response_bytes(raw_out, status, out_headers)
 
     async def relay():
         ttft: int | None = None
@@ -6837,15 +7458,26 @@ async def _batch_targets(models: list[str]) -> list[dict]:
     the first model in the caller's order claims the host."""
     await model_routes(force=True)
     cap = _routes_cache.get("cap", {})
-    tps_by_model = {m: await asyncio.to_thread(measured_tps, m) for m in models}
+    tps_by_model: dict[str, dict[str, float]] = {}
+
+    async def tps_for(mid: str) -> dict[str, float]:
+        if mid not in tps_by_model:
+            tps_by_model[mid] = await asyncio.to_thread(measured_tps, mid)
+        return tps_by_model[mid]
+
     taken: set[str] = set()
     targets: list[dict] = []
     for m in models:
         # Policy order, so the first-listed model claims the boxes the owner
-        # ranked highest for batch work (role 'worker': sub-agent rules).
+        # ranked highest for batch work (role 'worker': sub-agent rules). A
+        # fleet role fans out over each box's own best model for it, exactly
+        # as the live proxy resolves one (role_pairs) -- and every target
+        # then carries the id that box really serves, never the role word.
+        pool = (role_pairs(m) if m in FLEET_ROLES
+                else [(c, m) for c in _routes_cache["cands"].get(m, [])])
         ranked = await _score_host_model_pairs(
-            [(c, m) for c in _routes_cache["cands"].get(m, [])], role="worker")
-        for cand, _mid in ranked:
+            pool, role="worker", fleet_role=m if m in FLEET_ROLES else "")
+        for cand, mid in ranked:
             hname = cand or HOST_NAME
             if hname in taken:
                 continue
@@ -6853,9 +7485,9 @@ async def _batch_targets(models: list[str]) -> list[dict]:
             targets.append({
                 "cand": cand,
                 "host": hname,
-                "model": m,
-                "workers": max(1, min(8, int(cap.get((cand, m), 1)))),
-                "tps": tps_by_model[m].get(hname) or _spec_speed(hname),
+                "model": mid,
+                "workers": max(1, min(8, int(cap.get((cand, mid), 1)))),
+                "tps": (await tps_for(mid)).get(hname) or _spec_speed(hname),
             })
     return targets
 
@@ -7675,54 +8307,72 @@ PUBLIC_MODELS_SEED: list[dict] = [
     {"public_id": "gemma4-31b-qat", "family": "Gemma", "name": "Gemma 4 31B (QAT)", "vendor": "Google",
      "arch": "dense", "params_b": 31, "active_b": 31,
      "fleet_ids": ["gemma4-31b-qat"], "allow_primary": 1, "allow_worker": 0,
-     "ctx_max": 131072, "ctx_default": 16384, "sort": 10,
+     "ctx_max": 131072, "ctx_default": 32768, "sort": 10,
      "description": "Google's largest open Gemma 4, quantisation-aware trained so 4-bit costs it little. Even-tempered prose, image input, dependable structured output -- and Apache 2.0 since Gemma 4."},
     {"public_id": "gemma4-26b-a4b", "family": "Gemma", "name": "Gemma 4 26B-A4B (QAT)", "vendor": "Google",
      "arch": "moe", "params_b": 26, "active_b": 4,
      "fleet_ids": ["gemma-4-26b", "gemma4:26b"], "allow_primary": 1, "allow_worker": 1,
-     "ctx_max": 131072, "ctx_default": 16384, "sort": 20,
+     "ctx_max": 131072, "ctx_default": 32768, "sort": 20,
      "description": "Mixture-of-experts Gemma 4: 26B stored, 4B active. Cheap per token, though slower in practice than the active count suggests."},
     {"public_id": "gemma4-12b", "family": "Gemma", "name": "Gemma 4 12B (QAT)", "vendor": "Google",
      "arch": "dense", "params_b": 12, "active_b": 12,
      "fleet_ids": ["gemma4:12b-it-qat"], "allow_primary": 0, "allow_worker": 1,
-     "ctx_max": 131072, "ctx_default": 8192, "sort": 30,
+     "ctx_max": 131072, "ctx_default": 16384, "sort": 30,
      "description": "Dense 12B Gemma 4. Former small-box resident (replaced by the Qwen 3.8 9B distill, 2026-08); still installed on some boxes."},
     {"public_id": "gemma4-e4b", "family": "Gemma", "name": "Gemma 4 E4B", "vendor": "Google",
      "arch": "dense", "params_b": 8, "active_b": 4,
      "fleet_ids": ["gemma4:e4b"], "allow_primary": 0, "allow_worker": 1,
-     "ctx_max": 32768, "ctx_default": 8192, "sort": 40,
+     "ctx_max": 32768, "ctx_default": 16384, "sort": 40,
      "description": "Gemma 4 'effective 4B' -- small, quick, image input included. Good for sub-tasks and anything that has to run on-device."},
     {"public_id": "qwen3.8-27b", "family": "Qwen", "name": "Qwen 3.8 27B", "vendor": "Alibaba Qwen",
      "arch": "dense", "params_b": 27, "active_b": 27,
      "fleet_ids": ["qwen3.8-27b"], "allow_primary": 1, "allow_worker": 0,
-     "ctx_max": 262144, "ctx_default": 16384, "sort": 50,
+     "ctx_max": 262144, "ctx_default": 32768, "sort": 50,
      "description": "Qwen's August 2026 dense flagship, and the one you can actually host: 262k trained context, image and video in, Apache 2.0. The fleet's strongest prose and reasoning model -- and its most verbose."},
     {"public_id": "qwen3.8-flash-next", "family": "Qwen", "name": "Qwen 3.8 Flash-Next", "vendor": "Alibaba Qwen",
      "arch": "moe", "params_b": 125, "active_b": 6,
      "fleet_ids": ["qwen3.8-flash-next"], "allow_primary": 1, "allow_worker": 0,
-     "ctx_max": 196608, "ctx_default": 16384, "sort": 55,
+     # 128k. The 32768 this carried for a few hours on 2026-08-29 was set on a
+     # wrong diagnosis: that long contexts were what OOM-killed apu-box-1. They
+     # are not, and the KV cache is the cheapest thing this model has. Only 12
+     # of its 48 layers hold one -- the rest are linear and log as `filtered`
+     # -- so the whole cache is 243 MiB per 32k, about 7.6 MiB per 1k tokens,
+     # and it lives in VRAM the box has 45 GiB of going spare. Going 32768 ->
+     # 131072 moved VRAM 47.6 -> 50.4 GiB and host RSS not at all, measured
+     # across a 112k-token prompt.
+     #
+     # What actually fills apu-box-1 is one tensor: per_layer_token_embd.weight,
+     # 26.8 GiB of iq4_nl that no Vulkan buffer can host (forcing it aborts),
+     # against 31 GiB of system RAM. That is a host-memory ceiling and it does
+     # not move with ctx_max, so pinning this low bought nothing and cost the
+     # window. See hosts/apu-box-1/README.md for the measurements.
+     #
+     # 262144 is the model's full trained window, verified live on apu-box-1
+     # 2026-09-01: loads, and answers a real 30k-token prompt at 145 tok/s
+     # prefill with VRAM at 55 of 96 GiB and host RSS flat.
+     "ctx_max": 262144, "ctx_default": 65536, "sort": 55,
      "description": "Qwen's preview of the Qwen4 architecture, out 2026-08-26: 125B stored, 6B active, with hybrid linear/sparse attention that keeps a long window cheap. Held at two bits on the one box with the memory for it -- around 28 tokens a second, and new enough that its quirks are still being found."},
     {"public_id": "qwen3.6-35b-a3b", "family": "Qwen", "name": "Qwen 3.6 35B-A3B", "vendor": "Alibaba Qwen",
      "arch": "moe", "params_b": 35, "active_b": 3,
      "fleet_ids": ["qwen3.6-35b"], "allow_primary": 1, "allow_worker": 1,
-     "ctx_max": 262144, "ctx_default": 16384, "sort": 60,
+     "ctx_max": 262144, "ctx_default": 32768, "sort": 60,
      "description": "April 2026 mixture of experts: 35B stored, 3B active, so it answers at a small model's pace on any box that can hold it. Apache 2.0, 262k context."},
     {"public_id": "qwen3.8-9b-distill", "family": "Qwen", "name": "Qwen 3.8 9B Distill",
      "vendor": "community (empero-ai Qwen 3.8 distill)",
      "arch": "dense", "params_b": 9, "active_b": 9,
-     "fleet_ids": ["hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M", "qwen3.8-9B", "Qwen3.8-9B", "empero-ai-qwen3.8-9b-distill"],
+     "fleet_ids": ["qwen3.8-9b-distill", "hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M", "qwen3.8-9B", "Qwen3.8-9B", "empero-ai-qwen3.8-9b-distill"],
      "allow_primary": 0, "allow_worker": 1,
-     "ctx_max": 262144, "ctx_default": 8192, "sort": 65,
+     "ctx_max": 262144, "ctx_default": 16384, "sort": 65,
      "description": "Qwen 3.8-Max distilled into a dense 9B by the community (empero-ai) -- not an Alibaba release. Resident default on the Apple-silicon and CPU boxes since 2026-08; quick prefill, light on memory."},
     {"public_id": "qwen3.5-4b", "family": "Qwen", "name": "Qwen 3.5 4B", "vendor": "Alibaba Qwen",
      "arch": "dense", "params_b": 4, "active_b": 4,
      "fleet_ids": ["qwen3.5:4b", "qwen3.5-4b"], "allow_primary": 0, "allow_worker": 1,
-     "ctx_max": 262144, "ctx_default": 8192, "sort": 70,
+     "ctx_max": 262144, "ctx_default": 16384, "sort": 70,
      "description": "Small dense Qwen from the 3.5 line. Fast sub-agent work, classification and tool calls -- not the one to reason with."},
     {"public_id": "qwopus3.6-35b", "family": "Qwen", "name": "Qwopus 3.6 35B-A3B",
      "vendor": "community (Qwen 3.6 fine-tune)", "arch": "moe", "params_b": 35, "active_b": 3,
      "fleet_ids": ["qwopus3.6-35b-coder", "Qwopus3.6-35B", "Qwopus3.6-A3B"],
-     "allow_primary": 1, "allow_worker": 1, "ctx_max": 262144, "ctx_default": 16384, "sort": 80,
+     "allow_primary": 1, "allow_worker": 1, "ctx_max": 262144, "ctx_default": 32768, "sort": 80,
      "description": "Community coding fine-tune of the Qwen 3.6 mixture of experts (35B stored, 3B active) with multi-token prediction. Leans to code and patches."},
     {"public_id": "nemotron3-super-120b", "family": "Nemotron", "name": "Nemotron 3 Super 120B-A12B", "vendor": "NVIDIA",
      "arch": "moe", "params_b": 120, "active_b": 12,
@@ -7737,27 +8387,27 @@ PUBLIC_MODELS_SEED: list[dict] = [
     {"public_id": "nemotron-3-nano-4b", "family": "Nemotron", "name": "Nemotron 3 Nano 4B", "vendor": "NVIDIA",
      "arch": "dense", "params_b": 4, "active_b": 4,
      "fleet_ids": ["nemotron-3-nano:4b"], "allow_primary": 0, "allow_worker": 1,
-     "ctx_max": 131072, "ctx_default": 8192, "sort": 110,
+     "ctx_max": 131072, "ctx_default": 16384, "sort": 110,
      "description": "Small dense Nemotron for sub-tasks and tool calls."},
     {"public_id": "nemotron-mini-4b", "family": "Nemotron", "name": "Nemotron Mini 4B", "vendor": "NVIDIA",
      "arch": "dense", "params_b": 4, "active_b": 4,
      "fleet_ids": ["nemotron-mini:4b"], "allow_primary": 0, "allow_worker": 1,
-     "ctx_max": 8192, "ctx_default": 4096, "sort": 120,
+     "ctx_max": 8192, "ctx_default": 8192, "sort": 120,
      "description": "Tiny, instant, 4k context. The floor of the fleet."},
     {"public_id": "muse-glimmer-30b", "family": "Muse", "name": "Muse Glimmer 30B", "vendor": "Meta",
      "arch": "dense", "params_b": 30, "active_b": 30,
      "fleet_ids": ["muse-glimmer-30b"], "allow_primary": 1, "allow_worker": 1,
-     "ctx_max": 131072, "ctx_default": 16384, "sort": 130,
+     "ctx_max": 131072, "ctx_default": 32768, "sort": 130,
      "description": "Meta's dense 30B agent model, distilled from Muse Spark and released Apache 2.0. Excellent tool use for its size and it fits anywhere -- but it hallucinates measurably more than the Qwen of the same size, so not the one to ask for facts."},
     {"public_id": "deepseek-v4-flash", "family": "DeepSeek", "name": "DeepSeek V4 Flash", "vendor": "DeepSeek",
      "arch": "moe", "params_b": 284, "active_b": 13,
      "fleet_ids": ["deepseek-v4-flash"], "allow_primary": 1, "allow_worker": 0,
-     "ctx_max": 163840, "ctx_default": 8192, "sort": 140,
+     "ctx_max": 163840, "ctx_default": 12288, "sort": 140,
      "description": "DeepSeek V4 Flash (0731): 284B stored, 13B active, MIT-licensed, built for long context and agentic work. Runs here at a low bit rate on the one box that can hold it -- the slowest cold load in the fleet."},
     {"public_id": "glm-4.7-flash", "family": "GLM", "name": "GLM-4.7-Flash", "vendor": "Z.ai",
      "arch": "moe", "params_b": 30, "active_b": 3,
      "fleet_ids": ["glm-4.7-flash"], "allow_primary": 1, "allow_worker": 1,
-     "ctx_max": 262144, "ctx_default": 16384, "sort": 150,
+     "ctx_max": 262144, "ctx_default": 32768, "sort": 150,
      "description": "Z.ai's 30B-A3B mixture of experts: capable and efficient at general chat and tool calling for the memory it occupies."},
 ]
 
@@ -7879,10 +8529,11 @@ _PRE_HARDWARE_CTX_MAX: dict[str, int] = {
     # seed that carried it shipped with, recorded so a future raise of its
     # ctx_max still migrates instead of silently pinning every box.
     "glm-4.7-flash": 262144,
-    # qwen3.8-flash-next joined 2026-08-28, same reasoning. Its ceiling is the
-    # largest window the box that holds it actually launches with: the Vulkan
-    # flash-attention path stalls on this architecture, so its KV cache is f16
-    # rather than q8_0 and the window is what that leaves room for.
+    # qwen3.8-flash-next joined 2026-08-28, same reasoning. The note that used
+    # to sit here -- "the Vulkan flash-attention path stalls on this
+    # architecture" -- was never true of this build. `flash_attn = auto`
+    # resolves to `resolve_fused_ops: Flash Attention enabled` on apu-box-1, and
+    # the model runs that way today.
     "qwen3.8-flash-next": 196608,
 }
 
@@ -8273,6 +8924,25 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
         "systems of the machines in the fleet; if asked, say so and describe "
         "yourself as one of several boxes behind one gateway."
     ),
+    # ---- auto-issue: keys minted by a connected service, no person in the loop
+    # The owner's own tooling (a job-search autopilot that hands a recruiter a
+    # live key inside a cover letter, say) calls POST /admin/api/public/keys/auto
+    # with the admin token and gets the raw key back once. Everything about
+    # the key -- model, lifetime, budgets, base URL, the setup text it is
+    # handed on with -- is decided HERE, so the service never carries a copy
+    # of these settings that could drift from the tab.
+    "auto_issue_enabled": True,
+    "auto_issue_model": "qwen3.8-27b",
+    "auto_issue_ctx": 16384,
+    "auto_issue_daily_cap": 20,
+    "auto_issue_setup_text": (
+        "Base URL: {base_url}\n"
+        "API key: {key}\n"
+        "Model: {model}\n"
+        "Any OpenAI-compatible client works (curl, the openai SDKs, Cline, "
+        "Open WebUI); set the User-Agent header to anything but the SDK "
+        "default. Expires {expires}; {limits}."
+    ),
 }
 
 _PUBLIC_SETTING_BOUNDS: dict[str, tuple[float, float]] = {
@@ -8287,6 +8957,7 @@ _PUBLIC_SETTING_BOUNDS: dict[str, tuple[float, float]] = {
     "fallback_tolerance": (0.0, 5.0),
     "demo_ip_rph": (1, 1000), "demo_max_tokens": (64, 8192),
     "demo_max_prompt_chars": (200, 200000),
+    "auto_issue_ctx": (1024, 1048576), "auto_issue_daily_cap": (1, 1000),
 }
 
 
@@ -8341,6 +9012,9 @@ def get_public_settings() -> dict:
     out["demo_system_prompt"] = str(out.get("demo_system_prompt") or "")
     for k in ("demo_prefer_hosts", "demo_exclude_hosts"):
         out[k] = clean_host_list(out.get(k))
+    out["auto_issue_enabled"] = bool(out.get("auto_issue_enabled", True))
+    out["auto_issue_model"] = str(out.get("auto_issue_model") or "").strip()
+    out["auto_issue_setup_text"] = str(out.get("auto_issue_setup_text") or "")
     if not str(out.get("admin_notify") or "").strip():
         out["admin_notify"] = next(iter(ADMIN_EMAILS), "")
     if not str(out.get("public_base_url") or "").strip():
@@ -8600,6 +9274,10 @@ async def resolve_targets(model: str, role: str = "primary", prompt_tokens: int 
             for cand in _routes_cache["cands"].get(fid, []):
                 pairs.append((cand, fid))
         return await _score_host_model_pairs(pairs, **kw)
+    # A fleet role is a policy, not a name any box serves: each box's best
+    # model for it, ranked like any other candidates. See FLEET_ROLES.
+    if model in FLEET_ROLES:
+        return await _score_host_model_pairs(role_pairs(model), fleet_role=model, **kw)
     hosts = await model_hosts(model, **kw)
     return [(h, model) for h in hosts]
 
@@ -9095,8 +9773,12 @@ def issue_public_key(row: dict, decided_by: str = "auto") -> str:
     ctx = int(row.get("ctx") or 8192)
     rpd = int(settings["single_rpd"] if kind == "single" else settings["team_rpd"])
     rph = int(settings["single_rph"] if kind == "single" else settings["team_rph"])
+    # An auto-issued key has no address behind it; its name carries the
+    # service and the reference the service minted it for instead.
+    who = str(row.get("email") or "") or (
+        str(row.get("source") or "auto") + ":" + str(row.get("note") or "")[:60])
     raw, meta = mint_key(
-        name="fleet-pass:" + str(row["email"]),
+        name="fleet-pass:" + who,
         expires_at=expires_at, max_rpd=rpd, max_rph=rph,
     )
     key_id = int(meta["id"])
@@ -9221,6 +9903,53 @@ def render_key_email(row: dict, raw_key: str, settings: dict) -> tuple[str, str,
         + "</p></div>"
     )
     return subject, text, html
+
+
+def public_key_bundle(row: dict, raw_key: str, settings: dict) -> dict:
+    """The facts the key e-mail renders, as data -- for a connected service
+    that hands the key on itself (inside a cover letter, a message) instead
+    of receiving mail. `key` is the raw key and is present only on the one
+    response that mints it; everything else can be recomputed from the row."""
+    try:
+        models = json.loads(row.get("models") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        models = {}
+    model_id = str(models.get("model") or models.get("primary") or "")
+    cat = public_catalogue()["by_public"].get(model_id) or {}
+    base_url = str(settings.get("public_base_url") or PUBLIC_API_URL or "").rstrip("/")
+    if row.get("kind") == "team":
+        rpd, rph = int(settings["team_rpd"]), int(settings["team_rph"])
+    else:
+        rpd, rph = int(settings["single_rpd"]), int(settings["single_rph"])
+    expires_at, prefix = "", ""
+    if row.get("key_id"):
+        krows = db_query(
+            "SELECT expires_at, max_rpd, max_rph, prefix FROM api_keys WHERE id=?",
+            (row["key_id"],))
+        if krows:
+            expires_at = str(krows[0].get("expires_at") or "")
+            rpd = int(krows[0].get("max_rpd") or rpd)
+            rph = int(krows[0].get("max_rph") or rph)
+            prefix = str(krows[0].get("prefix") or "")
+    expires_date = expires_at[:10]
+    limits = str(rpd) + " requests/day, " + str(rph) + "/hour"
+    template = str(settings.get("auto_issue_setup_text") or "")
+    # str.format also does attribute/index traversal ({model.name},
+    # {key[0]}), so a typo in the tab's template can raise more than a
+    # KeyError -- and this runs AFTER the key is minted, so it must never
+    # take the response down with it. The raw template is the fallback.
+    try:
+        setup = template.format(base_url=base_url, key=raw_key, model=model_id,
+                                expires=expires_date, limits=limits)
+    except Exception:  # noqa: BLE001 -- see above
+        setup = template
+    return {
+        "key": raw_key, "key_prefix": prefix, "base_url": base_url,
+        "model": model_id, "model_name": str(cat.get("name") or model_id),
+        "ctx": int(row.get("ctx") or 0), "expires_at": expires_at,
+        "expires_date": expires_date, "limit_day": rpd, "limit_hour": rph,
+        "warm_url": warm_link(row, settings), "setup_text": setup,
+    }
 
 
 async def send_key_email(row: dict, raw_key: str) -> tuple[bool, str]:
@@ -9834,6 +10563,16 @@ def preload_plan() -> list[dict]:
                 # Deliberately not noted: a box that cannot hold the model is
                 # not passing anything over, and listing every small box as
                 # "skipped" would bury the states that matter.
+                continue
+            if host_reserved(host):
+                # Somebody's personal machine. It routes only as a last
+                # resort (see host_reserved), so keeping the featured model
+                # warm on it would cost its owner memory for traffic it
+                # almost never takes.
+                seen.add(host)
+                _preload_note("reserve", "personal box -- not kept warm",
+                              host=host, cand=cand, fleet_id=fid,
+                              public_id=pid, resident=False)
                 continue
             own = _routes_cache.get("warm", {}).get(host) or set()
             if own and fid not in own:
@@ -11065,12 +11804,21 @@ async def admin_public_model_put(
     public_id: str, request: Request, admin: dict = Depends(require_admin)
 ) -> dict:
     p = await request.json()
+    # resolve_targets() answers the catalogue before a fleet role, so a row
+    # named like one -- or claiming one as a fleet id -- would quietly take
+    # over live routing for that word.
+    if public_id in FLEET_ROLES:
+        raise HTTPException(
+            400, f"{public_id!r} is a fleet role (FLEET_ROLES in the gateway); "
+                 "a catalogue row by that name would shadow the policy")
     before = db_query("SELECT * FROM public_models WHERE public_id=?", (public_id,))
     row_before = before[0] if before else {}
     fleet_ids = p.get("fleet_ids")
     if not isinstance(fleet_ids, list) or not fleet_ids \
             or not all(isinstance(f, str) and f.strip() for f in fleet_ids):
         raise HTTPException(400, "fleet_ids must be a non-empty list of strings")
+    if any(f.strip() in FLEET_ROLES for f in fleet_ids):
+        raise HTTPException(400, "fleet_ids may not name a fleet role")
     arch = str(p.get("arch", "dense"))
     if arch not in ("moe", "dense"):
         raise HTTPException(400, "arch must be 'moe' or 'dense'")
@@ -11343,7 +12091,7 @@ def _public_key_view(row: dict) -> dict:
 @app.get("/admin/api/public/keys")
 async def admin_public_keys(
     status: str = "", q: str = "", limit: int = 25, offset: int = 0,
-    archived: bool = False, admin: dict = Depends(require_admin),
+    archived: bool = False, source: str = "", admin: dict = Depends(require_admin),
 ) -> dict:
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
@@ -11352,9 +12100,16 @@ async def admin_public_keys(
     if status:
         where.append("pk.status=?")
         args.append(status)
+    # `auto` is every connected service at once (source `auto:<service>`);
+    # any other value is an exact source, e.g. `manual` or `auto:demo-app`.
+    if source == "auto":
+        where.append("pk.source LIKE 'auto:%'")
+    elif source:
+        where.append("pk.source=?")
+        args.append(source)
     if q:
-        where.append("(pk.email LIKE ? OR pk.company LIKE ? OR pk.domain LIKE ?)")
-        args += ["%" + q + "%", "%" + q + "%", "%" + q + "%"]
+        where.append("(pk.email LIKE ? OR pk.company LIKE ? OR pk.domain LIKE ? OR pk.note LIKE ?)")
+        args += ["%" + q + "%", "%" + q + "%", "%" + q + "%", "%" + q + "%"]
     clause = " AND ".join(where)
     total = db_query(
         "SELECT COUNT(*) n FROM public_keys pk WHERE " + clause, args
@@ -11437,6 +12192,141 @@ async def admin_public_key_issue(
         log_public_event("mail_error", email=email, detail=err)
     log_public_event("issued", email=email, detail="manual:" + admin_email)
     return db_query("SELECT * FROM public_keys WHERE id=?", (row_id,))[0]
+
+
+_SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def _auto_issued_today() -> int:
+    return int(db_query(
+        "SELECT COUNT(*) c FROM public_keys WHERE source LIKE 'auto:%' AND created_at>=?",
+        (days_ago(1),),
+    )[0]["c"])
+
+
+@app.get("/admin/api/public/auto")
+async def admin_public_auto_status(admin: dict = Depends(require_admin)) -> dict:
+    """What auto-issue would do right now, and what it has done: the
+    dashboard card's status line, and the one thing a connected service
+    reads back (so its own admin page can SHOW these settings without
+    holding a copy of them)."""
+    s = get_public_settings()
+    cat = public_catalogue()["by_public"].get(s["auto_issue_model"]) or {}
+    live = db_query(
+        "SELECT COUNT(*) c FROM public_keys pk JOIN api_keys k ON k.id=pk.key_id "
+        "WHERE pk.source LIKE 'auto:%' AND pk.status='issued' AND pk.archived_at IS NULL "
+        "AND k.archived_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > ?)",
+        (now(),),
+    )[0]["c"]
+    by_service = db_query(
+        "SELECT source, COUNT(*) n FROM public_keys WHERE source LIKE 'auto:%' "
+        "GROUP BY source ORDER BY n DESC",
+    )
+    return {
+        "enabled": bool(s["auto_issue_enabled"]),
+        "model": s["auto_issue_model"],
+        "model_name": str(cat.get("name") or s["auto_issue_model"]),
+        "model_enabled": bool(cat.get("enabled")),
+        "ctx": int(s["auto_issue_ctx"]),
+        "daily_cap": int(s["auto_issue_daily_cap"]),
+        "key_days": int(s["key_days"]),
+        "limit_day": int(s["single_rpd"]), "limit_hour": int(s["single_rph"]),
+        "issued_today": _auto_issued_today(),
+        "live": int(live),
+        "by_service": [{"service": str(r["source"])[5:], "keys": int(r["n"])} for r in by_service],
+        "base_url": str(s.get("public_base_url") or PUBLIC_API_URL or "").rstrip("/"),
+        "setup_text": s["auto_issue_setup_text"],
+        "endpoint": "/admin/api/public/keys/auto",
+    }
+
+
+@app.post("/admin/api/public/keys/auto")
+async def admin_public_key_auto_issue(
+    request: Request, admin: dict = Depends(require_admin)
+) -> dict:
+    """Mint a Fleet Pass key for a CONNECTED SERVICE and hand the raw key
+    back in the response -- the one place this gateway returns a key over
+    HTTP, because the service is going to write it into a document itself
+    (a cover letter, a message) rather than read an inbox.
+
+    Same shape as an approval: the model, lifetime and budgets from the
+    Public tab are stamped on the row, sync_public_key_limits() reaches
+    these keys like any other, and they sit in the issued-keys table under
+    source `auto:<service>` where they can be revoked or extended. Admin
+    token only (contract with the hub's peers: no weaker door than the one
+    the dashboard uses). The `ref` is the service's own idea of what the
+    key is for -- an application, a message -- and is kept on the row so
+    the table can say which one."""
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "body must be an object")
+    settings = get_public_settings()
+    if not settings.get("auto_issue_enabled", True):
+        raise HTTPException(403, "auto-issue is switched off on the Public tab")
+    service = str(payload.get("service") or "").strip().lower()
+    if not _SERVICE_RE.match(service):
+        raise HTTPException(400, "service must be a short lowercase slug (a-z, 0-9, -)")
+    ref = str(payload.get("ref") or "").strip()[:120]
+    if not ref:
+        raise HTTPException(400, "ref is required -- what this key is for (an application, a message)")
+    company = str(payload.get("company") or "").strip()[:120]
+    note = str(payload.get("note") or "").strip()[:300]
+    email = str(payload.get("email") or "").strip().lower()
+    if email and not _EMAIL_RE.match(email):
+        raise HTTPException(400, "that does not look like an email address")
+    model_id = str(payload.get("model") or settings.get("auto_issue_model") or "").strip()
+    try:
+        kind, models_json, ctx_caps = _validate_public_model_selection(
+            {"kind": "single", "model": model_id}, log=False)
+    except PublicError as exc:
+        raise HTTPException(exc.status, exc.message)
+    # The caller does not know the catalogue's ceilings, so the context is
+    # clamped rather than refused: the tab's figure (or the caller's smaller
+    # ask) rounded down to the 1024 grid, never above what the model serves.
+    try:
+        want = int(payload.get("ctx") or settings.get("auto_issue_ctx") or 0)
+    except (TypeError, ValueError):
+        want = int(settings.get("auto_issue_ctx") or 8192)
+    ctx = max(1024, min(want, int(min(ctx_caps))))
+    ctx -= ctx % 1024
+    cap = int(settings.get("auto_issue_daily_cap") or 0)
+    if cap and _auto_issued_today() >= cap:
+        log_public_event("rate_limited", email=email, detail="auto_issue_cap:" + service)
+        raise HTTPException(429, "auto-issue daily cap reached (" + str(cap) + " keys/day)")
+    live_count = db_query(
+        "SELECT COUNT(*) c FROM public_keys WHERE status='issued' AND archived_at IS NULL"
+    )[0]["c"]
+    if int(live_count) >= int(settings["max_live_keys"]):
+        log_public_event("rate_limited", email=email, detail="global_cap:auto:" + service)
+        raise HTTPException(429, "Fleet Pass is at capacity -- raise max live keys or wait")
+    ip = client_ip(request)
+    row_id = db_exec(
+        "INSERT INTO public_keys(created_at,email,domain,company,source,kind,"
+        "models,ctx,status,ip,user_agent,note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (now(), email, email.rsplit("@", 1)[-1] if email else service, company,
+         "auto:" + service, kind, json.dumps(models_json), ctx, "pending", ip,
+         str(request.headers.get("user-agent") or "")[:300],
+         (ref + (" -- " + note if note else ""))[:500]),
+    )
+    row = db_query("SELECT * FROM public_keys WHERE id=?", (row_id,))[0]
+    raw_key = issue_public_key(row, decided_by="auto:" + service)
+    row = db_query("SELECT * FROM public_keys WHERE id=?", (row_id,))[0]
+    if email:
+        # An address is optional: when the service knows who the key is for,
+        # they get the usual mail too. The response carries the key either way.
+        ok, err = await send_key_email(row, raw_key)
+        db_exec(
+            "UPDATE public_keys SET emailed_at=?, email_error=? WHERE id=?",
+            (now() if ok else None, "" if ok else err, row_id),
+        )
+        if not ok:
+            log_public_event("mail_error", email=email, detail=err)
+    log_public_event("issued", email=email, ip=ip, detail="auto:" + service + ":" + ref)
+    return {
+        "status": "issued", "id": int(row_id), "service": service, "ref": ref,
+        "company": company, **public_key_bundle(row, raw_key, settings),
+        "note": "shown once -- store it now",
+    }
 
 
 @app.post("/admin/api/public/keys/{req_id}/approve")
@@ -11566,6 +12456,13 @@ async def admin_public_key_resend(
     if not rows:
         raise HTTPException(404, "no such issued request")
     row = rows[0]
+    # An auto-issued key has no address: a resend would archive the working
+    # key and mail the replacement to nobody. The service that minted it is
+    # the only party that can carry a key, so it mints a new one instead.
+    if not str(row.get("email") or "").strip():
+        raise HTTPException(
+            400, "this key was minted for a connected service and has no address "
+                 "to resend to -- revoke it and let the service mint a new one")
     old_key_id = row.get("key_id")
     raw_key = issue_public_key(row, decided_by=_admin_email(admin))
     if old_key_id:
@@ -11874,6 +12771,15 @@ async def api_status(admin: dict = Depends(require_admin)) -> dict:
         "swap_up": swap_up,
         "models_running": running,
         "services": svc,
+        # For the Overview card's load picker and warm-standby control:
+        # every enabled record with the two flags that matter there, plus
+        # the one manual dashboard load in flight (see api_model_load).
+        "models_configured": [
+            {"id": str(r.get("id")), "preload": bool(r.get("preload")),
+             "persistent": bool(r.get("persistent"))}
+            for r in load_models() if r.get("enabled", True)
+        ],
+        "manual_load": dict(_manual_load),
     }
 
 
@@ -11899,6 +12805,10 @@ async def api_models(admin: dict = Depends(require_admin)) -> dict:
         # How the last Save & apply actually went, once the changed models
         # were loaded for real. Sticky until a clean apply replaces it.
         "apply": get_apply_state(),
+        # A record this gateway renamed to the fleet's canonical id when it
+        # started (FLEET_MODEL_NAMES). The owner did not type that, so the
+        # page says it happened.
+        "converged": _converged,
     }
 
 
@@ -11944,6 +12854,24 @@ _MEM_SIGNS = (
     "vk::outofdevicememory", "cudamalloc", "hipmalloc",
     "failed to allocate buffer", "kv cache", "insufficient device memory",
 )
+
+# The floor a self-tuning retry stops at: the same 4096 grid resolve_ctx()
+# itself rounds to, and small enough that a model which cannot even hold
+# this owes its operator a real look, not one more automatic guess.
+_CTX_RETRY_FLOOR = 4096
+
+
+def halve_ctx(ctx: int, floor: int = _CTX_RETRY_FLOOR) -> int:
+    """The next context size to try after `ctx` failed to fit: half of it,
+    rounded down to the same 4096 grid resolve_ctx() rounds to, never below
+    `floor`. Returns 0 when there is nothing smaller worth trying -- `ctx`
+    was already at or under the floor, so the caller should stop retrying
+    and report the failure honestly instead of proposing the same number (or
+    an even less useful one) again."""
+    if ctx <= floor:
+        return 0
+    half = (ctx // 2) - (ctx // 2) % 4096
+    return max(floor, half)
 
 
 def get_apply_state() -> dict:
@@ -12097,11 +13025,25 @@ async def _verify_apply(queue: list[dict], before: dict[str, dict]) -> None:
 
     Strictly one at a time. llama-swap runs an exclusive swap group -- only
     one model is resident at a time by design -- so verifying in parallel
-    would have each load evict the one being measured."""
+    would have each load evict the one being measured.
+
+    An auto-sized model (`ctx` 0 -- see resolve_ctx()) that will not load
+    gets ONE graceful retry at half the window it was auto-sized to, instead
+    of being reverted outright: "auto" was always a guess from the box's
+    VRAM reading, and the box just proved that guess too generous. A PINNED
+    ctx gets no such retry -- an operator who typed a number gets an honest
+    refusal if it does not fit, not a silently different number. A retry
+    that also fails, or has no smaller number left to try (see halve_ctx()),
+    reverts exactly like any other failure."""
     failures: list[dict] = []
     verified: list[str] = []
     # mid -> the record to put back, or None for "this model was new, drop it".
     reverts: dict[str, dict | None] = {}
+    # Auto-sized models whose first attempt did not fit and still have a
+    # smaller number worth trying: mid -> (record pinned at that number,
+    # {"from": ctx tried, "to": ctx to retry}). Held separately from
+    # `failures` until the retry below is proven or exhausted.
+    retry_candidates: dict[str, tuple[dict, dict]] = {}
     ids = [str(r.get("id")) for r in queue]
 
     def publish(status: str = "running") -> None:
@@ -12114,44 +13056,111 @@ async def _verify_apply(queue: list[dict], before: dict[str, dict]) -> None:
             "before": {m: before.get(m) for m in ids},
         })
 
-    for rec in queue:
-        mid = str(rec.get("id"))
-        want = resolve_ctx(rec)[0] if int(rec.get("ctx", 0) or 0) > 0 else 0
-        job = _job_open(
-            "verify", what=mid, stop=asyncio.Event(),
-            detail="loading the new config (evicts whatever is resident)",
-        )
+    async def attempt(mid: str, want_ctx: int, detail: str) -> tuple[bool, str, str]:
+        """One real load-and-check against the engine as currently
+        configured. Returns (ok, why, lowercased log tail -- empty on ok)."""
+        job = _job_open("verify", what=mid, stop=asyncio.Event(), detail=detail)
         try:
-            ok, why = await _try_load(mid, want, job)
+            ok, why = await _try_load(mid, want_ctx, job)
         except Exception as exc:  # noqa: BLE001 -- a verify must never wedge
             ok, why = False, type(exc).__name__ + ": " + str(exc)
         finally:
             _job_close(job)
+        tail = "" if ok else (await _swap_log_tail()).lower()
+        return ok, why, tail
+
+    for rec in queue:
+        mid = str(rec.get("id"))
+        pinned = int(rec.get("ctx", 0) or 0) > 0
+        want = resolve_ctx(rec)[0] if pinned else 0
+        ok, why, tail = await attempt(
+            mid, want, "loading the new config (evicts whatever is resident)")
         if ok:
             verified.append(mid)
         else:
-            tail = (await _swap_log_tail()).lower()
             overfilled = any(sign in tail for sign in _MEM_SIGNS)
-            # Only THIS model rolls back: one model asking for more memory
-            # than the box has is not a reason to discard the operator's other
-            # edits. The rollback is recorded now and written once at the end
-            # -- restarting per failure would evict the models this same queue
-            # has already verified and warmed.
-            old = before.get(mid)
-            reverts[mid] = dict(old) if old is not None else None
-            failures.append({
-                "id": mid,
-                "changes": _launch_diff(old, rec),
-                "why": ("it does not fit in memory -- " + why) if overfilled
-                       else why,
-                "overfilled": bool(overfilled),
-                "reverted": old is not None,
-            })
+            smaller = 0
+            tried_ctx = want
+            if overfilled and not pinned:
+                tried_ctx = resolve_ctx(rec)[0]
+                smaller = halve_ctx(tried_ctx)
+            if smaller:
+                retry_candidates[mid] = (
+                    dict(rec, ctx=smaller), {"from": tried_ctx, "to": smaller})
+            else:
+                # Only THIS model rolls back: one model asking for more memory
+                # than the box has is not a reason to discard the operator's
+                # other edits. The rollback is recorded now and written once
+                # at the end -- restarting per failure would evict the models
+                # this same queue has already verified and warmed.
+                old = before.get(mid)
+                reverts[mid] = dict(old) if old is not None else None
+                failures.append({
+                    "id": mid,
+                    "changes": _launch_diff(old, rec),
+                    "why": ("it does not fit in memory -- " + why) if overfilled
+                           else why,
+                    "overfilled": bool(overfilled),
+                    "reverted": old is not None,
+                })
         publish()
+
+    if retry_candidates:
+        # Stage the halved configs in the SAME restart as any hard reverts
+        # from the loop above -- one extra restart for the whole batch, not
+        # one per retried model -- then prove each candidate for real against
+        # the engine now actually running with the smaller window. Writing
+        # the halved number without this second load-and-check would be
+        # exactly the unverified config this whole feature exists to catch.
+        staged = dict(reverts)
+        staged.update({mid: rec for mid, (rec, _info) in retry_candidates.items()})
+        rc, out = _apply_reverts(staged)
+        for f in failures:
+            f["revert_rc"], f["revert_out"] = rc, out[-400:]
+        reverts = {}
+        # A restart that did not come back leaves the OLD engine listening,
+        # and it would answer every retry's health check happily -- proving
+        # nothing, the same trap api_models_put() already refuses to walk
+        # into on a failed restart (see its own "did not restart" branch).
+        # Every staged retry reverts here instead of being probed.
+        for mid, (rrec, info) in retry_candidates.items():
+            if rc:
+                ok2, why2, tail2 = False, (
+                    "llama-swap did not restart after staging the retry "
+                    "(rc=" + str(rc) + "), so " + str(info["to"])
+                    + " tokens was never proven: " + (out or "")[-200:]), ""
+            else:
+                ok2, why2, tail2 = await attempt(
+                    mid, info["to"],
+                    "retrying at " + str(info["to"]) + " tokens of context -- "
+                    + str(info["from"]) + " did not fit")
+            if ok2:
+                verified.append(mid)
+                log.info("model %s: auto context self-tuned from %d to %d "
+                         "after the larger window would not fit",
+                         mid, info["from"], info["to"])
+            else:
+                overfilled2 = any(sign in tail2 for sign in _MEM_SIGNS)
+                old = before.get(mid)
+                reverts[mid] = dict(old) if old is not None else None
+                failures.append({
+                    "id": mid,
+                    "changes": _launch_diff(old, rrec),
+                    "why": (("does not fit even at " + str(info["to"])
+                             + " tokens (tried after " + str(info["from"])
+                             + " did not fit either) -- " + why2)
+                            if overfilled2 else why2),
+                    "overfilled": bool(overfilled2),
+                    "reverted": old is not None,
+                    "retried": info,
+                })
+            publish()
+
     if reverts:
         rc, out = _apply_reverts(reverts)
         for f in failures:
-            f["revert_rc"], f["revert_out"] = rc, out[-400:]
+            if "revert_rc" not in f:
+                f["revert_rc"], f["revert_out"] = rc, out[-400:]
     publish("failed" if failures else "ok")
 
 
@@ -12334,11 +13343,55 @@ async def api_service(action: str, unit: str, admin: dict = Depends(require_admi
 
 
 @app.post("/admin/api/models/unload")
-async def api_unload(admin: dict = Depends(require_admin)) -> dict:
-    """Evict whatever is resident. /unload is llama-swap's route; the old
-    /api/models/unload answers 405 there and 404 on Ollama, so this used to
-    report success while unloading nothing."""
+async def api_unload(request: Request,
+                     admin: dict = Depends(require_admin)) -> dict:
+    """Evict what is resident -- everything, or one model when the body names
+    it ({"model": id}, the Overview card's per-row button).
+
+    All: /unload is llama-swap's route; the old /api/models/unload answers
+    405 there and 404 on Ollama, so this used to report success while
+    unloading nothing. One: llama-swap's POST /api/models/unload/{id}
+    (verified against the deployed build -- 404s an unknown id and leaves
+    the rest alone); on Ollama, a keep_alive:0 generate, which is how Ollama
+    spells "unload this one"."""
     assert client is not None
+    mid = ""
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            mid = str(body.get("model") or "").strip()
+    except Exception:  # noqa: BLE001 -- an empty body means "unload all"
+        pass
+    if mid:
+        for rec in load_models():
+            # ids and aliases share one namespace (check_name_collisions),
+            # and llama-swap's own unload route resolves an alias to the
+            # same model -- so the persistent guard must too, or naming the
+            # pinned model by its alias would silently evict it.
+            names = {str(rec.get("id"))} | {
+                str(a).strip() for a in rec.get("aliases") or []
+                if isinstance(a, str) and str(a).strip()}
+            if mid in names and rec.get("persistent"):
+                raise HTTPException(
+                    400, mid + " is pinned resident (persistent) -- "
+                    "change that on the Models tab to unload it")
+        if UPSTREAM_MODELS:
+            tag = (await upstream_alias_pairs()).get(mid, mid)
+            try:
+                r = await client.post("/api/generate", timeout=60.0,
+                                      json={"model": tag, "keep_alive": 0})
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(502, str(exc)) from exc
+        else:
+            try:
+                r = await client.post(
+                    "/api/models/unload/" + quote(mid, safe=""), timeout=60.0)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(502, str(exc)) from exc
+        if r.status_code < 400:
+            _props_cache.clear()
+            _running_cache["t"] = 0.0
+        return {"status": r.status_code, "body": r.text[:2000], "model": mid}
     for path in ("/unload", "/api/models/unload"):
         try:
             r = await client.get(path, timeout=60.0)
@@ -12346,8 +13399,130 @@ async def api_unload(admin: dict = Depends(require_admin)) -> dict:
             raise HTTPException(502, str(exc)) from exc
         if r.status_code < 400:
             _props_cache.clear()
+            _running_cache["t"] = 0.0
             return {"status": r.status_code, "body": r.text[:2000], "via": path}
     return {"status": r.status_code, "body": r.text[:2000], "via": path}
+
+
+# The one manual load the dashboard may have in flight, for the Overview
+# card to poll: status "loading" | "ok" | "failed". A dict and not a queue on
+# purpose -- the swap group holds one model at a time, so a second load while
+# one runs would only evict the first mid-flight.
+_manual_load: dict[str, Any] = {}
+
+
+async def _manual_load_task(mid: str) -> None:
+    ok, why = False, ""
+    try:
+        if UPSTREAM_MODELS:
+            tag = (await upstream_alias_pairs()).get(mid, mid)
+            assert client is not None
+            r = await client.post("/api/generate", timeout=600.0,
+                                  json={"model": tag, "keep_alive": "30m"})
+            ok, why = r.status_code < 400, ("" if r.status_code < 400 else
+                                            "HTTP " + str(r.status_code))
+        else:
+            job = _job_open("load", what=mid, stop=asyncio.Event(),
+                            detail="loading on demand from the dashboard "
+                                   "(evicts whatever is resident)")
+            try:
+                ok, why = await _try_load(mid, 0, job)
+            finally:
+                _job_close(job)
+    except Exception as exc:  # noqa: BLE001
+        ok, why = False, type(exc).__name__ + ": " + str(exc)
+    _manual_load.update(status="ok" if ok else "failed", why=why, at=now())
+    _running_cache["t"] = 0.0
+
+
+@app.post("/admin/api/models/load")
+async def api_model_load(request: Request,
+                         admin: dict = Depends(require_admin)) -> dict:
+    """Load one model now ({"model": id}) -- the Overview card's picker.
+
+    Same lever as everything else that loads on demand: the health touch
+    _try_load() wraps (llama-swap blocks the request until the model is up),
+    or a keep_alive generate on an Ollama box. Answers immediately; the load
+    runs as a job (visible under Active jobs, abortable there) and the card's
+    poll watches it arrive in the running list."""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 -- not JSON is a caller error, not a 500
+        raise HTTPException(400, "expected {model: id}")
+    mid = str((payload or {}).get("model") or "").strip() \
+        if isinstance(payload, dict) else ""
+    if not mid:
+        raise HTTPException(400, "expected {model: id}")
+    if UPSTREAM_MODELS:
+        known = await served_model_ids()
+    else:
+        known = {str(r.get("id")) for r in load_models()
+                 if r.get("enabled", True)}
+    if mid not in known:
+        raise HTTPException(404, "not a model this box serves: " + mid[:64])
+    if _manual_load.get("status") == "loading":
+        raise HTTPException(
+            409, "already loading " + str(_manual_load.get("model"))
+            + " -- one at a time, the swap group holds one model")
+    _manual_load.clear()
+    _manual_load.update(model=mid, status="loading", why="", at=now())
+    asyncio.create_task(_manual_load_task(mid))
+    return {"started": mid, "load": dict(_manual_load)}
+
+
+@app.put("/admin/api/models/warm")
+async def api_models_warm(request: Request,
+                          admin: dict = Depends(require_admin)) -> dict:
+    """Choose which model this box loads at engine start-up and keeps on warm
+    standby ({"model": id}), or none at all ({"model": null}).
+
+    Rewrites the one `preload` flag models.json allows (check_preload_count)
+    and restarts llama-swap so the choice takes effect now, not at the next
+    reboot. No verify queue: the launch commands are untouched, so there is
+    nothing new to prove -- the restart itself preloads the chosen model.
+    Persistent models are already resident forever and are refused here."""
+    if UPSTREAM_MODELS:
+        raise HTTPException(
+            501, "an Ollama box has no start-up preload -- the hub's warm-up "
+            "loop is what keeps a model resident there")
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 -- not JSON is a caller error, not a 500
+        raise HTTPException(400, "expected {model: id} or {model: null}")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "expected {model: id} or {model: null}")
+    mid = payload.get("model")
+    if mid is not None and not isinstance(mid, str):
+        raise HTTPException(400, "expected {model: id} or {model: null}")
+    mid = (mid or "").strip()
+    models = load_models()
+    target = None
+    for rec in models:
+        if mid and str(rec.get("id")) == mid:
+            target = rec
+    if mid:
+        if target is None:
+            raise HTTPException(404, "no such model: " + mid[:64])
+        if target.get("persistent"):
+            raise HTTPException(
+                400, mid + " is persistent -- it is already resident from "
+                "start-up and never unloaded")
+        if not target.get("enabled", True):
+            raise HTTPException(400, mid + " is disabled")
+    changed = False
+    for rec in models:
+        want = bool(mid) and str(rec.get("id")) == mid
+        if not rec.get("persistent") and bool(rec.get("preload")) != want:
+            rec["preload"] = want
+            changed = True
+    if not changed:
+        return {"warm": mid or None, "changed": False}
+    save_models(models)
+    write_swap_config(models)
+    code, out = service_control("restart", "llama-swap")
+    _running_cache["t"] = 0.0
+    return {"warm": mid or None, "changed": True,
+            "restart_rc": code, "restart_out": out[-400:]}
 
 
 # ---- downloads ----
@@ -12514,19 +13689,32 @@ async def api_keys(
     limit: int = 25,
     offset: int = 0,
     archived: bool = False,
+    names: str = "",
     admin: dict = Depends(require_admin),
 ) -> dict:
     """One page of keys. Live by default; `archived=true` lists the revoked
-    ones still inside their retention, which can be restored."""
+    ones still inside their retention, which can be restored.
+
+    `names` scopes the page to an exact allowlist (the public site's per-feature
+    dashboard, which only ever wants its own keys) without adding a second
+    endpoint -- absent, this is byte-identical to the old behaviour."""
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     where = "archived_at IS NOT NULL" if archived else "archived_at IS NULL"
-    total = db_query("SELECT COUNT(*) n FROM api_keys WHERE " + where)[0]["n"]
+    # Same trim/empty-drop/200-cap shape as every other bounded list param in
+    # this file (see `limit` above) -- a caller can't turn this into an
+    # unbounded IN(...) by pasting a huge CSV blob.
+    name_list = [n.strip() for n in names.split(",") if n.strip()][:200]
+    params: tuple[Any, ...] = ()
+    if name_list:
+        where += " AND name IN (" + ",".join("?" * len(name_list)) + ")"
+        params = tuple(name_list)
+    total = db_query("SELECT COUNT(*) n FROM api_keys WHERE " + where, params)[0]["n"]
     keys = db_query(
         "SELECT id,name,prefix,created_at,last_used_at,disabled,"
         "expires_at,max_rpd,max_tpd,max_total_tokens,archived_at "
         "FROM api_keys WHERE " + where + " ORDER BY id DESC LIMIT ? OFFSET ?",
-        (limit, offset),
+        (*params, limit, offset),
     )
     day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(
         timespec="seconds"
@@ -13071,6 +14259,8 @@ async def api_usage(
     recent_limit: int = 25,
     recent_offset: int = 0,
     recent_archived: bool = False,
+    key_names: str = "",
+    public: str = "",
     admin: dict = Depends(require_admin),
 ) -> dict:
     """Aggregates over the chosen window, plus one page of the request log.
@@ -13078,42 +14268,76 @@ async def api_usage(
     The aggregates deliberately ignore the archive flag: a row that aged out
     of the live LIST is still traffic that happened, and leaving it out of the
     24h chart would make the numbers lie. Only the request log itself is a
-    live view."""
+    live view.
+
+    `key_names`/`public` scope every query below to one project's own traffic
+    (the public site's dashboard: its feature keys, optionally unioned with the
+    Fleet Pass keys it issued) instead of the whole hub's. Neither present ->
+    no extra predicate at all, so this stays byte-identical to today for the
+    hub's own dashboard, which never sends them."""
     hours = max(1, min(hours, 24 * 30))
     since = "datetime('now','-" + str(hours) + " hours')"
+    # Same trim/empty-drop/200-cap shape as `names` on /admin/api/keys.
+    name_list = [n.strip() for n in key_names.split(",") if n.strip()][:200]
+    want_public = public.strip().lower() in ("1", "true", "yes")
+    scope_sql = ""
+    scope_params: tuple[Any, ...] = ()
+    if name_list or want_public:
+        halves = []
+        params: list[Any] = []
+        if name_list:
+            halves.append("key_name IN (" + ",".join("?" * len(name_list)) + ")")
+            params.extend(name_list)
+        if want_public:
+            # key_id IS NOT NULL: a pending/rejected public_keys row never
+            # minted a key, and a bare `IN (SELECT ... NULL)` would otherwise
+            # let a NULL key_id sit in the subquery doing nothing -- explicit
+            # is cheaper to read than relying on SQLite's NULL-in-IN behaviour.
+            halves.append(
+                "key_id IN (SELECT key_id FROM public_keys WHERE key_id IS NOT NULL)"
+            )
+        scope_sql = " AND (" + " OR ".join(halves) + ")"
+        scope_params = tuple(params)
     totals = db_query(
         "SELECT COUNT(*) reqs, COALESCE(SUM(prompt_tokens),0) pt, "
         "COALESCE(SUM(completion_tokens),0) ct, "
         "CAST(COALESCE(AVG(ttft_ms),0) AS INT) avg_ttft, "
         "CAST(COALESCE(AVG(latency_ms),0) AS INT) avg_latency "
-        "FROM usage WHERE ts >= " + since
+        "FROM usage WHERE ts >= " + since + scope_sql,
+        scope_params,
     )
     by_model = db_query(
         "SELECT model, COUNT(*) reqs, COALESCE(SUM(completion_tokens),0) ct, "
         "CAST(COALESCE(AVG(latency_ms),0) AS INT) avg_latency "
-        "FROM usage WHERE ts >= " + since + " GROUP BY model ORDER BY reqs DESC"
+        "FROM usage WHERE ts >= " + since + scope_sql +
+        " GROUP BY model ORDER BY reqs DESC",
+        scope_params,
     )
     by_key = db_query(
         "SELECT key_name, COUNT(*) reqs, COALESCE(SUM(total_tokens),0) tt "
-        "FROM usage WHERE ts >= " + since + " GROUP BY key_name ORDER BY reqs DESC"
+        "FROM usage WHERE ts >= " + since + scope_sql +
+        " GROUP BY key_name ORDER BY reqs DESC",
+        scope_params,
     )
     series = db_query(
         "SELECT strftime('%Y-%m-%dT%H:00', ts) bucket, COUNT(*) reqs, "
         "COALESCE(SUM(completion_tokens),0) ct "
-        "FROM usage WHERE ts >= " + since + " GROUP BY bucket ORDER BY bucket"
+        "FROM usage WHERE ts >= " + since + scope_sql +
+        " GROUP BY bucket ORDER BY bucket",
+        scope_params,
     )
     recent_limit = max(1, min(recent_limit, 200))
     recent_offset = max(0, recent_offset)
     rwhere = ("archived_at IS NOT NULL" if recent_archived
-              else "archived_at IS NULL")
+              else "archived_at IS NULL") + scope_sql
     recent_total = db_query(
-        "SELECT COUNT(*) n FROM usage WHERE " + rwhere
+        "SELECT COUNT(*) n FROM usage WHERE " + rwhere, scope_params
     )[0]["n"]
     recent = db_query(
         "SELECT ts,key_name,model,status,prompt_tokens,completion_tokens,"
         "ttft_ms,latency_ms,stream FROM usage WHERE " + rwhere +
         " ORDER BY id DESC LIMIT ? OFFSET ?",
-        (recent_limit, recent_offset),
+        (*scope_params, recent_limit, recent_offset),
     )
     return {
         "totals": totals[0] if totals else {},
@@ -13125,6 +14349,10 @@ async def api_usage(
         "recent_limit": recent_limit,
         "recent_offset": recent_offset,
         "retention": get_settings(),
+        "scope": (
+            {"key_names": name_list, "public": want_public}
+            if (name_list or want_public) else None
+        ),
     }
 
 
@@ -13329,7 +14557,8 @@ async def fleet_summary(admin: dict = Depends(require_admin)) -> dict:
 # bandwidth/TFLOPS numbers come from the distributed-inference capacity plan.
 # Overridable per deployment via STATE/specs.json ({host: {field: value}}).
 #
-# The routing policy reads four more keys (see host_tier()):
+# The routing policy reads six more keys (see host_tier() and
+# _score_host_model_pairs()):
 #   klass        'gpu' | 'big' | 'small' | 'fallback' | 'hub'
 #   always_on    the owner's order among the always-on boxes (1 = first);
 #                doubles as the rank within a tier
@@ -13337,6 +14566,14 @@ async def fleet_summary(admin: dict = Depends(require_admin)) -> dict:
 #   moe_spill_ok a GPU box that stays in the fast tier for a mixture-of-experts
 #                model whose experts overflow its cards (gpu-desktop-2: 48 GB of
 #                VRAM and 192 GB of RAM behind it)
+#   reserve      somebody's personal machine. It stays registered, serves what
+#                it serves, and is chosen only when every non-reserve candidate
+#                is saturated or cooling -- however fast its card is. The
+#                preload loop never warms it. Owner's word, not telemetry:
+#                only gpu-desktop-1 has a watchdog that notices a human at the
+#                keyboard; for the rest this flag is the only thing standing
+#                between a personal box and fleet traffic it would otherwise
+#                win on raw specs (gpu-desktop-2 outranks everything on paper).
 #   tg_tps / pp_tps   decode and prompt-read tokens/sec to assume before any
 #                usage history exists (class defaults otherwise)
 DEFAULT_SPECS: dict[str, dict] = {
@@ -13346,7 +14583,7 @@ DEFAULT_SPECS: dict[str, dict] = {
     # 128 GB fitted; the BIOS carve leaves ~32 GB visible to Windows as DRAM.
     "apu-tablet-1": {"ram_gb": 32, "vram_gb": 96, "mem_bw_gbs": 200, "gpu_tflops": 25,
                    "cpu": "Ryzen AI Max+ 395", "gpu": "Radeon 8060S (tablet thermals)",
-                   "klass": "big", "rank": 2},
+                   "klass": "big", "rank": 2, "reserve": True},
     # Same Z13 silicon as apu-tablet-1, 64 GB fitted, firmware carve of 32 GB.
     # `ram_gb` is what Windows sees, as it is for apu-tablet-1. `vram_gb` is the
     # pool a model may actually occupy: WDDM lends the GPU half the DRAM on top
@@ -13355,10 +14592,11 @@ DEFAULT_SPECS: dict[str, dict] = {
     # of the three and the one with someone sitting in front of it.
     "apu-tablet-2": {"ram_gb": 32, "vram_gb": 44, "mem_bw_gbs": 200, "gpu_tflops": 25,
                   "cpu": "Ryzen AI Max+ 395", "gpu": "Radeon 8060S (32 GiB carve + WDDM)",
-                  "klass": "big", "rank": 3},
+                  "klass": "big", "rank": 3, "reserve": True},
     "gpu-desktop-2":  {"ram_gb": 192, "vram_gb": 48, "mem_bw_gbs": 936, "gpu_tflops": 71,
                    "cpu": "i9-14900", "gpu": "2× RTX 3090 (CUDA)",
-                   "klass": "gpu", "moe_spill_ok": True, "tg_tps": 80, "pp_tps": 3000},
+                   "klass": "gpu", "moe_spill_ok": True, "tg_tps": 80, "pp_tps": 3000,
+                   "reserve": True},
     # Renamed from m1-laptop 2026-08-25 (tailnet + this table + peers.json); same
     # machine, same address. The key here IS the identity: it is looked up by
     # a box's LLMSTACK_HOST_NAME and by peer name, so a rename that misses
@@ -13376,7 +14614,7 @@ DEFAULT_SPECS: dict[str, dict] = {
     # makes every keyed /v1 request agree with it.
     "gpu-laptop-2":    {"ram_gb": 32, "vram_gb": 8, "mem_bw_gbs": 256, "gpu_tflops": 20,
                    "cpu": "Ryzen AI 9 365", "gpu": "RTX 4070 Laptop (Ollama)",
-                   "klass": "gpu", "rank": 2},
+                   "klass": "gpu", "rank": 2, "reserve": True},
     # A gaming desktop that lends the fleet its idle hours. It is the only
     # peer that can be online, healthy and still advertise nothing: its
     # gateway runs with LLMSTACK_AVAILABILITY_FILE set, and a watchdog closes
@@ -13385,7 +14623,7 @@ DEFAULT_SPECS: dict[str, dict] = {
     # 20 Gbps), which is what the router's spec-sheet tiebreak wants.
     "gpu-desktop-1":      {"ram_gb": 32, "vram_gb": 16, "mem_bw_gbs": 320, "gpu_tflops": 21,
                    "cpu": "Ryzen 5 9600X", "gpu": "RX 9060 XT 16 GB (Vulkan)",
-                   "klass": "gpu"},
+                   "klass": "gpu", "reserve": True},
     "mac-desktop-1":    {"ram_gb": 16, "vram_gb": 11, "mem_bw_gbs": 68, "gpu_tflops": 5,
                    "cpu": "Apple M1", "gpu": "8-core (Metal)",
                    "klass": "small", "always_on": 3},
@@ -13401,38 +14639,97 @@ DEFAULT_SPECS: dict[str, dict] = {
     # ceiling its bootstrap installs (12 of 16 GiB), not the whole pool -- the
     # remaining 4 GB belong to the OS and to whoever is using the machine.
     "mac-laptop-2":     {"ram_gb": 16, "vram_gb": 12, "mem_bw_gbs": 120, "gpu_tflops": 9,
-                   "cpu": "Apple M4", "gpu": "10-core (Metal)", "klass": "small"},
+                   "cpu": "Apple M4", "gpu": "10-core (Metal)", "klass": "small",
+                   "reserve": True},
     "hub":     {"ram_gb": 24, "vram_gb": 0, "mem_bw_gbs": 20, "gpu_tflops": 0,
                    "cpu": "hub / control plane", "gpu": "", "role": "hub", "klass": "hub"},
 }
 
 SPECS_PATH = Path(os.environ.get("LLMSTACK_SPECS", str(STATE / "specs.json")))
 
+# The Configurations tab's routing policy, persisted in the settings table
+# (key below) on the box whose dashboard saved it -- in practice the hub,
+# which is where fleet routing happens. Shape:
+#   {"order": ["mac-laptop-1", "apu-box-1", ...],      # drag-and-drop routing order;
+#                                             # index becomes the spec `rank`
+#    "reserve": {"gpu-desktop-2": true, ...}}     # per-box reserve overrides
+# It is the third override layer for the spec sheet: DEFAULT_SPECS, then
+# STATE/specs.json (hand-edited/deployed), then this (operator-edited in the
+# dashboard). Later layers win, so a dragged order beats a deployed rank.
+FLEET_ROUTING_KEY = "fleet_routing"
 
-_specs_cache: dict[str, Any] = {"stamp": None, "specs": None}
+_specs_cache: dict[str, Any] = {"stamp": None, "specs": None, "gen": -1}
+# Bumped by the fleet-config PUT so load_specs() re-merges without a file
+# mtime change; module-level so tests can poke it too.
+_fleet_routing_gen = 0
 
 
-def load_specs() -> dict[str, dict]:
-    """Cached on the override file's mtime. public_alias() consults this for
-    every host on every catalogue row now that a dual-boot machine resolves to
-    its twin's box number, so re-reading and re-parsing the file per call was
-    turning one page load into dozens of them."""
+def get_fleet_routing() -> dict:
+    """The stored Configurations-tab policy, or {} before the first save
+    (and during startup, before the settings table exists)."""
     try:
-        stamp = SPECS_PATH.stat().st_mtime_ns if SPECS_PATH.exists() else 0
-    except OSError:
-        stamp = 0
-    hit = _specs_cache["specs"]
-    if hit is not None and _specs_cache["stamp"] == stamp:
-        return hit
+        rows = db_query("SELECT value FROM settings WHERE key=?",
+                        (FLEET_ROUTING_KEY,))
+        return json.loads(rows[0]["value"]) if rows else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def set_fleet_routing(cfg: dict) -> None:
+    global _fleet_routing_gen
+    db_exec(
+        "INSERT INTO settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (FLEET_ROUTING_KEY, json.dumps(cfg)),
+    )
+    _fleet_routing_gen += 1
+    _specs_cache["specs"] = None  # force the next load_specs() to re-merge
+
+
+def _specs_from_sheet() -> dict[str, dict]:
+    """DEFAULT_SPECS with the specs.json file override applied -- the sheet
+    BEFORE the dashboard's fleet_routing layer. Split out so the fleet-config
+    PUT can diff an incoming reserve map against it and store only the
+    entries an operator actually changed: a full snapshot would freeze
+    today's shipped flags into the blob forever, and a later DEFAULT_SPECS
+    or specs.json change would silently stop reaching the fleet."""
     specs = {k: dict(v) for k, v in DEFAULT_SPECS.items()}
     try:
-        if stamp:
+        if SPECS_PATH.exists():
             for host, override in json.loads(SPECS_PATH.read_text()).items():
                 if isinstance(override, dict):
                     specs.setdefault(host, {}).update(override)
     except Exception:  # noqa: BLE001
         pass
-    _specs_cache.update(stamp=stamp, specs=specs)
+    return specs
+
+
+def load_specs() -> dict[str, dict]:
+    """Cached on the override file's mtime (and the dashboard policy's
+    generation counter). public_alias() consults this for every host on every
+    catalogue row now that a dual-boot machine resolves to its twin's box
+    number, so re-reading and re-parsing the file per call was turning one
+    page load into dozens of them."""
+    try:
+        stamp = SPECS_PATH.stat().st_mtime_ns if SPECS_PATH.exists() else 0
+    except OSError:
+        stamp = 0
+    hit = _specs_cache["specs"]
+    if (hit is not None and _specs_cache["stamp"] == stamp
+            and _specs_cache["gen"] == _fleet_routing_gen):
+        return hit
+    specs = _specs_from_sheet()
+    routing = get_fleet_routing()
+    order = [str(h) for h in (routing.get("order") or []) if isinstance(h, str)]
+    for idx, host in enumerate(order):
+        # The dragged order IS the rank. It also overrides `always_on`
+        # (host_tier() falls back to it when rank is absent), so a box the
+        # operator placed is ranked by that placement alone.
+        specs.setdefault(host, {})["rank"] = idx
+    for host, flag in (routing.get("reserve") or {}).items():
+        if isinstance(host, str) and isinstance(flag, bool):
+            specs.setdefault(host, {})["reserve"] = flag
+    _specs_cache.update(stamp=stamp, specs=specs, gen=_fleet_routing_gen)
     return specs
 
 
@@ -13665,9 +14962,14 @@ async def api_served_models(admin: dict = Depends(require_admin)) -> dict:
         engine = str(engine_info().get("kind") or "")
     except Exception:  # noqa: BLE001
         engine = ""
+    running = set(await upstream_running_ids())
+    # A tag that is resident is resident under its canonical id too.
+    for canon, tag in (await upstream_alias_pairs()).items():
+        if tag in running:
+            running.add(canon)
     return {
         "models": sorted(await served_model_ids()),
-        "running": sorted(await upstream_running_ids()),
+        "running": sorted(running),
         "capacity": local_capacity(),
         # The largest window this box will actually serve each model with.
         # A peer on an older gateway simply omits it, which the hub reads as
@@ -13682,24 +14984,69 @@ async def api_served_models(admin: dict = Depends(require_admin)) -> dict:
         # persistent). The hub's preload loop does not touch a box that
         # names something here other than the featured model.
         "warm": sorted(local_warm_ids()),
+        # name -> canonical id, so the hub can tell whether this box's "fast"
+        # is the same model as another box's "fast". Absent on an older
+        # gateway, which the hub reads as "cannot check" rather than "agrees".
+        "canonical": await served_canonical_map(),
     }
 
 
 @app.get("/admin/api/routes")
 async def api_routes(admin: dict = Depends(require_admin)) -> dict:
-    """Which host answers each model id, as the /v1 proxy would decide."""
+    """Which host answers each model id, as the /v1 proxy would decide,
+    plus any name the fleet disagrees about (see alias_conflicts())."""
     routes = await model_routes(force=True)
-    canonical = {str(m["id"]) for m in load_models() if m.get("enabled", True)}
+    peer_can = _routes_cache.get("alias", {})
+    local_can = await served_canonical_map()
+
+    def canon(m: str, h: str) -> str:
+        return (peer_can.get((h, m)) if h else local_can.get(m)) or m
+
     return {
         "self": HOST_NAME,
+        # `canonical` is the model id behind the name and `alias` says the
+        # name is not it -- on a peer as well as here, so a picker can list
+        # each model once instead of every spelling of it.
         "models": sorted(
             (
-                {"model": m, "host": h or HOST_NAME, "alias": m not in canonical and not h}
+                {"model": m, "host": h or HOST_NAME, "canonical": canon(m, h),
+                 "alias": canon(m, h) != m}
                 for m, h in routes.items()
             ),
             key=lambda r: (r["host"], r["model"]),
         ),
+        # Empty is the normal answer and the good one. A non-empty list means
+        # some name is not a single thing across the fleet, so ranking its
+        # candidates against each other compares boxes that are not offering
+        # the same model.
+        "alias_conflicts": alias_conflicts(),
+        # The mirror image: one model, several names, so the boxes holding it
+        # are never each other's alternatives.
+        "split_models": split_models(),
     }
+
+
+@app.get("/admin/api/roles")
+async def api_roles(admin: dict = Depends(require_admin)) -> dict:
+    """Every fleet role: its ladder, the model each box would play it with,
+    the order the scorer would try them in right now, and any box that still
+    carries a models.json alias of the same name -- ignored, since the policy
+    answers first, but worth seeing while the rows are still there."""
+    await model_routes()
+    cands = _routes_cache.get("cands", {})
+    alias = _routes_cache.get("alias", {})
+    out: dict[str, dict] = {}
+    for role, ladder in FLEET_ROLES.items():
+        pairs = role_pairs(role)
+        ranked = await _score_host_model_pairs(pairs, fleet_role=role)
+        out[role] = {
+            "ladder": list(ladder),
+            "picks": {(h or HOST_NAME): m for h, m in pairs},
+            "order": [{"host": h or HOST_NAME, "model": m} for h, m in ranked],
+            "local_rows": {(h or HOST_NAME): (alias.get((h, role)) or "?")
+                           for h in cands.get(role, [])},
+        }
+    return {"roles": out}
 
 
 @app.get("/admin/api/peers")
@@ -13762,12 +15109,14 @@ async def api_peers_put(request: Request, admin: dict = Depends(require_admin)) 
 @app.put("/admin/api/peers/{name}/routed")
 async def api_peer_routed(name: str, request: Request,
                           admin: dict = Depends(require_admin)) -> dict:
-    """The killswitch, set from the home page's machine cards.
+    """The killswitch, set from the Configurations tab (a box's detail
+    modal, and the drag into "Not in use" via the fleet-config PUT below).
 
-    The ONLY thing that changes 'routed' -- the peers form's PUT preserves it
-    on purpose, so a box a human has killed stays killed across any other
-    edit. The effect is immediate: the routing table is invalidated here, and
-    model_routes() re-reads the flag on every refresh (routeable_peers())."""
+    The ONLY direct writer of 'routed' besides that PUT -- the peers form's
+    PUT preserves it on purpose, so a box a human has killed stays killed
+    across any other edit. The effect is immediate: the routing table is
+    invalidated here, and model_routes() re-reads the flag on every refresh
+    (routeable_peers())."""
     payload = await request.json()
     routed = payload.get("routed")
     if not isinstance(routed, bool):
@@ -13787,6 +15136,122 @@ async def api_peer_routed(name: str, request: Request,
     # to before the next catalogue read, not half a minute after it.
     _known_ctx_cache["t"] = 0.0
     return {"name": name, "routed": routed}
+
+
+def _fleet_config_state() -> dict:
+    """What the Configurations tab renders: every box this gateway can route
+    to (its peers plus itself), each with its effective routing facts after
+    all three spec layers have merged, split into the routing order and the
+    boxes taken out of use."""
+    specs = load_specs()
+    peers = {p["name"]: p for p in load_peers()}
+    names = sorted(set(peers) | {HOST_NAME})
+    hosts = []
+    for name in names:
+        spec = specs.get(name, {})
+        peer = peers.get(name)
+        rank = spec.get("rank")
+        if rank is None:
+            rank = spec.get("always_on")
+        hosts.append({
+            "name": name,
+            "self": name == HOST_NAME,
+            "klass": host_class(name),
+            "reserve": bool(spec.get("reserve")),
+            "rank": rank,
+            "routed": peer_routed(peer) if peer else True,
+            "cpu": str(spec.get("cpu") or ""),
+            "gpu": str(spec.get("gpu") or ""),
+            "ram_gb": spec.get("ram_gb"),
+            "vram_gb": spec.get("vram_gb"),
+        })
+
+    def order_key(h: dict) -> tuple:
+        # This box itself is sorted last unconditionally: the scorer already
+        # treats the hub as the last resort (tier 6) whatever its rank says,
+        # and the tab renders the self row pinned at the bottom -- an
+        # alphabetical accident putting "hub" mid-list would make the
+        # pinned row lie and strand every drag-to-bottom above it.
+        r = h["rank"]
+        return (1 if h["self"] else 0, 0 if r is not None else 1,
+                r if r is not None else 0, h["name"])
+
+    in_use = sorted((h for h in hosts if h["routed"]), key=order_key)
+    return {
+        "hosts": {h["name"]: h for h in hosts},
+        "order": [h["name"] for h in in_use],
+        "not_in_use": sorted(h["name"] for h in hosts if not h["routed"]),
+        "saved": get_fleet_routing(),
+    }
+
+
+@app.get("/admin/api/fleet-config")
+async def api_fleet_config(admin: dict = Depends(require_admin)) -> dict:
+    return _fleet_config_state()
+
+
+@app.put("/admin/api/fleet-config")
+async def api_fleet_config_put(request: Request,
+                               admin: dict = Depends(require_admin)) -> dict:
+    """The Configurations tab's save: a routing order (drag-and-drop), the
+    boxes taken out of use, and per-box reserve flags.
+
+    The order lands in the settings table (see FLEET_ROUTING_KEY) and becomes
+    each box's spec `rank`; membership of `not_in_use` flips the same
+    peers.json `routed` flag the killswitch toggle used to. One PUT, one
+    consistent state -- the two mechanisms stay what they were, this is just
+    one form that drives both."""
+    payload = await request.json()
+    order = payload.get("order")
+    not_in_use = payload.get("not_in_use")
+    reserve = payload.get("reserve")
+    if not isinstance(order, list) or not all(isinstance(n, str) for n in order):
+        raise HTTPException(400, "expected {order: [host, ...]}")
+    if not_in_use is None:
+        not_in_use = []
+    if not isinstance(not_in_use, list) or not all(
+            isinstance(n, str) for n in not_in_use):
+        raise HTTPException(400, "expected {not_in_use: [host, ...]}")
+    if reserve is None:
+        reserve = {}
+    if not isinstance(reserve, dict):
+        raise HTTPException(400, "expected {reserve: {host: bool}}")
+    peers = load_peers()
+    known = {p["name"] for p in peers} | {HOST_NAME}
+    for name in [*order, *not_in_use, *reserve]:
+        if not SAFE_PEER.match(name or ""):
+            raise HTTPException(400, "bad host name: " + str(name)[:40])
+        if name not in known:
+            raise HTTPException(400, "unknown host: " + name)
+    if HOST_NAME in not_in_use:
+        raise HTTPException(
+            400, "this box cannot be taken out of its own routing")
+    dupes = set(order) & set(not_in_use)
+    if dupes:
+        raise HTTPException(
+            400, "in both lists: " + ", ".join(sorted(dupes)))
+    # Store only the reserve entries that DIFFER from the spec sheet as
+    # shipped/deployed. The dashboard sends the full map on every save, and
+    # persisting it wholesale would pin today's flags forever -- a box
+    # un-reserved in a later deploy would stay reserved because a routine
+    # reorder had re-saved the stale value.
+    sheet = _specs_from_sheet()
+    set_fleet_routing({
+        "order": order,
+        "reserve": {k: bool(v) for k, v in reserve.items()
+                    if bool(v) != bool(sheet.get(k, {}).get("reserve"))},
+    })
+    changed = False
+    for p in peers:
+        want = p["name"] not in not_in_use
+        if peer_routed(p) != want:
+            p["routed"] = want
+            changed = True
+    if changed:
+        save_peers(peers)
+    _routes_cache["t"] = 0.0
+    _known_ctx_cache["t"] = 0.0  # same reasoning as the killswitch PUT above
+    return _fleet_config_state()
 
 
 @app.api_route(
