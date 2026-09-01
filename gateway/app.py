@@ -8751,6 +8751,23 @@ def _email_canon(email: str) -> str:
     return local.split("+", 1)[0] + "@" + domain
 
 
+# What "a live Fleet Pass key" means, everywhere a cap counts one. The status
+# column alone is not it: nothing flips an expired key's row out of 'issued'
+# (roll_window only follows deliberate archival), so counting by status let
+# every key that ever expired occupy its domain's and the fleet's global
+# allowance forever -- a returning requester whose old key had merely expired
+# was told the domain or pool was full. Takes one bind parameter: now().
+# A date-only expiry means the end of that day, exactly as
+# /public/api/key-status reports it.
+_LIVE_PUBLIC_KEYS_SQL = (
+    "FROM public_keys pk JOIN api_keys k ON k.id=pk.key_id "
+    "WHERE pk.status='issued' AND pk.archived_at IS NULL "
+    "AND k.archived_at IS NULL AND (k.expires_at IS NULL OR "
+    "(CASE WHEN length(k.expires_at)=10 THEN k.expires_at || 'T23:59:59+00:00' "
+    "ELSE k.expires_at END) > ?)"
+)
+
+
 def public_eligibility(email: str) -> dict:
     """Pure function: what should happen for this email address.
 
@@ -11050,10 +11067,8 @@ async def public_request(request: Request) -> JSONResponse:
         canon = _email_canon(email)
         live = [
             r for r in db_query(
-                "SELECT pk.email FROM public_keys pk JOIN api_keys k ON k.id=pk.key_id "
-                "WHERE pk.domain=? AND pk.status='issued' AND pk.archived_at IS NULL "
-                "AND k.archived_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > ?)",
-                (domain, now()),
+                "SELECT pk.email " + _LIVE_PUBLIC_KEYS_SQL + " AND pk.domain=?",
+                (now(), domain),
             ) if _email_canon(str(r["email"])) == canon
         ]
         if len(live) >= per_email:
@@ -11082,16 +11097,15 @@ async def public_request(request: Request) -> JSONResponse:
 
     if elig["verdict"] == "allow":
         dcount = db_query(
-            "SELECT COUNT(*) c FROM public_keys WHERE domain=? AND status='issued' "
-            "AND archived_at IS NULL",
-            (domain,),
+            "SELECT COUNT(*) c " + _LIVE_PUBLIC_KEYS_SQL + " AND pk.domain=?",
+            (now(), domain),
         )[0]["c"]
         if int(dcount) >= int(settings["max_keys_per_domain"]):
             log_public_event("rate_limited", email=email, ip=ip, detail="domain_cap")
             raise PublicError(429, "domain_cap", "this domain has reached its key limit")
 
     live_count = db_query(
-        "SELECT COUNT(*) c FROM public_keys WHERE status='issued' AND archived_at IS NULL"
+        "SELECT COUNT(*) c " + _LIVE_PUBLIC_KEYS_SQL, (now(),)
     )[0]["c"]
     if int(live_count) >= int(settings["max_live_keys"]):
         log_public_event("rate_limited", email=email, ip=ip, detail="global_cap")

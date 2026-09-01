@@ -800,6 +800,59 @@ class TestPublicRequestFlow:
         assert r2.status_code == 429
         assert r2.json()["code"] == "global_cap"
 
+    def test_expired_keys_do_not_count_toward_domain_cap(
+            self, client, intake_headers, captured_mail, fake_fleet):
+        """An expired key's row keeps status='issued' (nothing archives it),
+        so the domain cap must count key liveness, not row status -- otherwise
+        every key a domain ever held occupies its allowance forever."""
+        gw.set_public_settings({"ip_requests_per_day": 100,
+                                "max_keys_per_domain": 1})
+        one = {"email": "a@nasa.gov", "kind": "single", "model": "gemma4-31b-qat",
+              "ctx": 8192, "accept_terms": True}
+        two = {"email": "b@nasa.gov", "kind": "single", "model": "gemma4-31b-qat",
+              "ctx": 8192, "accept_terms": True}
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=one).status_code == 200
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=two).status_code == 429
+        gw.db_exec("UPDATE api_keys SET expires_at='2000-01-01T00:00:00+00:00'")
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=two).status_code == 200
+
+    def test_expired_keys_do_not_count_toward_global_cap(
+            self, client, intake_headers, captured_mail, fake_fleet):
+        gw.set_public_settings({"ip_requests_per_day": 100,
+                                "max_live_keys": 1})
+        one = {"email": "a@nasa.gov", "kind": "single", "model": "gemma4-31b-qat",
+              "ctx": 8192, "accept_terms": True}
+        two = {"email": "b@army.mil", "kind": "single", "model": "gemma4-31b-qat",
+              "ctx": 8192, "accept_terms": True}
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=one).status_code == 200
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=two).status_code == 429
+        gw.db_exec("UPDATE api_keys SET expires_at='2000-01-01T00:00:00+00:00'")
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=two).status_code == 200
+
+    def test_date_only_expiry_is_live_until_end_of_day(
+            self, client, intake_headers, captured_mail, fake_fleet):
+        """A date-only expires_at means the end of that day -- the same
+        reading /public/api/key-status gives it. A key expiring today still
+        counts as live, so a duplicate request is still refused."""
+        from datetime import datetime, timezone
+        gw.set_public_settings({"ip_requests_per_day": 100,
+                                "max_keys_per_email": 1})
+        body = {"email": "today@nasa.gov", "kind": "single",
+               "model": "gemma4-31b-qat", "ctx": 8192, "accept_terms": True}
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=body).status_code == 200
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        gw.db_exec("UPDATE api_keys SET expires_at=?", (today,))
+        r = client.post("/public/api/request", headers=intake_headers, json=body)
+        assert r.status_code == 409
+        assert r.json()["code"] == "already_active"
+
     def test_missing_intake_token_rejected(self, client):
         r = client.post(
             "/public/api/request",
