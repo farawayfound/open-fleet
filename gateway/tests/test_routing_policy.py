@@ -237,16 +237,23 @@ class TestNeedCtx:
 # ---------------------------------------------------------------------------
 
 class TestResidencyVsSpeed:
-    def _tie(self):
+    def _tie(self, monkeypatch):
         # gpu-desktop-1 and mac-laptop-1 are both bare GPU boxes with no rank/always_on
         # field, so a shared fit='vram' ties them at (tier, rank) == (0, 0);
-        # only _est_wall can break the tie.
+        # only _est_wall can break the tie. The real sheet marks gpu-desktop-1
+        # `reserve` now (somebody's personal machine), which would decide
+        # these before speed is even consulted -- that ordering is pinned in
+        # test_reserve_boxes.py; here the flag is stripped so the subject
+        # stays residency vs. measured speed.
+        specs = {h: dict(s) for h, s in gw.DEFAULT_SPECS.items()}
+        specs["gpu-desktop-1"].pop("reserve", None)
+        monkeypatch.setattr(gw, "load_specs", lambda: specs)
         gw._routes_cache["cap"] = {("gpu-desktop-1", "m"): 1, ("mac-laptop-1", "m"): 1}
         _set_meta(**{"gpu-desktop-1|m": {"fit": "vram"}, "mac-laptop-1|m": {"fit": "vram"}})
         assert gw.host_tier("gpu-desktop-1", "m", "primary") == gw.host_tier("mac-laptop-1", "m", "primary")
 
     async def test_resident_beats_cold_for_small_prompt(self, monkeypatch):
-        self._tie()
+        self._tie(monkeypatch)
         gw._routes_cache["running"] = {"gpu-desktop-1": {"m"}, "mac-laptop-1": set()}
         monkeypatch.setattr(gw, "measured_tps", lambda model: {})
         monkeypatch.setattr(gw, "measured_pp", lambda model: {})
@@ -256,7 +263,7 @@ class TestResidencyVsSpeed:
         assert out[0] == ("gpu-desktop-1", "m")
 
     async def test_fast_cold_beats_resident_slow_for_40k_prompt(self, monkeypatch):
-        self._tie()
+        self._tie(monkeypatch)
         gw._routes_cache["running"] = {"gpu-desktop-1": {"m"}, "mac-laptop-1": set()}
         # mac-laptop-1 is cold, but ~20x faster at both decode and prompt reading
         # than gpu-desktop-1's un-measured class defaults.

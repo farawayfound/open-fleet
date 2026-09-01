@@ -393,9 +393,10 @@ class EnvFile(Step):
                 # Ctx.restrict() existed kept its parent's ACL, and a check
                 # that only compared text said `ok` about an admin token
                 # every local account could read.
-                return Check(DRIFT,
-                             f"readable by {len(strangers)} account(s) beyond "
-                             f"SYSTEM and Administrators",
+                shown = ", ".join(strangers[:3])
+                if len(strangers) > 3:
+                    shown += f" +{len(strangers) - 3} more"
+                return Check(DRIFT, f"ACL open to {shown}",
                              [f"narrow the ACL (drop {', '.join(strangers)})"])
             return Check(OK, path)
         if current is None:

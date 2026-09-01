@@ -299,8 +299,11 @@ FID = "qwen3.8-27b"
 def fleet(monkeypatch, *, running=(), fits=None, engine=None, reachable=None):
     """A fake fleet serving the suggested model on three boxes: one that holds
     it in VRAM, one whose experts would spill, and one big unified-memory box.
-    `fits` overrides the per-host fit report."""
-    fits = fits or {"gpu-desktop-2": "vram", "gpu-desktop-1": "spill", "mac-laptop-1": "unified"}
+    `fits` overrides the per-host fit report. gpu-laptop-1 and mac-laptop-1 rather than
+    gpu-desktop-2: the real spec sheet marks gpu-desktop-2 (and gpu-desktop-1) `reserve` --
+    somebody's personal machine -- and the loop refuses to warm those at all,
+    which is pinned separately below and in test_reserve_boxes.py."""
+    fits = fits or {"gpu-laptop-1": "vram", "gpu-desktop-1": "spill", "mac-laptop-1": "unified"}
     hosts = list(fits)
     gw._routes_cache.update(
         t=time.time(),
@@ -328,7 +331,9 @@ def fleet(monkeypatch, *, running=(), fits=None, engine=None, reachable=None):
 
 class TestPreloadCapable:
     def test_a_box_holding_it_in_vram_qualifies(self, monkeypatch):
-        fleet(monkeypatch)
+        # Capability, not policy: gpu-desktop-2 is a reserve box the PLAN skips,
+        # but it can hold the model, and this function only answers that.
+        fleet(monkeypatch, fits={"gpu-desktop-2": "vram"})
         assert gw.preload_capable("gpu-desktop-2", FID) is True
 
     def test_unified_memory_qualifies(self, monkeypatch):
@@ -356,57 +361,68 @@ class TestPreloadPlan:
     def test_it_plans_the_capable_boxes_and_leaves_the_rest_alone(self, monkeypatch):
         fleet(monkeypatch)
         plan = gw.preload_plan()
-        assert {p["host"] for p in plan} == {"gpu-desktop-2", "mac-laptop-1"}
+        assert {p["host"] for p in plan} == {"gpu-laptop-1", "mac-laptop-1"}
         assert all(p["public_id"] == "qwen3.8-27b" for p in plan)
         # gpu-desktop-1 cannot hold it, so it is not even reported as skipped.
         assert "gpu-desktop-1" not in gw._preload_state
 
     def test_a_box_already_serving_a_request_is_not_touched(self, monkeypatch):
         fleet(monkeypatch)
-        gw._inflight["gpu-desktop-2"] = 1
+        gw._inflight["gpu-laptop-1"] = 1
         plan = gw.preload_plan()
         assert {p["host"] for p in plan} == {"mac-laptop-1"}
-        assert gw._preload_state["gpu-desktop-2"]["phase"] == "busy"
+        assert gw._preload_state["gpu-laptop-1"]["phase"] == "busy"
 
     def test_a_box_that_just_answered_keeps_what_it_has(self, monkeypatch):
         """The next turn of that conversation outranks a conversation nobody
         has started yet."""
         fleet(monkeypatch)
-        gw._host_last_used["gpu-desktop-2"] = time.time()
+        gw._host_last_used["gpu-laptop-1"] = time.time()
         plan = gw.preload_plan()
         assert {p["host"] for p in plan} == {"mac-laptop-1"}
-        assert gw._preload_state["gpu-desktop-2"]["phase"] == "in use"
+        assert gw._preload_state["gpu-laptop-1"]["phase"] == "in use"
 
     def test_a_box_that_answered_long_enough_ago_is_fair_game(self, monkeypatch):
         fleet(monkeypatch)
-        gw._host_last_used["gpu-desktop-2"] = time.time() - gw.PRELOAD_IDLE_GRACE - 1
-        assert "gpu-desktop-2" in {p["host"] for p in gw.preload_plan()}
+        gw._host_last_used["gpu-laptop-1"] = time.time() - gw.PRELOAD_IDLE_GRACE - 1
+        assert "gpu-laptop-1" in {p["host"] for p in gw.preload_plan()}
 
     def test_a_cooling_box_is_left_to_recover(self, monkeypatch):
         fleet(monkeypatch)
-        gw._mark_host_down("gpu-desktop-2", 60.0, "test")
+        gw._mark_host_down("gpu-laptop-1", 60.0, "test")
         plan = gw.preload_plan()
         assert {p["host"] for p in plan} == {"mac-laptop-1"}
-        assert gw._preload_state["gpu-desktop-2"]["phase"] == "cooling"
+        assert gw._preload_state["gpu-laptop-1"]["phase"] == "cooling"
 
     def test_an_unreachable_box_is_not_planned(self, monkeypatch):
         fleet(monkeypatch, reachable=["mac-laptop-1"])
         assert {p["host"] for p in gw.preload_plan()} == {"mac-laptop-1"}
 
     def test_a_resident_box_inside_its_ttl_is_left_alone(self, monkeypatch):
-        fleet(monkeypatch, running=["gpu-desktop-2"])
-        gw._preload_state["gpu-desktop-2"] = {"touched": time.time()}
+        fleet(monkeypatch, running=["gpu-laptop-1"])
+        gw._preload_state["gpu-laptop-1"] = {"touched": time.time()}
         plan = gw.preload_plan()
         assert {p["host"] for p in plan} == {"mac-laptop-1"}
-        assert gw._preload_state["gpu-desktop-2"]["phase"] == "resident"
+        assert gw._preload_state["gpu-laptop-1"]["phase"] == "resident"
 
     def test_a_resident_box_is_re_touched_before_its_ttl_runs_out(self, monkeypatch):
         """llama-swap counts the ttl from the last request, so residency is
         held by asking again -- not by having asked once."""
         assert gw.PRELOAD_REFRESH < gw.DEFAULT_MODEL_RECORD["ttl"]
-        fleet(monkeypatch, running=["gpu-desktop-2"])
-        gw._preload_state["gpu-desktop-2"] = {"touched": time.time() - gw.PRELOAD_REFRESH - 1}
-        assert "gpu-desktop-2" in {p["host"] for p in gw.preload_plan()}
+        fleet(monkeypatch, running=["gpu-laptop-1"])
+        gw._preload_state["gpu-laptop-1"] = {"touched": time.time() - gw.PRELOAD_REFRESH - 1}
+        assert "gpu-laptop-1" in {p["host"] for p in gw.preload_plan()}
+
+    def test_a_reserve_box_is_never_warmed(self, monkeypatch):
+        """gpu-desktop-2 can hold the featured model in VRAM outright, and the
+        plan still refuses it: it is somebody's personal machine (spec-sheet
+        `reserve`), routed to only as a last resort, so keeping the featured
+        model warm on it would cost its owner memory for traffic it almost
+        never takes."""
+        fleet(monkeypatch, fits={"gpu-desktop-2": "vram", "mac-laptop-1": "unified"})
+        plan = gw.preload_plan()
+        assert {p["host"] for p in plan} == {"mac-laptop-1"}
+        assert gw._preload_state["gpu-desktop-2"]["phase"] == "reserve"
 
     def test_turning_it_off_plans_nothing(self, monkeypatch):
         fleet(monkeypatch)
@@ -435,8 +451,8 @@ class TestPreloadPass:
         fleet(monkeypatch)
         seen = self._capture(monkeypatch)
         touched = await gw.preload_pass()
-        assert {t["host"] for t in touched} == {"gpu-desktop-2", "mac-laptop-1"}
-        assert {c for c, _ in seen} == {"gpu-desktop-2", "mac-laptop-1"}
+        assert {t["host"] for t in touched} == {"gpu-laptop-1", "mac-laptop-1"}
+        assert {c for c, _ in seen} == {"gpu-laptop-1", "mac-laptop-1"}
         import json as _json
         body = _json.loads(seen[0][1])
         assert body["model"] == FID and body["max_tokens"] == 1
@@ -455,8 +471,8 @@ class TestPreloadPass:
         fleet(monkeypatch)
         self._capture(monkeypatch, status=500)
         await gw.preload_pass()
-        assert gw._preload_state["gpu-desktop-2"]["phase"] == "failed"
-        assert gw._preload_state["gpu-desktop-2"]["retry_at"] > time.time()
+        assert gw._preload_state["gpu-laptop-1"]["phase"] == "failed"
+        assert gw._preload_state["gpu-laptop-1"]["retry_at"] > time.time()
         # The very next pass plans nothing: cooled down and inside its backoff.
         assert gw.preload_plan() == []
 
@@ -473,11 +489,11 @@ class TestPreloadPass:
         monkeypatch.setattr(gw, "load_peers", lambda: [])
         self._capture(monkeypatch)
         assert {t["host"] for t in await gw.preload_pass(force=True)} == \
-            {"gpu-desktop-2", "mac-laptop-1"}
+            {"gpu-laptop-1", "mac-laptop-1"}
 
     async def test_an_ollama_box_is_asked_in_its_own_language(self, monkeypatch):
         """/v1 cannot express a keep_alive, and keep_alive is the whole point."""
-        fleet(monkeypatch, engine={"gpu-desktop-2": "ollama", "gpu-desktop-1": "ollama",
+        fleet(monkeypatch, engine={"gpu-laptop-1": "ollama", "gpu-desktop-1": "ollama",
                                    "mac-laptop-1": "ollama"})
         native = []
 
@@ -487,7 +503,7 @@ class TestPreloadPass:
 
         monkeypatch.setattr(gw, "_peer_native", _peer_native)
         await gw.preload_pass()
-        assert {c for c, _, _ in native} == {"gpu-desktop-2", "mac-laptop-1"}
+        assert {c for c, _, _ in native} == {"gpu-laptop-1", "mac-laptop-1"}
         assert all(p == "/api/generate" for _, p, _ in native)
         assert all(b["keep_alive"] == "30m" for _, _, b in native)
 

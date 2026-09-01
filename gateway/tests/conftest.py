@@ -68,6 +68,12 @@ def _fresh_public_state(client):
     # Reachability decides which half of a dual-boot machine is eclipsed, so
     # one test's live twin must not silently eclipse the next test's ceilings.
     gw._routes_cache.update(ctx={}, reachable=set())
+    # The Configurations tab's routing policy merges into every load_specs()
+    # answer, so a rank or reserve flag one test saved would re-rank every
+    # scorer assertion after it. Same for the one-slot manual-load state.
+    gw.db_exec("DELETE FROM settings WHERE key=?", (gw.FLEET_ROUTING_KEY,))
+    gw._specs_cache.update(stamp=None, specs=None, gen=-1)
+    gw._manual_load.clear()
     yield
 
 

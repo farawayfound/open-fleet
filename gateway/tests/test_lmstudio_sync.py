@@ -206,21 +206,36 @@ def test_an_id_never_takes_a_public_catalogue_name(store):
     ids it claims. A local model holding a public id is therefore unreachable
     under its own name -- the request goes to the row's fleet ids instead.
 
-    This is not hypothetical: mac-laptop-2's LM Studio copy of Qwen3.8-9B-Distill
-    derives exactly `qwen3.8-9b-distill`, which public_seed.json already
-    claims for mac-desktop's Ollama tag, and the first live request for it came
-    back "no host in the fleet serves model 'qwen3.8-9b-distill'" from the box
-    that was holding the weights."""
-    public = set(gw.public_catalogue()["by_public"])
-    assert "qwen3.8-9b-distill" in public, "seed changed; pick another collision"
+    This was found live: mac-laptop-2's LM Studio copy of Qwen3.8-9B-Distill
+    derives exactly `qwen3.8-9b-distill`, which public_seed.json claimed only
+    for the Ollama tag, and the first request for it came back "no host in
+    the fleet serves model 'qwen3.8-9b-distill'" from the box that was
+    holding the weights. That row now claims the name itself (see the next
+    test); this pins the rule for a row that does not."""
+    rows = gw.public_catalogue()["by_public"]
+    victim = next((pid for pid, r in rows.items()
+                   if pid not in gw._row_fleet_ids(r)), None)
+    assert victim, "seed changed; every public id claims itself now"
+
+    entry = {"repo": victim, "publisher": "pubb", "path": "/x/y.gguf"}
+    got = gw._fleet_id_for(entry, set())
+    assert got != victim
+    assert got == "pubb-" + victim, (
+        "qualify with the publisher rather than appending a counter")
+
+
+def test_a_public_id_the_row_claims_for_the_fleet_is_taken_not_dodged(store):
+    """The 9B distill row lists `qwen3.8-9b-distill` among its own fleet ids:
+    the fleet serves the model under that very name (it is the canonical id in
+    FLEET_MODEL_NAMES). So LM Studio's copy on mac-laptop-2 derives it and KEEPS it
+    -- dodging to `empero-ai-qwen3.8-9b-distill` was the split the start-up
+    rename then had to undo."""
+    row = gw.public_catalogue()["by_public"]["qwen3.8-9b-distill"]
+    assert "qwen3.8-9b-distill" in gw._row_fleet_ids(row), "seed changed"
 
     _gguf(store.lms / "empero-ai" / "Qwen3.8-9B-Distill-GGUF" / "m.gguf", b"m")
     gw.lmstudio_sync()
-
-    mid = gw.load_models()[0]["id"]
-    assert mid not in public
-    assert mid == "empero-ai-qwen3.8-9b-distill", (
-        "qualify with the publisher rather than appending a counter")
+    assert gw.load_models()[0]["id"] == "qwen3.8-9b-distill"
 
 
 def test_only_public_ids_are_avoided_not_the_ids_they_claim(store):
@@ -620,10 +635,11 @@ def test_a_shared_directory_still_imports_both_layouts(shared_store):
     _gguf(d / "ggml-org__Qwen3.8-27B-GGUF" / "qwen-Q4.gguf", b"b")
     gw.lmstudio_sync()
     # The flat name is split on its `__`, so the id reads like the model and
-    # not like the folder -- and `qwen3.8-27b` is a public catalogue id, so it
-    # is qualified with the org half rather than taken.
+    # not like the folder. `qwen3.8-27b` is a public catalogue id, but the row
+    # claims that very fleet id, so the name is taken rather than dodged: this
+    # box really does serve that public model now.
     assert sorted(r["id"] for r in gw.load_models()) == [
-        "fable-27b", "ggml-org-qwen3.8-27b"]
+        "fable-27b", "qwen3.8-27b"]
 
 
 # --------------------------------------------------------------------------

@@ -146,7 +146,15 @@ class Services(Step):
         if ctx.plan["engine"]["llama_swap"]:
             ls = shapes.join(ctx.family, p["bin"], "run-llama-swap.sh")
             lslog = shapes.join(ctx.family, p["logs"], "llama-swap.log")
-            lstart = f"pgrep -qf 'run-llama-swap' || nohup {ls} >>{lslog} 2>&1 &"
+            # NOT 'run-llama-swap': the wrapper execs the binary, so no live
+            # process ever carries the wrapper's name -- that pattern matches
+            # nothing (and on some crons, its own shell), so the keepalive
+            # spawned a doomed duplicate every five minutes. Each duplicate
+            # began its start-up preload before failing to bind the port,
+            # which is what put an orphaned 21 GB llama-server on mac-laptop-1.
+            # 'bin/llama-swap -config' is the binary's own argv.
+            lstart = (f"pgrep -qf 'bin/llama-swap -config' || "
+                      f"nohup {ls} >>{lslog} 2>&1 &")
             out += [("llmstack-llama-swap", f"@reboot {lstart}"),
                     ("llmstack-llama-swap-keepalive", f"*/5 * * * * {lstart}")]
         return out

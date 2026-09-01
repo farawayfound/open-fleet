@@ -930,6 +930,38 @@ class TestAModeIsNotAPermissionOnWindows:
         assert p.read_text(encoding="utf-8").startswith("set ")
 
 
+class TestANoteThatNeverPrinted:
+    """_run_steps returned on UNCHANGED before it printed the notes.
+
+    restrict() had left one saying exactly why icacls could not narrow the
+    file. The early return threw the run away with the note still in it, and
+    the CI log showed a verdict with no reason -- three rounds to learn what
+    one line would have said.
+    """
+
+    def test_notes_survive_an_early_return(self, linux_facts, empty_repo,
+                                           capsys, monkeypatch):
+        from fleetctl import steps as steps_mod
+
+        class Stuck(steps_mod.Step):
+            id = "stuck"
+
+            def check(self, ctx):
+                return steps_mod.Check(DRIFT, "still wrong")
+
+            def apply(self, ctx):
+                ctx.note("icacls said no")
+
+        ctx = ctx_for(linux_facts, empty_repo)
+        monkeypatch.setattr(steps_mod, "selected",
+                            lambda ctx, only=None: [Stuck()])
+        rc = cli._run_steps(ctx, SimpleNamespace(only=None), apply_it=True)
+        out = capsys.readouterr().out
+        assert rc == 2
+        assert "UNCHANGED" in out
+        assert "note: icacls said no" in out
+
+
 class TestAnOkThatCannotSeeThePermission:
     """`fleetctl apply --only envfile` said `ok` about a file every account
     on the box could read.
@@ -977,6 +1009,86 @@ class TestAnOkThatCannotSeeThePermission:
         step.apply(ctx)
         assert any("/grant:r" in c for c in issued), \
             "unchanged content skipped write(), and with it the ACL"
+
+    def test_a_narrowing_that_fails_is_said_out_loud(self, windows_facts,
+                                                     empty_repo, tmp_path):
+        # A silent failure here is the original bug wearing a different hat.
+        ctx = ctx_for(windows_facts, empty_repo)
+        ctx.probe = lambda argv, **kw: None
+        ctx.run = lambda argv, **kw: SimpleNamespace(
+            returncode=5, stdout="", stderr="Access is denied.\n")
+        assert ctx.restrict(tmp_path / "f") is False
+        assert any("could not narrow" in n and "Access is denied" in n
+                   for n in ctx.notes), ctx.notes
+
+    def test_the_grant_is_by_sid_when_whoami_answers(self, windows_facts,
+                                                     empty_repo, tmp_path,
+                                                     monkeypatch):
+        # USERNAME is what the caller was told; the token is what it is. On
+        # a hosted runner they differed, and every apply reported one
+        # stranger it had itself just granted.
+        monkeypatch.setenv("USERNAME", "told-this-name")
+        ctx = ctx_for(windows_facts, empty_repo)
+        ctx.probe = lambda argv, **kw: SimpleNamespace(
+            returncode=0, stdout='"box\\svc","S-1-5-21-9-8-7-1001"\n')
+        issued = []
+        ctx.run = lambda argv, **kw: issued.append([str(a) for a in argv])
+        assert ctx.restrict(tmp_path / "f") is True
+        grant = [c for c in issued if "/grant:r" in c][0]
+        assert "*S-1-5-21-9-8-7-1001:(F)" in grant
+        assert "told-this-name:(F)" not in grant
+
+    def test_the_grant_falls_back_to_the_name(self, windows_facts, empty_repo,
+                                              tmp_path, monkeypatch):
+        monkeypatch.setenv("USERNAME", "fallback-name")
+        ctx = ctx_for(windows_facts, empty_repo)
+        ctx.probe = lambda argv, **kw: None
+        issued = []
+        ctx.run = lambda argv, **kw: issued.append([str(a) for a in argv])
+        ctx.restrict(tmp_path / "f")
+        assert "fallback-name:(F)" in [c for c in issued if "/grant:r" in c][0]
+
+    def test_the_check_accepts_whichever_self_the_grant_used(self, windows_facts,
+                                                             empty_repo,
+                                                             tmp_path):
+        ctx = ctx_for(windows_facts, empty_repo)
+        p = tmp_path / "gateway.env.cmd"
+        p.write_text("set X=1\n", encoding="utf-8")
+        ctx.probe = lambda argv, **kw: SimpleNamespace(returncode=0, stdout=(
+            "ME|S-1-5-21-1\nUSER|S-1-5-21-2\n"
+            "ACE|S-1-5-21-2|BOX\\told-this-name\n"
+            "ACE|S-1-5-18|NT AUTHORITY\\SYSTEM\n"
+            "ACE|S-1-5-11|NT AUTHORITY\\Authenticated Users\n"))
+        assert ctx.acl_strangers(p) == ["NT AUTHORITY\\Authenticated Users"]
+
+    def test_write_narrows_the_file_it_wrote_under_a_relative_root(
+            self, windows_facts, empty_repo, tmp_path, monkeypatch):
+        # CI runs `apply --root sandbox`. write() resolved the path once and
+        # restrict() resolved it again -- sandbox/sandbox/C/..., a file
+        # icacls could not find -- while the one just written stayed open.
+        from fleetctl.runner import Ctx
+        monkeypatch.chdir(tmp_path)
+        plan, _ = planner.build(windows_facts, repo=empty_repo)
+        ctx = Ctx(plan, windows_facts, repo=empty_repo, root="sandbox")
+        ctx.probe = lambda argv, **kw: None
+        issued = []
+        ctx.run = lambda argv, **kw: issued.append([str(a) for a in argv])
+        ctx.write(r"C:\llmstack\gateway.env.cmd", "set X=1\n", mode=0o600)
+        written = tmp_path / "sandbox" / "C" / "llmstack" / "gateway.env.cmd"
+        assert written.is_file()
+        assert issued, "nothing was narrowed"
+        for argv in issued:
+            assert Path(argv[1]).resolve() == written.resolve(), argv
+
+    def test_icacls_saying_failed_with_exit_zero_still_counts(
+            self, windows_facts, empty_repo, tmp_path):
+        ctx = ctx_for(windows_facts, empty_repo)
+        ctx.probe = lambda argv, **kw: None
+        ctx.run = lambda argv, **kw: SimpleNamespace(
+            returncode=0, stderr="",
+            stdout="Successfully processed 0 files; Failed processing 1 files\n")
+        assert ctx.restrict(tmp_path / "f") is False
+        assert any("could not narrow" in n for n in ctx.notes), ctx.notes
 
     def test_linux_asks_no_such_question(self, linux_facts, empty_repo,
                                          tmp_path):

@@ -39,3 +39,13 @@ sudoers file, a scheduled task's power settings.
 
 Each script says at the top why it exists, what it changes, and how to undo
 it. All three are idempotent: running one twice is the same as running it once.
+
+## A registry save restarts the engine
+
+Saving a box's model registry — `PUT /admin/api/models` on the box, the same route
+through the hub's `/admin/api/fleet/<box>/models`, or the Models tab — rewrites the
+llama-swap config and **restarts llama-swap**, which relaunches whatever was loaded
+even when the saved change (an alias, a ttl) does not alter the launch command.
+A box mid-batch loses its in-flight requests; `preload`/`persistent` models come
+back on their own, anything else reloads on its next request. Seen 2026-08-29
+aliasing gpu-laptop-1's `qwen3.8-9B` as `qwen3.8-9b-distill` while it was serving.
