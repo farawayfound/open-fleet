@@ -6480,6 +6480,15 @@ async def openai_proxy(path: str, request: Request):
                 pub_models = json.loads(pub_key.get("models") or "{}")
             except (TypeError, json.JSONDecodeError):
                 pub_models = {}
+            # context_length is the one field a client can read the key's
+            # window from. Without it, a coding agent falls back to whatever
+            # its provider profile last held -- a stale figure from a box
+            # retired months ago survives every new key, because nothing the
+            # gateway sends ever contradicts it. The value is the key's own
+            # enforced ceiling (agents.ctx_limit == public_keys.ctx), not a
+            # per-box serving figure: it is the number apply_ctx_limit()
+            # holds every request to, whichever box answers.
+            pub_ctx = int(pub_key.get("ctx") or 0)
             if pub_key["kind"] == "single":
                 mid = str(pub_models.get("model") or "")
                 data = ([{"id": mid, "object": "model", "owned_by": "fleet-pass",
@@ -6491,6 +6500,9 @@ async def openai_proxy(path: str, request: Request):
                 if primary:
                     data.append({"id": primary, "object": "model",
                                 "owned_by": "fleet-pass", "created": 0})
+            if pub_ctx > 0:
+                for entry in data:
+                    entry["context_length"] = pub_ctx
             return JSONResponse({"object": "list", "data": data})
         fleet_list = await fleet_model_list()
         seen = {m["id"] for m in fleet_list}
@@ -8751,6 +8763,23 @@ def _email_canon(email: str) -> str:
     return local.split("+", 1)[0] + "@" + domain
 
 
+# What "a live Fleet Pass key" means, everywhere a cap counts one. The status
+# column alone is not it: nothing flips an expired key's row out of 'issued'
+# (roll_window only follows deliberate archival), so counting by status let
+# every key that ever expired occupy its domain's and the fleet's global
+# allowance forever -- a returning requester whose old key had merely expired
+# was told the domain or pool was full. Takes one bind parameter: now().
+# A date-only expiry means the end of that day, exactly as
+# /public/api/key-status reports it.
+_LIVE_PUBLIC_KEYS_SQL = (
+    "FROM public_keys pk JOIN api_keys k ON k.id=pk.key_id "
+    "WHERE pk.status='issued' AND pk.archived_at IS NULL "
+    "AND k.archived_at IS NULL AND (k.expires_at IS NULL OR "
+    "(CASE WHEN length(k.expires_at)=10 THEN k.expires_at || 'T23:59:59+00:00' "
+    "ELSE k.expires_at END) > ?)"
+)
+
+
 def public_eligibility(email: str) -> dict:
     """Pure function: what should happen for this email address.
 
@@ -8883,7 +8912,10 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
         "Node (openai SDK):\n"
         "  const client = new OpenAI({{ baseURL: \"{base_url}\", apiKey: \"{key}\",\n"
         "    defaultHeaders: {{ \"User-Agent\": \"fleet-pass/1\" }} }});\n\n"
-        "Cline: pick \"OpenAI Compatible\", paste the base URL and key.\n\n"
+        "Cline: pick \"OpenAI Compatible\", paste the base URL and key, and "
+        "set Context Window Size to {ctx} -- Cline cannot read it from the "
+        "server, and an old value left in the provider profile silently "
+        "caps every conversation.\n\n"
         "Open WebUI: Settings -> Connections -> OpenAI API, same base URL and key.\n\n"
         "That User-Agent line keeps the official SDKs clear of AI-crawler "
         "filtering at the CDN in front of the fleet, which answers their "
@@ -8939,6 +8971,8 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
         "Base URL: {base_url}\n"
         "API key: {key}\n"
         "Model: {model}\n"
+        "Context window: {ctx} tokens (set this in your client -- Cline calls "
+        "it Context Window Size; it cannot be read from the server).\n"
         "Any OpenAI-compatible client works (curl, the openai SDKs, Cline, "
         "Open WebUI); set the User-Agent header to anything but the SDK "
         "default. Expires {expires}; {limits}."
@@ -9842,7 +9876,8 @@ def render_key_email(row: dict, raw_key: str, settings: dict) -> tuple[str, str,
     intro = str(settings.get("email_intro") or "")
     try:
         setup = str(settings.get("email_setup") or "").format(
-            base_url=base_url, key=raw_key, model_id=setup_model)
+            base_url=base_url, key=raw_key, model_id=setup_model,
+            ctx=int(row.get("ctx") or 0))
     except (KeyError, IndexError):
         setup = str(settings.get("email_setup") or "")
     disclaimer = str(settings.get("email_disclaimer") or "")
@@ -9940,7 +9975,8 @@ def public_key_bundle(row: dict, raw_key: str, settings: dict) -> dict:
     # take the response down with it. The raw template is the fallback.
     try:
         setup = template.format(base_url=base_url, key=raw_key, model=model_id,
-                                expires=expires_date, limits=limits)
+                                expires=expires_date, limits=limits,
+                                ctx=int(row.get("ctx") or 0))
     except Exception:  # noqa: BLE001 -- see above
         setup = template
     return {
@@ -11050,10 +11086,8 @@ async def public_request(request: Request) -> JSONResponse:
         canon = _email_canon(email)
         live = [
             r for r in db_query(
-                "SELECT pk.email FROM public_keys pk JOIN api_keys k ON k.id=pk.key_id "
-                "WHERE pk.domain=? AND pk.status='issued' AND pk.archived_at IS NULL "
-                "AND k.archived_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > ?)",
-                (domain, now()),
+                "SELECT pk.email " + _LIVE_PUBLIC_KEYS_SQL + " AND pk.domain=?",
+                (now(), domain),
             ) if _email_canon(str(r["email"])) == canon
         ]
         if len(live) >= per_email:
@@ -11082,16 +11116,15 @@ async def public_request(request: Request) -> JSONResponse:
 
     if elig["verdict"] == "allow":
         dcount = db_query(
-            "SELECT COUNT(*) c FROM public_keys WHERE domain=? AND status='issued' "
-            "AND archived_at IS NULL",
-            (domain,),
+            "SELECT COUNT(*) c " + _LIVE_PUBLIC_KEYS_SQL + " AND pk.domain=?",
+            (now(), domain),
         )[0]["c"]
         if int(dcount) >= int(settings["max_keys_per_domain"]):
             log_public_event("rate_limited", email=email, ip=ip, detail="domain_cap")
             raise PublicError(429, "domain_cap", "this domain has reached its key limit")
 
     live_count = db_query(
-        "SELECT COUNT(*) c FROM public_keys WHERE status='issued' AND archived_at IS NULL"
+        "SELECT COUNT(*) c " + _LIVE_PUBLIC_KEYS_SQL, (now(),)
     )[0]["c"]
     if int(live_count) >= int(settings["max_live_keys"]):
         log_public_event("rate_limited", email=email, ip=ip, detail="global_cap")
