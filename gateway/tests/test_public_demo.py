@@ -134,6 +134,25 @@ class TestHostPolicy:
         settings = {"demo_prefer_hosts": [], "demo_exclude_hosts": [gw.HOST_NAME.lower()]}
         assert gw.demo_host_policy([("", "a"), ("p", "a")], settings) == [("p", "a")]
 
+    def test_a_saturated_preferred_host_does_not_beat_a_free_one(self):
+        # Requirement 1: preference is a tiebreak among equally-free (or
+        # equally-saturated) boxes now, never an override of availability --
+        # a busy gpu-laptop-1 must not jump ahead of an idle mac-desktop-1 just
+        # because the owner listed it first.
+        settings = {"demo_prefer_hosts": ["gpu-laptop-1"], "demo_exclude_hosts": []}
+        gw._routes_cache["cap"] = {("gpu-laptop-1", "b"): 1, ("mac-desktop-1", "a"): 1}
+        gw._inflight["gpu-laptop-1"] = 1  # busy >= slots(1): saturated
+        targets = [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+        assert gw.demo_host_policy(targets, settings) == [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+
+    def test_preference_still_breaks_a_tie_among_equally_free_hosts(self):
+        settings = {"demo_prefer_hosts": ["gpu-laptop-1"], "demo_exclude_hosts": []}
+        gw._routes_cache["cap"] = {("gpu-laptop-1", "b"): 1, ("mac-desktop-1", "a"): 1}
+        # Neither saturated: the free-vs-saturated key is 0/0 for both, so
+        # preference still decides -- the feature is narrowed, not removed.
+        targets = [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+        assert gw.demo_host_policy(targets, settings) == [("gpu-laptop-1", "b"), ("mac-desktop-1", "a")]
+
     def test_host_lists_accept_a_comma_string(self):
         assert gw.clean_host_list(" gpu-laptop-1, mac-laptop-1 ,,") == ["gpu-laptop-1", "mac-laptop-1"]
         assert gw.clean_host_list(["a", 3, "A", ""]) == ["a"]

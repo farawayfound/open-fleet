@@ -4578,6 +4578,21 @@ COOLDOWN_CONNECT = 60.0
 COOLDOWN_UPSTREAM_5XX = 45.0
 COOLDOWN_STALL = 120.0
 COOLDOWN_MIDSTREAM = 60.0
+# A box that answered 429/503 is BUSY, not broken -- it is very likely to
+# have a free slot again soon, so it earns a short sit-out rather than the
+# 45s a real failure gets. The public `busy_cooldown_seconds` setting is the
+# live source of truth; this is only the fallback for a caller that cannot
+# reach settings (or a bad stored value).
+COOLDOWN_BUSY_DEFAULT = 5.0
+
+
+def _busy_cooldown_seconds() -> float:
+    try:
+        v = float(get_public_settings().get("busy_cooldown_seconds")
+                  or COOLDOWN_BUSY_DEFAULT)
+    except (TypeError, ValueError):
+        return COOLDOWN_BUSY_DEFAULT
+    return v if v > 0 else COOLDOWN_BUSY_DEFAULT
 
 
 def _mark_host_down(host: str, seconds: float, why: str = "") -> None:
@@ -5902,6 +5917,17 @@ async def model_routes(force: bool = False) -> dict[str, str]:
     return routes
 
 
+def _host_saturated(cand: str, fid: str) -> bool:
+    """True when (cand, fid) has no free decode slot right now -- the exact
+    predicate _score_host_model_pairs's first sort key computes, factored
+    out so demo_host_policy and pick_fallback's busy trigger read the same
+    definition of "occupied" the scorer does, rather than each growing its
+    own slightly different copy."""
+    hname = cand or HOST_NAME
+    slots = max(1, int(_routes_cache.get("cap", {}).get((cand, fid), 1)))
+    return _inflight.get(hname, 0) >= slots
+
+
 async def _score_host_model_pairs(
     pairs: list[tuple[str, str]], role: str = "primary",
     prompt_tokens: int = 0, gen_tokens: int = 256, need_ctx: int = 0,
@@ -5915,7 +5941,12 @@ async def _score_host_model_pairs(
     the model ahead of the big box ahead of the always-on small boxes ahead
     of the CPU backstop; and within a tier the box expected to ANSWER
     soonest (_est_wall: cold load, prompt read, generation, scaled by how
-    loaded it already is), local ties broken toward this host.
+    loaded it already is), local ties broken toward this host. When EVERY
+    candidate is saturated, the tier/rank policy only breaks a tie AFTER
+    queue depth (busy - slots, zero for anyone with a free slot so this
+    never touches the free-candidate ordering above): the box with fewer
+    jobs already waiting goes first, and only a tie in that goes to the
+    owner's more capable machine -- not the other way round.
 
     Residency used to be the first key, which is how a 42k-token prompt was
     sent to an 8 GB laptop that happened to have the model warm while a
@@ -5960,6 +5991,12 @@ async def _score_host_model_pairs(
         hname = cand or HOST_NAME
         slots = max(1, int(cap.get((cand, mid), 1)))
         busy = _inflight.get(hname, 0)
+        # 0 for any candidate with a free slot, so this never disturbs
+        # today's capability-first ordering among FREE candidates -- it only
+        # ever breaks a tie once every candidate is already saturated
+        # (element 1 of the key below), which is the one case the owner's
+        # tier/rank ranked ahead of load before this existed.
+        queue_len = max(0, busy - slots)
         resident = mid in running.get(hname, set())
         tier, rank = host_tier(cand, mid, role)
         too_small = 0
@@ -5985,6 +6022,8 @@ async def _score_host_model_pairs(
             1 if host_reserved(hname) else 0,   # personal box: only when the
                                                 # fleet boxes are busy/failing
             *pref,                              # the role's own order
+            queue_len,                          # among saturated boxes only:
+                                                # fewest jobs waiting first
             tier, rank,                         # the owner's policy
             round(est, 1),                      # soonest answer first
             -bw,                                # spec-sheet tiebreak
@@ -6480,6 +6519,15 @@ async def openai_proxy(path: str, request: Request):
                 pub_models = json.loads(pub_key.get("models") or "{}")
             except (TypeError, json.JSONDecodeError):
                 pub_models = {}
+            # context_length is the one field a client can read the key's
+            # window from. Without it, a coding agent falls back to whatever
+            # its provider profile last held -- a stale figure from a box
+            # retired months ago survives every new key, because nothing the
+            # gateway sends ever contradicts it. The value is the key's own
+            # enforced ceiling (agents.ctx_limit == public_keys.ctx), not a
+            # per-box serving figure: it is the number apply_ctx_limit()
+            # holds every request to, whichever box answers.
+            pub_ctx = int(pub_key.get("ctx") or 0)
             if pub_key["kind"] == "single":
                 mid = str(pub_models.get("model") or "")
                 data = ([{"id": mid, "object": "model", "owned_by": "fleet-pass",
@@ -6491,6 +6539,9 @@ async def openai_proxy(path: str, request: Request):
                 if primary:
                     data.append({"id": primary, "object": "model",
                                 "owned_by": "fleet-pass", "created": 0})
+            if pub_ctx > 0:
+                for entry in data:
+                    entry["context_length"] = pub_ctx
             return JSONResponse({"object": "list", "data": data})
         fleet_list = await fleet_model_list()
         seen = {m["id"] for m in fleet_list}
@@ -6529,10 +6580,16 @@ async def openai_proxy(path: str, request: Request):
             gen_est = 256
     if model:
         pub_key = public_key_for(int(key["id"]))
-        if pub_key and pub_key["kind"] == "single":
-            req_row = public_catalogue()["by_public"].get(model)
+        # Substitution (requirement 2) is fleet-wide, not a Fleet Pass perk --
+        # every bearer key asking for a catalogue model, a fleet id, or a
+        # role name is eligible; only the *presentation* (Box-N alias below)
+        # stays conditional on pub_row. The opt-out is checked once, before
+        # the one pick_fallback call any caller kind on this path makes.
+        if not _no_fallback_requested(request, payload if isinstance(payload, dict) else None):
+            req_row = _catalogue_row_for(model)
             if req_row:
-                sub = await pick_fallback(req_row, "single", get_public_settings())
+                sub = await pick_fallback(
+                    req_row, "single" if pub_key else "primary", get_public_settings())
                 if sub:
                     served_model = str(sub["public_id"])
                     fallback = {"requested": model, "served": served_model}
@@ -6724,15 +6781,97 @@ async def openai_proxy(path: str, request: Request):
                 await _quiet_close(peer_client)
                 peer_client = None
                 break
+            if resp.status_code in (400, 413, 422):
+                try:
+                    err_body = await resp.aread()
+                except Exception:  # noqa: BLE001 -- a peek must never break failover
+                    err_body = b""
+                if _classify_upstream_failure(
+                        resp.status_code, path, err_body) == "ctx_too_long":
+                    ctx_retried_ok = False
+                    retry_payload = None
+                    # ctx_retry_live gates only the same-box fitted retry
+                    # attempt below -- classification, and the failover to
+                    # the next candidate this leads to when it stays
+                    # unattempted or fails, happen either way. A box that
+                    # cannot serve this prompt is "not on THIS box" whether
+                    # or not the owner wants the gateway to try shrinking it
+                    # first.
+                    if get_public_settings().get("ctx_retry_live", True):
+                        prior = (cand_ctx if cand_payload is not None
+                                else (ctx_limit or (prompt_est + gen_est)))
+                        fit_to = _fit_after_ctx_overflow(err_body, prior)
+                        if fit_to:
+                            base = cand_payload if cand_payload is not None else payload
+                            try:
+                                retry_payload = apply_ctx_limit(dict(base), fit_to)
+                            except HTTPException:
+                                retry_payload = None
+                    # The failed attempt is done with either way -- close
+                    # it before the retry opens a second request on the
+                    # same client, and reuse `resp`/`cut` in place so
+                    # every path below sees exactly one response, exactly
+                    # like every other candidate.
+                    await _quiet_close(resp)
+                    resp = None
+                    if retry_payload is not None:
+                        retry_body = json.dumps(
+                            {**retry_payload, "model": send_id}).encode()
+                        retry_hdrs = dict(hdrs)
+                        retry_hdrs["content-length"] = str(len(retry_body))
+                        req2 = send_client.build_request(
+                            request.method, endpoint, headers=retry_hdrs,
+                            content=retry_body, params=dict(request.query_params))
+                        try:
+                            resp, cut = await _race_abort(
+                                send_client.send(req2, stream=True), job)
+                        except (httpx.ConnectError, httpx.ConnectTimeout,
+                                httpx.HTTPError):
+                            resp, cut = None, False
+                        if cut:
+                            await _quiet_close(peer_client)
+                            peer_client = None
+                            break
+                        if resp is not None and resp.status_code < 400:
+                            remember_model_ctx({(cand, fleet_id): fit_to})
+                            ctx_retried_ok = True
+                    if not ctx_retried_ok:
+                        tried.append((hname, " (context, retried)"
+                                     if retry_payload is not None
+                                     else " (context)"))
+                        _mark_host_down(
+                            hname, COOLDOWN_MIDSTREAM,
+                            "ctx_too_long" + (" retry exhausted for " if retry_payload is not None
+                                             else " for ") + fleet_id)
+                        await _quiet_close(resp, peer_client)
+                        resp, peer_client = None, None
+                        # NOT upstream_failed: this box did not break, it
+                        # declined the prompt on length -- once or twice
+                        # depending on ctx_retry_live, but still on length,
+                        # exactly like the proactive ctx_reject case above.
+                        # Recorded the same way, so a request whose every
+                        # candidate only ever declines on length still gets
+                        # the honest 413/context_limit this box actually
+                        # reported, instead of upstream_failed forcing a 502
+                        # that reads as an outage and invites a retry that
+                        # cannot possibly succeed.
+                        ctx_reject = HTTPException(
+                            413, _ctx_overflow_reject_detail(err_body))
+                        continue
             if more and _upstream_failed(resp.status_code, path):
                 # A 5xx from this box is final for THIS box, not for the
                 # request: the status is known before a byte of body has
                 # gone to the client, so another box can still answer. The
                 # batch dispatcher always retried these; the live path now
                 # does too.
+                kind = _classify_upstream_failure(resp.status_code, path)
                 tried.append((hname, " (HTTP " + str(resp.status_code) + ")"))
-                _mark_host_down(hname, COOLDOWN_UPSTREAM_5XX,
-                                "HTTP " + str(resp.status_code) + " for " + fleet_id)
+                _mark_host_down(
+                    hname, _busy_cooldown_seconds() if kind == "busy"
+                    else COOLDOWN_UPSTREAM_5XX,
+                    "HTTP " + str(resp.status_code) + " for " + fleet_id)
+                if kind == "model_missing":
+                    _routes_cache["t"] = 0.0  # the table lied; re-resolve
                 await _quiet_close(resp, peer_client)
                 resp, peer_client = None, None
                 upstream_failed = True
@@ -6803,10 +6942,15 @@ async def openai_proxy(path: str, request: Request):
     if untrack is None:
         untrack = _track(served_by)
     job["host"] = served_by
-    if resp.status_code >= 500:
+    if resp.status_code >= 500 or resp.status_code in (429, 503):
         # The last box standing failed too; remember it for the next caller.
-        _mark_host_down(served_by, COOLDOWN_UPSTREAM_5XX,
-                        "HTTP " + str(resp.status_code) + " (no other host)")
+        # A 429/503 gets the short busy cooldown -- it is likely free again
+        # soon -- everything else the standard one.
+        kind = _classify_upstream_failure(resp.status_code, path)
+        _mark_host_down(
+            served_by, _busy_cooldown_seconds() if kind == "busy"
+            else COOLDOWN_UPSTREAM_5XX,
+            "HTTP " + str(resp.status_code) + " (no other host)")
 
     drop = {"content-length", "transfer-encoding", "connection", "content-encoding"}
     out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in drop}
@@ -6853,7 +6997,10 @@ async def openai_proxy(path: str, request: Request):
                 obj["x_fleet"] = pub_xf
                 prepend_notice(obj, pub_notice)
                 out_body = json.dumps(obj, ensure_ascii=False).encode()
-        if resp.status_code < 500:
+        if resp.status_code < 500 and resp.status_code not in (429, 503):
+            # A 429/503 was just cooled down above (it is 'busy', not
+            # broken) -- clearing that here on the same response would make
+            # the cooldown a no-op the instant it was set.
             _mark_host_ok(served_by)
         # A caller that gave up before the answer arrived never received it,
         # and every OpenAI SDK retries by default (max_retries=2) -- so a slow
@@ -6937,7 +7084,7 @@ async def openai_proxy(path: str, request: Request):
                     break
                 if ttft is None:
                     ttft = int((time.time() - started) * 1000)
-                    if status_out < 500:
+                    if status_out < 500 and status_out not in (429, 503):
                         _mark_host_ok(served_by)
                 if b'"usage"' in chunk:
                     for line in chunk.split(b"\n"):
@@ -6988,11 +7135,139 @@ def _ttfb_deadline(prompt_tokens: int, resident: bool) -> float:
     return min(600.0, d)
 
 
-def _upstream_failed(status: int, path: str) -> bool:
+# Vocabulary a llama.cpp server (>= b4700) or an older one's plain-text 4xx
+# uses to say "this prompt does not fit in the box's context window" -- as
+# opposed to any other 400/413/422, which is an ordinary client error the
+# fleet had no part in and must be returned unchanged, never retried.
+# Deliberately conservative: false negatives just fall through to today's
+# plain-error behaviour (harmless), false positives would shrink a request
+# that did not need it, so every string here is one actually seen naming the
+# context window, not a guess at what one might say.
+_CTX_OVERFLOW_SIGNS = (
+    "exceeds the available context size", "context size", "n_ctx",
+    "prompt is too long", "input is too large", "too many tokens",
+    "maximum context length", "context length exceeded", "context window",
+)
+
+
+def _classify_upstream_failure(status: int, path: str, body: bytes = b"") -> str:
+    """What kind of thing just happened, for the reactive-failure branches
+    (requirement 3): 'busy' | 'ctx_too_long' | 'oom' | 'model_missing' |
+    'other_5xx' | 'ok'. `body` is optional -- most call sites decide before
+    a byte of it has been read, and every kind but 'ctx_too_long' can be told
+    from the status alone.
+
+    'busy' (429/503) is not a failure at all, just a full box; it earns the
+    short cooldown and an immediate retry elsewhere. 'ctx_too_long' is
+    matched against the llama.cpp server's own error shape first --
+    {"error": {"type": "exceed_context_size_error", "n_ctx": M, ...}} -- and
+    only falls back to the message-substring list for a server that does not
+    send it. Anything else in the 4xx range is the caller's problem, not the
+    fleet's, and is deliberately left unclassified ('ok') so it is returned
+    to the client exactly as the box sent it."""
+    if status < 400:
+        return "ok"
+    if status in (429, 503):
+        return "busy"
+    if status >= 500:
+        text = body.decode("utf-8", "ignore").lower() if body else ""
+        return "oom" if any(s in text for s in _MEM_SIGNS) else "other_5xx"
+    if status == 404 and path == "chat/completions":
+        # llama-swap answers this for a model id the box no longer has.
+        return "model_missing"
+    if status in (400, 413, 422) and body:
+        text = body.decode("utf-8", "ignore").lower()
+        try:
+            err = json.loads(text).get("error")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            err = None
+        if isinstance(err, dict) and err.get("type") == "exceed_context_size_error":
+            return "ctx_too_long"
+        if any(s in text for s in _CTX_OVERFLOW_SIGNS):
+            return "ctx_too_long"
+    return "ok"
+
+
+def _upstream_failed(status: int, path: str, body: bytes = b"") -> bool:
     """A response that means 'this box could not do it', as opposed to one
     that means 'this request is wrong'. A 404 on chat/completions is the
-    former: llama-swap answers it for a model id the box no longer has."""
-    return status >= 500 or (status == 404 and path == "chat/completions")
+    former: llama-swap answers it for a model id the box no longer has.
+    `body` is optional and only sharpens 'oom' vs 'other_5xx' in the log
+    line callers write -- both count as failed either way."""
+    return _classify_upstream_failure(status, path, body) in (
+        "busy", "other_5xx", "oom", "model_missing")
+
+
+def _ctx_overflow_ceiling(body: bytes) -> int:
+    """The box's own stated n_ctx from a llama.cpp exceed_context_size_error
+    body, or 0 when the error did not name one -- an older server, or a
+    message-only match, either of which leaves the caller to fall back to
+    halving whatever was last tried instead of a size the box actually
+    reported."""
+    try:
+        obj = json.loads(body.decode("utf-8", "ignore"))
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+        return 0
+    err = obj.get("error") if isinstance(obj, dict) else None
+    if not isinstance(err, dict):
+        return 0
+    try:
+        return max(0, int(err.get("n_ctx") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# Shaved off a reported n_ctx ceiling so the fitted retry lands safely under
+# it rather than exactly on it -- special tokens and chat-template overhead
+# are the box's own accounting to get right, not ours to reproduce exactly.
+CTX_OVERFLOW_MARGIN = 256
+
+
+def _fit_after_ctx_overflow(body: bytes, prior_ctx: int) -> int:
+    """The context size to retry the SAME box with, one time, after it
+    rejected a request as too long for its window: the box's own reported
+    ceiling (minus CTX_OVERFLOW_MARGIN) when the error named one, else half
+    of whatever was last tried -- the same halve_ctx() the model-apply
+    verifier and native_proxy's Ollama retry already use. 0 means nothing
+    smaller is worth trying; the caller should give up and move on like any
+    other failed candidate."""
+    n_ctx = _ctx_overflow_ceiling(body)
+    if n_ctx > 0:
+        fit = n_ctx - CTX_OVERFLOW_MARGIN
+        # A box's own reported ceiling is a hard fact, not a number to round
+        # UP to a grid floor: for a small box (n_ctx <= _CTX_RETRY_FLOOR +
+        # CTX_OVERFLOW_MARGIN) that would ask it to retry at or above the
+        # very ceiling it just named, burning the one allowed retry on a
+        # request already proven too big. Below the floor simply means this
+        # box has nothing smaller worth trying -- 0 tells the caller to give
+        # up on it and move on, exactly like the halve_ctx() fallback below.
+        return fit if fit >= _CTX_RETRY_FLOOR else 0
+    return halve_ctx(max(1, int(prior_ctx or 0)))
+
+
+def _ctx_overflow_reject_detail(body: bytes) -> dict:
+    """Turn a box's own ctx_too_long error body into the same
+    {"error": {"type": "context_limit", ...}} shape apply_ctx_limit's
+    PROACTIVE rejection raises, so a same-box reactive retry that ALSO
+    overflowed reports the same honest 413 a caller whose prompt simply
+    does not fit anywhere would have gotten -- instead of a 502 that reads
+    as an outage and invites a retry that cannot possibly succeed."""
+    message = None
+    try:
+        obj = json.loads(body.decode("utf-8", "ignore"))
+        err = obj.get("error") if isinstance(obj, dict) else None
+        if isinstance(err, dict) and err.get("message"):
+            message = str(err["message"])
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError, AttributeError):
+        pass
+    detail: dict = {"error": {
+        "message": message or "prompt is too long for this model's context window",
+        "type": "context_limit",
+    }}
+    n_ctx = _ctx_overflow_ceiling(body)
+    if n_ctx:
+        detail["error"]["limit"] = n_ctx
+    return detail
 
 
 def _watch_disconnect(request: Request, job: dict) -> "asyncio.Task":
@@ -7141,9 +7416,24 @@ async def native_proxy(path: str, request: Request):
                     stop=asyncio.Event(),
                     detail=endpoint + (" · stream" if stream else "")
                     + (" · " + str(key.get("name")) if key.get("name") else ""))
+    # Counted against this box from the moment it is asked, exactly like
+    # every fleet-routed kind -- without this, a native call in flight was
+    # invisible to _inflight[HOST_NAME], so a concurrent /v1 or fleet_chat
+    # request could rank this host as idle while it was actually busy here.
+    untrack = _track(HOST_NAME)
     try:
         resp, cut = await _race_abort(client.send(req, stream=True), job)
-    except (httpx.ConnectError, httpx.ConnectTimeout):
+    except httpx.HTTPError:
+        # Anything httpx raises trying to reach or read from this box --
+        # not just a refused connection (httpx.ConnectError/ConnectTimeout
+        # are themselves HTTPError subclasses): a peer that accepted the
+        # TCP connection and then broke before a response arrived surfaces
+        # as httpx.ReadError or httpx.RemoteProtocolError, and those used to
+        # propagate out of this function uncaught, past the untrack() below,
+        # leaving _inflight[HOST_NAME] permanently off by one -- this box
+        # would sort as saturated in every routing decision for the rest of
+        # the process's life.
+        untrack()
         _job_close(job)
         if metered:
             record_usage(key, model, endpoint, stream, 502, None, None,
@@ -7152,6 +7442,7 @@ async def native_proxy(path: str, request: Request):
             {"error": "native upstream unavailable"}, status_code=502
         )
     if cut:
+        untrack()
         _job_close(job)
         if metered:
             record_usage(key, model, endpoint, stream, 499, None, None,
@@ -7168,6 +7459,7 @@ async def native_proxy(path: str, request: Request):
             if cut:
                 raw_out = b""
         finally:
+            untrack()
             await _quiet_close(resp)
             _job_close(job)
         if job["aborted"]:
@@ -7250,6 +7542,7 @@ async def native_proxy(path: str, request: Request):
                             continue
                 yield chunk
         finally:
+            untrack()
             await _quiet_close(resp)
             _job_close(job)
             if metered:
@@ -7403,15 +7696,69 @@ async def fleet_chat(key: dict, body: dict, endpoint: str,
         except Exception as exc:  # noqa: BLE001
             untrack()
             return 502, {"error": {"message": str(exc)[:300], "type": "upstream"}}, hname, granted
+        # _post_chat is non-streaming: r.content is already the full body, no
+        # extra read needed to inspect it for a context-overflow shape.
+        if r.status_code in (400, 413, 422):
+            if _classify_upstream_failure(
+                    r.status_code, "chat/completions", r.content) == "ctx_too_long":
+                ctx_retried_ok = False
+                retry_payload = None
+                # ctx_retry_live gates only the same-box fitted retry
+                # attempt below -- classification, and the failover this
+                # leads to when it stays unattempted or fails, happen
+                # either way. See the matching comment in openai_proxy.
+                if get_public_settings().get("ctx_retry_live", True):
+                    prior = granted if granted else (ctx_limit or (prompt_est + gen_est))
+                    fit_to = _fit_after_ctx_overflow(r.content, prior)
+                    if fit_to:
+                        try:
+                            retry_payload = apply_ctx_limit(dict(send), fit_to)
+                        except HTTPException:
+                            retry_payload = None
+                if retry_payload is not None:
+                    retry_bytes = json.dumps(
+                        {**retry_payload, "model": fleet_id}).encode()
+                    try:
+                        r2 = await _post_chat(cand, retry_bytes, deadline)
+                    except (httpx.ConnectError, httpx.ConnectTimeout,
+                            httpx.TimeoutException, httpx.HTTPError):
+                        r2 = None
+                    if r2 is not None and r2.status_code < 400:
+                        remember_model_ctx({(cand, fleet_id): fit_to})
+                        r, granted = r2, fit_to
+                        ctx_retried_ok = True
+                if not ctx_retried_ok:
+                    # Same tracked window the whole time -- untrack only now,
+                    # once both attempts are settled.
+                    untrack()
+                    _mark_host_down(
+                        hname, COOLDOWN_MIDSTREAM,
+                        "ctx_too_long" + (" retry exhausted for " if retry_payload is not None
+                                         else " for ") + fleet_id)
+                    # NOT upstream_failed: a decline on length, not a break --
+                    # see the matching comment in openai_proxy. `r` is still
+                    # the original (never-reassigned-on-failure) response, so
+                    # its body is the box's own honest ctx_too_long detail.
+                    ctx_reject = HTTPException(
+                        413, _ctx_overflow_reject_detail(r.content))
+                    continue
         untrack()
         if more and _upstream_failed(r.status_code, "chat/completions"):
             upstream_failed = True
-            _mark_host_down(hname, COOLDOWN_UPSTREAM_5XX,
-                            "HTTP " + str(r.status_code) + " for " + fleet_id)
+            kind = _classify_upstream_failure(r.status_code, "chat/completions")
+            _mark_host_down(
+                hname, _busy_cooldown_seconds() if kind == "busy"
+                else COOLDOWN_UPSTREAM_5XX,
+                "HTTP " + str(r.status_code) + " for " + fleet_id)
+            if kind == "model_missing":
+                _routes_cache["t"] = 0.0
             continue
-        if r.status_code >= 500:
-            _mark_host_down(hname, COOLDOWN_UPSTREAM_5XX,
-                            "HTTP " + str(r.status_code) + " (no other host)")
+        if r.status_code >= 500 or r.status_code in (429, 503):
+            kind = _classify_upstream_failure(r.status_code, "chat/completions")
+            _mark_host_down(
+                hname, _busy_cooldown_seconds() if kind == "busy"
+                else COOLDOWN_UPSTREAM_5XX,
+                "HTTP " + str(r.status_code) + " (no other host)")
         else:
             _mark_host_ok(hname)
         try:
@@ -7451,13 +7798,56 @@ def _batch_paths(bid: int) -> tuple[Path, Path]:
            BATCHES_DIR / (str(bid) + ".out.ndjson")
 
 
-async def _batch_targets(models: list[str]) -> list[dict]:
+def _batch_need_ctx(lines: str) -> int:
+    """The largest prompt-token estimate across a batch's input lines, for
+    the ctx-aware host ranking below -- a batch of long prompts should not
+    be handed to a box with a small window ahead of one that can actually
+    hold them, the same rule the live proxy already applies per request."""
+    best = 0
+    for line in lines.splitlines():
+        if not line.strip():
+            continue
+        try:
+            body = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(body, dict):
+            best = max(best, estimate_prompt_tokens(body))
+    return best
+
+
+async def _batch_targets(models: list[str], no_fallback: bool = False,
+                         need_ctx: int = 0) -> list[dict]:
     """Every (host, model) pair that can serve this batch -- at most ONE model
     per host. The swap group on a llama.cpp box is exclusive, so handing one
     box two of the batch's models would make every request a model reload;
-    the first model in the caller's order claims the host."""
+    the first model in the caller's order claims the host.
+
+    Substitution (requirement 2) happens ONCE here, on the model LIST,
+    before any host claims one -- never per dequeued item, which would turn
+    a saturated model mid-batch into a stream of per-request reloads on
+    whatever box happened to answer next. What actually served each item is
+    already the honest record (the `model` field on every output line, and
+    the `targets` this function returns) -- batches have no single reply to
+    staple an x_fleet notice to, so this IS the disclosure."""
     await model_routes(force=True)
     cap = _routes_cache.get("cap", {})
+    if not no_fallback:
+        settings = get_public_settings()
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for m in models:
+            out_m = m
+            row = _catalogue_row_for(m)
+            if row is not None:
+                sub = await pick_fallback(row, "worker", settings)
+                if sub is not None:
+                    out_m = str(sub["public_id"])
+            if out_m not in seen:
+                seen.add(out_m)
+                resolved.append(out_m)
+        if resolved:
+            models = resolved
     tps_by_model: dict[str, dict[str, float]] = {}
 
     async def tps_for(mid: str) -> dict[str, float]:
@@ -7473,10 +7863,21 @@ async def _batch_targets(models: list[str]) -> list[dict]:
         # fleet role fans out over each box's own best model for it, exactly
         # as the live proxy resolves one (role_pairs) -- and every target
         # then carries the id that box really serves, never the role word.
-        pool = (role_pairs(m) if m in FLEET_ROLES
-                else [(c, m) for c in _routes_cache["cands"].get(m, [])])
+        # A catalogue id (the substitution above always names one by its
+        # public_id) is expanded to every fleet id that row claims, exactly
+        # as resolve_targets() does for the live proxy -- a bare
+        # cands.get(m, []) would miss it entirely, since `cands` is keyed by
+        # fleet id, never by public_id.
+        if m in FLEET_ROLES:
+            pool = role_pairs(m)
+        else:
+            row = _catalogue_row_for(m)
+            fids = _row_fleet_ids(row) if row is not None else [m]
+            pool = [(c, fid) for fid in fids
+                   for c in _routes_cache["cands"].get(fid, [])]
         ranked = await _score_host_model_pairs(
-            pool, role="worker", fleet_role=m if m in FLEET_ROLES else "")
+            pool, role="worker", fleet_role=m if m in FLEET_ROLES else "",
+            need_ctx=need_ctx)
         for cand, mid in ranked:
             hname = cand or HOST_NAME
             if hname in taken:
@@ -7486,7 +7887,14 @@ async def _batch_targets(models: list[str]) -> list[dict]:
                 "cand": cand,
                 "host": hname,
                 "model": mid,
-                "workers": max(1, min(8, int(cap.get((cand, mid), 1)))),
+                # Sized against what this host is doing RIGHT NOW, not its
+                # raw capacity: a host already carrying load -- a live
+                # request, or another batch's own workers -- gets fewer of
+                # THIS batch's workers, so a fresh batch never piles its
+                # whole worker count onto a box a concurrent caller is also
+                # using.
+                "workers": max(1, min(8, int(cap.get((cand, mid), 1))
+                                      - _inflight.get(hname, 0))),
                 "tps": (await tps_for(mid)).get(hname) or _spec_speed(hname),
             })
     return targets
@@ -7508,7 +7916,8 @@ def _batch_flush(bid: int, state: dict, status: str | None = None,
 
 async def _batch_run(bid: int, models: list[str], key: dict,
                      skip: set[int] | None = None,
-                     counts: dict | None = None) -> None:
+                     counts: dict | None = None,
+                     no_fallback: bool = False) -> None:
     """The dispatcher: one shared queue, N workers per serving host."""
     in_path, out_path = _batch_paths(bid)
     state = _batch_live[bid] = {
@@ -7536,7 +7945,7 @@ async def _batch_run(bid: int, models: list[str], key: dict,
         _batch_live.pop(bid, None)
         return
 
-    targets = await _batch_targets(models)
+    targets = await _batch_targets(models, no_fallback, _batch_need_ctx(lines))
     if not targets:
         _batch_flush(bid, state, "error",
                      "no host in the fleet serves any of: " + ", ".join(models))
@@ -7568,6 +7977,14 @@ async def _batch_run(bid: int, models: list[str], key: dict,
     async def worker(tgt: dict) -> None:
         hname = tgt["host"]
         while state["remaining"] > 0 and bid not in _batch_cancel:
+            if host_cooling(hname):
+                # This host just failed something and is sitting out its
+                # cooldown -- wait rather than pulling the very next queued
+                # item (which may be the one it just failed) straight back
+                # onto it. A different host's worker is free to take it in
+                # the meantime; this one resumes once the cooldown lapses.
+                await asyncio.sleep(0.5)
+                continue
             try:
                 idx, req = await asyncio.wait_for(queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
@@ -7577,29 +7994,102 @@ async def _batch_run(bid: int, models: list[str], key: dict,
             body["stream"] = False
             untrack = _track(hname)
             t0 = time.time()
+            resident = tgt["model"] in _routes_cache.get("running", {}).get(hname, set())
             try:
-                r = await _post_chat(tgt["cand"], json.dumps(body).encode())
-                status = r.status_code
+                gen_est = min(1024, int(body.get("max_tokens") or 0)) or 256
+            except (TypeError, ValueError):
+                gen_est = 256
+            deadline = _ttfb_deadline(estimate_prompt_tokens(body), resident) \
+                + gen_est / 3.0
+            status, rbody, raw = 599, {"error": {"message": "no attempt made"}}, b""
+            try:
+                r = await _post_chat(tgt["cand"], json.dumps(body).encode(), deadline)
+                status, raw = r.status_code, r.content
                 try:
-                    rbody: Any = r.json()
+                    rbody = r.json()
                 except ValueError:
                     rbody = {"error": {"message": r.text[:500]}}
-            except (httpx.ConnectError, httpx.ConnectTimeout):
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 # The box is unreachable, which says nothing about the item:
                 # hand it back uncounted and retire this worker.
+                _mark_host_down(hname, COOLDOWN_CONNECT, type(exc).__name__)
+                untrack()
+                await queue.put((idx, req))
+                return
+            except httpx.TimeoutException:
+                # No complete answer within the deadline -- a stall, handled
+                # like a connect failure: hand the item back and retire this
+                # worker rather than looping on a box making no progress.
+                _mark_host_down(hname, COOLDOWN_STALL,
+                                "no answer for " + tgt["model"] + " within "
+                                + str(int(deadline)) + "s")
                 untrack()
                 await queue.put((idx, req))
                 return
             except Exception as exc:  # noqa: BLE001
                 status, rbody = 599, {"error": {"message": str(exc)[:300]}}
-            finally:
-                untrack()
+            # untrack() is deliberately NOT in a finally above: a
+            # ctx_too_long retry below reuses this SAME tracked window
+            # rather than closing and reopening it, so a concurrent request
+            # never sees this host as idle mid-retry -- exactly the gap
+            # _track-at-ask-time exists to close. Every path below either
+            # falls through to the untrack() just past this block, or
+            # (ConnectError/TimeoutException above) already called it and
+            # returned.
+            kind = _classify_upstream_failure(status, "chat/completions", raw)
+            if kind == "ctx_too_long" and get_public_settings().get(
+                    "ctx_retry_live", True):
+                fit_to = _fit_after_ctx_overflow(raw, estimate_prompt_tokens(body))
+                retry_body = None
+                if fit_to:
+                    try:
+                        retry_body = apply_ctx_limit(dict(body), fit_to)
+                    except HTTPException:
+                        retry_body = None
+                if retry_body is not None:
+                    try:
+                        r2 = await _post_chat(
+                            tgt["cand"], json.dumps(retry_body).encode(), deadline)
+                    except (httpx.ConnectError, httpx.ConnectTimeout,
+                            httpx.TimeoutException, httpx.HTTPError):
+                        r2 = None
+                    if r2 is not None and r2.status_code < 400:
+                        remember_model_ctx({(tgt["cand"], tgt["model"]): fit_to})
+                        status, raw = r2.status_code, r2.content
+                        try:
+                            rbody = r2.json()
+                        except ValueError:
+                            rbody = {"error": {"message": r2.text[:500]}}
+                        kind = "ok"
+            untrack()
             ms = int((time.time() - t0) * 1000)
-            if status >= 500:
+            if status >= 500 or kind in ("busy", "ctx_too_long"):
+                # A box that cannot serve this item -- whether it broke, is
+                # busy, or (with or without a same-box fitted retry, per
+                # ctx_retry_live) has proven its window too small -- is not
+                # "the request is bad", it is "not on THIS box". Cooled down
+                # BEFORE requeuing either way, so host_cooling() below always
+                # gates a sibling worker on the same host from immediately
+                # resending the identical request that just failed here,
+                # regardless of whether ctx_retry_live engaged a retry.
+                if kind == "busy":
+                    _mark_host_down(hname, _busy_cooldown_seconds(),
+                                    "HTTP " + str(status) + " for " + tgt["model"])
+                elif kind == "ctx_too_long":
+                    _mark_host_down(hname, COOLDOWN_MIDSTREAM,
+                                    "ctx_too_long for " + tgt["model"])
+                else:
+                    _mark_host_down(hname, COOLDOWN_UPSTREAM_5XX,
+                                    "HTTP " + str(status) + " for " + tgt["model"])
                 attempts[idx] = attempts.get(idx, 0) + 1
                 if attempts[idx] < 3:
+                    # The cooldown just set is the backoff: host_cooling()
+                    # above keeps this worker (and any sibling on the same
+                    # host) off the queue until it lapses, so the requeued
+                    # item is not immediately resent to the box that just
+                    # failed it. A single-host batch still eventually gives
+                    # up and records the failure once attempts are exhausted.
                     await queue.put((idx, req))
-                    await asyncio.sleep(min(15, 2 ** attempts[idx]))
                     continue
             ok = status < 400
             record_usage(key, tgt["model"], "/v1/batches", False, status,
@@ -7664,7 +8154,8 @@ def _batch_status(row: dict) -> dict:
     return out
 
 
-async def batch_submit(key: dict, payload: dict) -> dict:
+async def batch_submit(key: dict, payload: dict,
+                       request: Request | None = None) -> dict:
     reqs = payload.get("requests")
     if not isinstance(reqs, list) or not reqs:
         raise HTTPException(400, "expected {requests: [chat bodies...]}")
@@ -7691,7 +8182,15 @@ async def batch_submit(key: dict, payload: dict) -> dict:
                 raise HTTPException(403, "model(s) not allowed for this key: "
                                     + ", ".join(refused))
 
-    targets = await _batch_targets(models)
+    # The opt-out (requirement 2) has no per-item header on this surface, so
+    # it is decided ONCE, up front, from the submission itself -- a batch
+    # never re-checks it per dequeued request.
+    no_fallback = _no_fallback_requested(request, payload)
+    need_ctx = 0
+    for req in reqs:
+        if isinstance(req, dict):
+            need_ctx = max(need_ctx, estimate_prompt_tokens(req))
+    targets = await _batch_targets(models, no_fallback, need_ctx)
     if not targets:
         raise HTTPException(404, "no host in the fleet serves any of: "
                             + ", ".join(models))
@@ -7723,7 +8222,8 @@ async def batch_submit(key: dict, payload: dict) -> dict:
     await asyncio.to_thread(in_path.write_text, "\n".join(lines) + "\n",
                             "utf-8")
     _batch_tasks[bid] = asyncio.create_task(
-        _batch_run(bid, models, {"id": key.get("id"), "name": key.get("name")}))
+        _batch_run(bid, models, {"id": key.get("id"), "name": key.get("name")},
+                  no_fallback=no_fallback))
     return {"id": bid, "status": "running", "total": len(lines),
             "targets": [{k: t[k] for k in ("host", "model", "workers")}
                         for t in targets]}
@@ -7782,7 +8282,7 @@ async def v1_batches(path: str, request: Request, key: dict):
                 raise HTTPException(400, "body must be JSON")
             if not isinstance(payload, dict):
                 raise HTTPException(400, "body must be an object")
-            return JSONResponse(await batch_submit(key, payload))
+            return JSONResponse(await batch_submit(key, payload, request))
         if request.method == "GET":
             rows = db_query(
                 "SELECT id,created_at,updated_at,label,models,status,total,"
@@ -7856,7 +8356,8 @@ def get_team(key_id: int) -> dict | None:
 
 
 async def _run_subagents(key: dict, team: dict, tasks: list[dict],
-                         pub_key: dict | None = None) -> list[dict]:
+                         pub_key: dict | None = None,
+                         no_fallback: bool = False) -> list[dict]:
     try:
         roster = [str(w) for w in json.loads(team.get("worker_models") or "[]")
                   if str(w).strip()]
@@ -7882,10 +8383,12 @@ async def _run_subagents(key: dict, team: dict, tasks: list[dict],
         model = str(t.get("model") or "").strip()
         if model not in roster:
             model = roster[0]
-        # Same fallback (contract 1.9c) as the primary above, role='worker':
-        # a cold/unreachable worker model must not just fail the whole round.
-        if pub_key:
-            req_row = public_catalogue()["by_public"].get(model)
+        # Same fallback (contract 1.9c and requirement 2) as the primary
+        # above, role='worker': a cold/unreachable/saturated worker model
+        # must not just fail the whole round -- for any team key, not only
+        # a Fleet Pass one.
+        if not no_fallback:
+            req_row = _catalogue_row_for(model)
             if req_row:
                 sub = await pick_fallback(req_row, "worker", get_public_settings())
                 if sub:
@@ -8008,14 +8511,18 @@ async def team_orchestrate(key: dict, team: dict, payload: dict,
     primary = str(team.get("primary_model") or "").strip() \
         or str(payload.get("model") or "")
 
-    # Fallback (contract 1.9c) applies to team keys too -- a team's primary
-    # is exactly the workload ("multi-model teams touching the largest
-    # models") the disclosed substitution feature exists to protect. Decided
-    # once, up front: every round in this loop talks to the same served model.
+    # Fallback (contract 1.9c and requirement 2) applies to every team key,
+    # not only a Fleet Pass one -- a team's primary is exactly the workload
+    # ("multi-model teams touching the largest models") the disclosed
+    # substitution feature exists to protect. Decided once, up front: every
+    # round in this loop, and every worker spawn.round, talks to the same
+    # served model(s). The opt-out is checked once here and carried into
+    # every worker round below.
     pub_key = public_key_for(int(key["id"]))
+    no_fallback = _no_fallback_requested(request, payload)
     fallback: dict[str, str] | None = None
-    if pub_key:
-        req_row = public_catalogue()["by_public"].get(primary)
+    if not no_fallback:
+        req_row = _catalogue_row_for(primary)
         if req_row:
             sub = await pick_fallback(req_row, "primary", get_public_settings())
             if sub:
@@ -8214,7 +8721,8 @@ async def team_orchestrate(key: dict, team: dict, payload: dict,
                 tasks = [t for t in tasks if isinstance(t, dict)
                          and str(t.get("prompt") or "").strip()][:32]
                 if tasks:
-                    results = await _run_subagents(key, team, tasks, pub_key)
+                    results = await _run_subagents(
+                        key, team, tasks, pub_key, no_fallback)
                     sub_calls += len(tasks)
                     sub_fail += sum(1 for r in results if not r.get("ok"))
                     for r in results:
@@ -8751,6 +9259,23 @@ def _email_canon(email: str) -> str:
     return local.split("+", 1)[0] + "@" + domain
 
 
+# What "a live Fleet Pass key" means, everywhere a cap counts one. The status
+# column alone is not it: nothing flips an expired key's row out of 'issued'
+# (roll_window only follows deliberate archival), so counting by status let
+# every key that ever expired occupy its domain's and the fleet's global
+# allowance forever -- a returning requester whose old key had merely expired
+# was told the domain or pool was full. Takes one bind parameter: now().
+# A date-only expiry means the end of that day, exactly as
+# /public/api/key-status reports it.
+_LIVE_PUBLIC_KEYS_SQL = (
+    "FROM public_keys pk JOIN api_keys k ON k.id=pk.key_id "
+    "WHERE pk.status='issued' AND pk.archived_at IS NULL "
+    "AND k.archived_at IS NULL AND (k.expires_at IS NULL OR "
+    "(CASE WHEN length(k.expires_at)=10 THEN k.expires_at || 'T23:59:59+00:00' "
+    "ELSE k.expires_at END) > ?)"
+)
+
+
 def public_eligibility(email: str) -> dict:
     """Pure function: what should happen for this email address.
 
@@ -8810,6 +9335,26 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
     "review_unlisted": True,
     "fallback_when": "not_resident",
     "fallback_tolerance": 0.5,
+    # Requirement 2's busy trigger: when EVERY box serving the requested
+    # model is saturated (no free decode slot), pick_fallback() may offer a
+    # substitute the way it already does for unreachable/not_resident. A
+    # fleet-wide toggle, not Fleet-Pass-only -- see pick_fallback() and the
+    # routing-policy section of README.md.
+    "substitute_when_busy": True,
+    # The reactive same-box context-overflow retry (openai_proxy, fleet_chat):
+    # a box that rejects a prompt as too long for its window gets ONE retry
+    # at a size fitted to what it actually reported, before routing moves on
+    # to the next candidate. Ships on, but conservative -- see
+    # _classify_upstream_failure()'s docstring for exactly which upstream
+    # error shapes count as "too long" versus an ordinary client error that
+    # is returned unchanged.
+    "ctx_retry_live": True,
+    # How long a box that answered 429/503 ("busy", not broken) sits out of
+    # routing before it is offered again -- short on purpose, so the very
+    # next request does not immediately re-hit a box that is about to free
+    # up, but the request after that can. Contrast COOLDOWN_UPSTREAM_5XX
+    # (45s), which is for a box that actually failed.
+    "busy_cooldown_seconds": 5,
     "fallback_notice": True,
     "fallback_notice_text": (
         "[Fleet notice: {requested} was not available, so this reply came "
@@ -8883,7 +9428,10 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
         "Node (openai SDK):\n"
         "  const client = new OpenAI({{ baseURL: \"{base_url}\", apiKey: \"{key}\",\n"
         "    defaultHeaders: {{ \"User-Agent\": \"fleet-pass/1\" }} }});\n\n"
-        "Cline: pick \"OpenAI Compatible\", paste the base URL and key.\n\n"
+        "Cline: pick \"OpenAI Compatible\", paste the base URL and key, and "
+        "set Context Window Size to {ctx} -- Cline cannot read it from the "
+        "server, and an old value left in the provider profile silently "
+        "caps every conversation.\n\n"
         "Open WebUI: Settings -> Connections -> OpenAI API, same base URL and key.\n\n"
         "That User-Agent line keeps the official SDKs clear of AI-crawler "
         "filtering at the CDN in front of the fleet, which answers their "
@@ -8939,6 +9487,8 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
         "Base URL: {base_url}\n"
         "API key: {key}\n"
         "Model: {model}\n"
+        "Context window: {ctx} tokens (set this in your client -- Cline calls "
+        "it Context Window Size; it cannot be read from the server).\n"
         "Any OpenAI-compatible client works (curl, the openai SDKs, Cline, "
         "Open WebUI); set the User-Agent header to anything but the SDK "
         "default. Expires {expires}; {limits}."
@@ -8958,6 +9508,7 @@ _PUBLIC_SETTING_BOUNDS: dict[str, tuple[float, float]] = {
     "demo_ip_rph": (1, 1000), "demo_max_tokens": (64, 8192),
     "demo_max_prompt_chars": (200, 200000),
     "auto_issue_ctx": (1024, 1048576), "auto_issue_daily_cap": (1, 1000),
+    "busy_cooldown_seconds": (1, 300),
 }
 
 
@@ -9246,6 +9797,41 @@ def order_public_models(rows: list[dict], settings: dict | None = None) -> list[
     return sorted(rows, key=key)
 
 
+def _catalogue_row_for(model: str) -> dict | None:
+    """The public catalogue row `model` resolves to, whether it was named by
+    its public id, by a fleet id one of those rows claims, or by a
+    FLEET_ROLES policy name -- the same by_public -> by_fleet fallback
+    resolve_targets() already applies below. A bare `by_public.get(model)`
+    only ever matches a public_id, which almost no plain bearer-key or
+    downstream-app request uses -- they ask by fleet id or role name -- so a
+    caller that used the bare lookup to decide whether a substitute exists
+    (pick_fallback's callers) silently never found one for that traffic."""
+    cat = public_catalogue()
+    row = cat["by_public"].get(model)
+    if row is not None:
+        return row
+    served_as = cat["by_fleet"].get(model)
+    if served_as:
+        return cat["by_public"].get(served_as)
+    return None
+
+
+def _no_fallback_requested(request: Request | None = None,
+                           payload: dict | None = None) -> bool:
+    """The per-request opt-out (requirement 2): the `X-Fleet-No-Fallback`
+    header for a caller that can set one, or the equivalent
+    `fleet_no_fallback` body field for one that can't (a /v1/batches
+    submission has no per-hop header of its own). Any value but empty/'0'/
+    'false'/'no' opts out; the common case is '1'."""
+    if request is not None:
+        v = request.headers.get("x-fleet-no-fallback")
+        if v is not None and str(v).strip().lower() not in ("", "0", "false", "no"):
+            return True
+    if isinstance(payload, dict) and payload.get("fleet_no_fallback"):
+        return True
+    return False
+
+
 async def resolve_targets(model: str, role: str = "primary", prompt_tokens: int = 0,
                           gen_tokens: int = 256, need_ctx: int = 0,
                           ) -> list[tuple[str, str]]:
@@ -9261,12 +9847,7 @@ async def resolve_targets(model: str, role: str = "primary", prompt_tokens: int 
     await model_routes()
     kw = dict(role=role, prompt_tokens=prompt_tokens, gen_tokens=gen_tokens,
               need_ctx=need_ctx)
-    cat = public_catalogue()
-    row = cat["by_public"].get(model)
-    if row is None:
-        served_as = cat["by_fleet"].get(model)
-        if served_as:
-            row = cat["by_public"].get(served_as)
+    row = _catalogue_row_for(model)
     if row is not None:
         fids = _row_fleet_ids(row) or [model]
         pairs: list[tuple[str, str]] = []
@@ -9382,28 +9963,78 @@ def catalogue_ctx(row: dict) -> dict:
             "hosts": per_host}
 
 
+def _catalogue_row_all_saturated(fids: list[str]) -> bool:
+    """True when every (host, fleet_id) pair that could serve `fids` right
+    now has no free decode slot -- pick_fallback's busy trigger (requirement
+    2), reusing _host_saturated so 'occupied' can never mean something
+    different here than it does to the scorer or demo_host_policy. False
+    (never trips the busy trigger) when the row has no online candidate at
+    all -- that is the unreachable branch's job, not this one's."""
+    cands = _routes_cache.get("cands", {})
+    any_cand = False
+    for f in fids:
+        for cand in cands.get(f, []):
+            any_cand = True
+            if not _host_saturated(cand, f):
+                return False
+    return any_cand
+
+
+def _catalogue_row_has_free_good_home(fids: list[str], role: str) -> bool:
+    """A (host, fleet_id) pair for this row that is NOT saturated right now
+    AND is a box worth answering from: already resident in the top policy
+    tiers (mirrors _catalogue_row_resident_well), or a box the model is
+    worth cold-loading onto (preload_capable). Used only to rank a busy-
+    trigger substitute: escaping a queue only pays off if the box it lands
+    on is actually a good one, not merely a box that happens to answer."""
+    cands = _routes_cache.get("cands", {})
+    running = _routes_cache.get("running", {})
+    for f in fids:
+        for cand in cands.get(f, []):
+            if _host_saturated(cand, f):
+                continue
+            hname = cand or HOST_NAME
+            if (f in running.get(hname, set())
+                    and host_tier(cand, f, "primary")[0] <= 1):
+                return True
+            if preload_capable(cand, f):
+                return True
+    return False
+
+
 async def pick_fallback(req_row: dict, role: str, settings: dict) -> dict | None:
     """Choose a substitute catalogue row for `req_row`, or None when the
     original should be tried as asked (either it is fine, or nothing in
     tolerance both fits the role and has anywhere to run).
 
     role: 'single' (any enabled row), 'primary' (allow_primary), or 'worker'
-    (allow_worker) -- mirrors the flags a Fleet Pass team composes from."""
+    (allow_worker) -- mirrors the flags a Fleet Pass team composes from.
+
+    Three independent triggers can put a row up for substitution: it is
+    unreachable, it is reachable but only resident somewhere not worth
+    answering from ('not_resident'), or -- requirement 2, gated on its own
+    `substitute_when_busy` toggle so it can be turned off without touching
+    `fallback_when` -- every box that serves it right now is saturated. The
+    first two are mutually exclusive (`fallback_when` picks one); busy can
+    fire alongside whichever of them is active, because a saturated box is
+    exactly the case neither of those two was built to catch."""
     when = str(settings.get("fallback_when", "not_resident"))
     if when == "never":
         return None
     await model_routes()
     req_fids = _row_fleet_ids(req_row)
     online = _catalogue_row_online(req_fids)
+    busy = (online and settings.get("substitute_when_busy", True)
+            and _catalogue_row_all_saturated(req_fids))
     if when == "unreachable":
-        if online:
+        if online and not busy:
             return None
     elif when == "not_resident":
         # "Resident" on the CPU backstop, or on a card the model spills out
         # of, does not count: that is the one case where a warm model is
         # slower than a cold one on the right box, and exactly the case the
         # qwen3.6-35b-on-gpu-laptop-1 incident was.
-        if online and _catalogue_row_resident_well(req_fids, role):
+        if online and not busy and _catalogue_row_resident_well(req_fids, role):
             return None
     else:
         return None
@@ -9429,21 +10060,42 @@ async def pick_fallback(req_row: dict, role: str, settings: dict) -> dict | None
         if not _catalogue_row_online(cand_fids):
             continue
         resident = _catalogue_row_resident_well(cand_fids, role)
-        key = (
-            0 if resident else 1,
-            abs(cand_active - req_active),
-            abs(float(row.get("params_b") or 0) - req_params),
-        )
+        if busy:
+            # Escaping a queue is the point of THIS trigger: a candidate
+            # with a free slot beats a resident-but-saturated one, reversing
+            # the ordinary residency preference just for this one case.
+            free = _catalogue_row_has_free_good_home(cand_fids, role)
+            key = (
+                0 if free else 1,
+                0 if resident else 1,
+                abs(cand_active - req_active),
+                abs(float(row.get("params_b") or 0) - req_params),
+            )
+        else:
+            key = (
+                0 if resident else 1,
+                abs(cand_active - req_active),
+                abs(float(row.get("params_b") or 0) - req_params),
+            )
         if best_key is None or key < best_key:
             best_row, best_key = row, key
+    if best_row is None:
+        return None
+    best_fids = _row_fleet_ids(best_row)
     # A swap has to buy something. Under "not_resident" the whole point is to
     # answer from a model already in memory instead of paying a cold load, so
     # if the best candidate would ALSO have to be loaded, the caller is better
     # served by the model they actually asked for: same wait, and it is the
     # one they chose. Seen in the wild on the first team run -- qwen3.5-4b was
-    # swapped for nemotron-3-nano-4b, neither resident, for no gain.
-    if (best_row is not None and when == "not_resident"
-            and online and not _catalogue_row_resident_well(_row_fleet_ids(best_row), role)):
+    # swapped for nemotron-3-nano-4b, neither resident, for no gain. Under the
+    # busy trigger the equivalent question is whether the substitute has
+    # anywhere free to run at all -- a swap to a model that is ALSO
+    # saturated everywhere trades one queue for another, no better than the
+    # one the caller already asked for.
+    if when == "not_resident" and online and not busy \
+            and not _catalogue_row_resident_well(best_fids, role):
+        return None
+    if busy and not _catalogue_row_has_free_good_home(best_fids, role):
         return None
     return best_row
 
@@ -9842,7 +10494,8 @@ def render_key_email(row: dict, raw_key: str, settings: dict) -> tuple[str, str,
     intro = str(settings.get("email_intro") or "")
     try:
         setup = str(settings.get("email_setup") or "").format(
-            base_url=base_url, key=raw_key, model_id=setup_model)
+            base_url=base_url, key=raw_key, model_id=setup_model,
+            ctx=int(row.get("ctx") or 0))
     except (KeyError, IndexError):
         setup = str(settings.get("email_setup") or "")
     disclaimer = str(settings.get("email_disclaimer") or "")
@@ -9940,7 +10593,8 @@ def public_key_bundle(row: dict, raw_key: str, settings: dict) -> dict:
     # take the response down with it. The raw template is the fallback.
     try:
         setup = template.format(base_url=base_url, key=raw_key, model=model_id,
-                                expires=expires_date, limits=limits)
+                                expires=expires_date, limits=limits,
+                                ctx=int(row.get("ctx") or 0))
     except Exception:  # noqa: BLE001 -- see above
         setup = template
     return {
@@ -11050,10 +11704,8 @@ async def public_request(request: Request) -> JSONResponse:
         canon = _email_canon(email)
         live = [
             r for r in db_query(
-                "SELECT pk.email FROM public_keys pk JOIN api_keys k ON k.id=pk.key_id "
-                "WHERE pk.domain=? AND pk.status='issued' AND pk.archived_at IS NULL "
-                "AND k.archived_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > ?)",
-                (domain, now()),
+                "SELECT pk.email " + _LIVE_PUBLIC_KEYS_SQL + " AND pk.domain=?",
+                (now(), domain),
             ) if _email_canon(str(r["email"])) == canon
         ]
         if len(live) >= per_email:
@@ -11082,16 +11734,15 @@ async def public_request(request: Request) -> JSONResponse:
 
     if elig["verdict"] == "allow":
         dcount = db_query(
-            "SELECT COUNT(*) c FROM public_keys WHERE domain=? AND status='issued' "
-            "AND archived_at IS NULL",
-            (domain,),
+            "SELECT COUNT(*) c " + _LIVE_PUBLIC_KEYS_SQL + " AND pk.domain=?",
+            (now(), domain),
         )[0]["c"]
         if int(dcount) >= int(settings["max_keys_per_domain"]):
             log_public_event("rate_limited", email=email, ip=ip, detail="domain_cap")
             raise PublicError(429, "domain_cap", "this domain has reached its key limit")
 
     live_count = db_query(
-        "SELECT COUNT(*) c FROM public_keys WHERE status='issued' AND archived_at IS NULL"
+        "SELECT COUNT(*) c " + _LIVE_PUBLIC_KEYS_SQL, (now(),)
     )[0]["c"]
     if int(live_count) >= int(settings["max_live_keys"]):
         log_public_event("rate_limited", email=email, ip=ip, detail="global_cap")
@@ -11254,8 +11905,11 @@ def demo_ip_used(ip: str) -> int:
 def demo_host_policy(targets: list[tuple[str, str]], settings: dict) -> list[tuple[str, str]]:
     """Apply the demo's host policy to a scored candidate list: drop every
     excluded host, then move the preferred hosts to the front in the order
-    they were listed. A stable sort, so within each band the fleet scorer's
-    own order (resident, idle, fast) still decides."""
+    they were listed -- but never a busy preferred box ahead of an idle
+    non-preferred one. Saturation is checked first and preference only
+    breaks a tie among boxes that are equally free (or equally saturated);
+    a stable sort, so within each band the fleet scorer's own order
+    (resident, idle, fast) still decides."""
     exclude = set(settings.get("demo_exclude_hosts") or [])
     prefer = list(settings.get("demo_prefer_hosts") or [])
     kept = [t for t in targets if (t[0] or HOST_NAME).lower() not in exclude]
@@ -11264,7 +11918,7 @@ def demo_host_policy(targets: list[tuple[str, str]], settings: dict) -> list[tup
         n = (t[0] or HOST_NAME).lower()
         return prefer.index(n) if n in prefer else len(prefer)
 
-    return sorted(kept, key=band)
+    return sorted(kept, key=lambda t: (_host_saturated(t[0], t[1]), band(t)))
 
 
 async def demo_candidates(settings: dict, prompt_tokens: int = 0, gen_tokens: int = 256,
@@ -11539,19 +12193,24 @@ async def demo_stream(request: Request, msgs: list[dict], settings: dict, ip: st
                 return
             if resp.status_code >= 400:
                 st = int(resp.status_code)
-                body_txt = ""
+                raw_body, body_txt = b"", ""
                 try:
-                    body_txt = (await resp.aread()).decode("utf-8", "replace")[:300]
+                    raw_body = await resp.aread()
+                    body_txt = raw_body.decode("utf-8", "replace")[:300]
                 except Exception:  # noqa: BLE001
                     pass
                 await _quiet_close(resp, peer_client)
                 resp, peer_client = None, None
                 tried.append(c["box"] + " (HTTP " + str(st) + ")")
-                if more and _upstream_failed(st, "chat/completions"):
-                    _mark_host_down(hname, COOLDOWN_UPSTREAM_5XX, "demo: HTTP " + str(st) + " for " + fid)
+                kind = _classify_upstream_failure(st, "chat/completions", raw_body)
+                cooldown = _busy_cooldown_seconds() if kind == "busy" else COOLDOWN_UPSTREAM_5XX
+                if kind == "model_missing":
+                    _routes_cache["t"] = 0.0
+                if more and _upstream_failed(st, "chat/completions", raw_body):
+                    _mark_host_down(hname, cooldown, "demo: HTTP " + str(st) + " for " + fid)
                     continue
-                if st >= 500:
-                    _mark_host_down(hname, COOLDOWN_UPSTREAM_5XX, "demo: HTTP " + str(st) + " (no other host)")
+                if st >= 500 or kind == "busy":
+                    _mark_host_down(hname, cooldown, "demo: HTTP " + str(st) + " (no other host)")
                 status_out = 502
                 # The engine's own words stay in the journal: an error body
                 # from llama-server or Ollama names model files and paths,
