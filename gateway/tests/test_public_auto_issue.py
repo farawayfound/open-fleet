@@ -80,6 +80,12 @@ class TestMint:
         client.put("/admin/api/public/settings", headers=admin_headers, json={"auto_issue_ctx": 8192})
         assert _mint(client, admin_headers).json()["ctx"] == 8192
 
+    def test_setup_text_states_the_context_window(self, client, admin_headers, fake_fleet):
+        """The setup block a service pastes into a document carries the
+        granted window, so the recipient can configure their client to it."""
+        body = _mint(client, admin_headers, ctx=16384).json()
+        assert "Context window: " + str(body["ctx"]) + " tokens" in body["setup_text"]
+
     def test_caller_may_pick_another_enabled_model_but_not_a_disabled_one(
         self, client, admin_headers, fake_fleet
     ):
