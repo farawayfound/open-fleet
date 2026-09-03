@@ -489,6 +489,133 @@ class TestFallback:
 
 
 # ---------------------------------------------------------------------------
+# requirement 2: substitution is fleet-wide, not a Fleet Pass perk -- every
+# bearer key gets it, with a per-request opt-out.
+# ---------------------------------------------------------------------------
+
+_CHAT_OK = {
+    "id": "chatcmpl-1", "object": "chat.completion", "model": "m",
+    "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "hi"}}],
+    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+}
+
+
+class TestCatalogueRowFor:
+    def test_resolves_a_public_id_a_fleet_id_and_a_role_name(self, fake_fleet):
+        gw.public_catalogue(force=True)
+        assert gw._catalogue_row_for("qwen3.6-35b-a3b")["public_id"] == "qwen3.6-35b-a3b"
+        # "qwen3.6-35b" is the fleet id, not the public_id -- a bare
+        # by_public lookup (what every pick_fallback call site used before
+        # this) misses it entirely.
+        assert gw._catalogue_row_for("qwen3.6-35b")["public_id"] == "qwen3.6-35b-a3b"
+        # A FLEET_ROLES policy name (e.g. "default") is a name no catalogue
+        # row claims -- there is nothing to substitute.
+        assert gw._catalogue_row_for("default") is None
+        assert gw._catalogue_row_for("no-such-model") is None
+
+
+class TestFallbackAppliesFleetWide:
+    def test_plain_bearer_key_gets_fallback_substitution(
+            self, client, fake_fleet, monkeypatch):
+        # nemotron3.5-lightning-30b has no candidate at all in the fake
+        # fleet; qwen3.6-35b-a3b (TestFallback's own substitute for this
+        # row) does. Before requirement 2 this only applied to a Fleet Pass
+        # 'single' key -- a plain mint_key() bearer key got nothing.
+        raw, _meta = gw.mint_key("plain-fallback-1")
+
+        async def fake_send(self, request, stream=False, **kw):
+            return httpx.Response(200, request=request, json=_CHAT_OK)
+
+        monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
+        r = client.post(
+            "/v1/chat/completions", headers={"Authorization": "Bearer " + raw},
+            json={"model": "nemotron3.5-lightning-30b",
+                 "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["x_fleet"]["requested"] == "nemotron3.5-lightning-30b"
+        assert body["x_fleet"]["served"] == "qwen3.6-35b-a3b"
+        assert r.headers.get("x-fleet-fallback") is not None
+
+    def test_opt_out_header_suppresses_substitution(
+            self, client, fake_fleet, monkeypatch):
+        raw, _meta = gw.mint_key("plain-fallback-2")
+
+        async def fake_send(self, request, stream=False, **kw):
+            return httpx.Response(200, request=request, json=_CHAT_OK)
+
+        monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer " + raw, "X-Fleet-No-Fallback": "1"},
+            json={"model": "nemotron3.5-lightning-30b",
+                 "messages": [{"role": "user", "content": "hi"}]},
+        )
+        # No candidate serves the model as asked, and no substitute was
+        # sought -- an honest 404, not a silently-served substitute.
+        assert r.status_code == 404, r.text
+
+    def test_opt_out_body_field_works_when_no_header_is_set(
+            self, client, fake_fleet, monkeypatch):
+        raw, _meta = gw.mint_key("plain-fallback-3")
+
+        async def fake_send(self, request, stream=False, **kw):
+            return httpx.Response(200, request=request, json=_CHAT_OK)
+
+        monkeypatch.setattr(httpx.AsyncClient, "send", fake_send)
+        r = client.post(
+            "/v1/chat/completions", headers={"Authorization": "Bearer " + raw},
+            json={"model": "nemotron3.5-lightning-30b", "fleet_no_fallback": True,
+                 "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 404, r.text
+
+    async def test_team_worker_substitution_applies_to_a_plain_team_key(
+            self, monkeypatch, fake_fleet):
+        # _run_subagents' worker substitution used to be gated on `pub_key`
+        # (a Fleet Pass row) -- a plain bearer key's team still deserves a
+        # cold/unreachable worker model not failing the whole round.
+        raw, meta = gw.mint_key("plain-team-1")
+        key_row = gw.db_query("SELECT * FROM api_keys WHERE id=?", (meta["id"],))[0]
+        team = {"worker_models": json.dumps(["nemotron3.5-lightning-30b"]),
+               "primary_model": "nemotron3.5-lightning-30b",
+               "ctx_limit": None, "max_workers": 2}
+        seen_models: list[str] = []
+
+        async def fake_fleet_chat(key, body, endpoint, ctx_limit=None, **kw):
+            seen_models.append(str(body.get("model")))
+            return 200, {"choices": [{"index": 0, "finish_reason": "stop",
+                                      "message": {"role": "assistant", "content": "ok"}}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                                 "total_tokens": 2}}, gw.HOST_NAME, 0
+
+        monkeypatch.setattr(gw, "fleet_chat", fake_fleet_chat)
+        out = await gw._run_subagents(key_row, team, [{"prompt": "hi"}], pub_key=None)
+        assert seen_models == ["qwen3.6-35b-a3b"]
+        assert out[0]["ok"] is True
+
+    async def test_team_worker_opt_out_is_honoured(self, monkeypatch, fake_fleet):
+        raw, meta = gw.mint_key("plain-team-2")
+        key_row = gw.db_query("SELECT * FROM api_keys WHERE id=?", (meta["id"],))[0]
+        team = {"worker_models": json.dumps(["nemotron3.5-lightning-30b"]),
+               "primary_model": "nemotron3.5-lightning-30b",
+               "ctx_limit": None, "max_workers": 2}
+        seen_models: list[str] = []
+
+        async def fake_fleet_chat(key, body, endpoint, ctx_limit=None, **kw):
+            seen_models.append(str(body.get("model")))
+            return 404, {"error": {"message": "no host serves this model"}}, "", 0
+
+        monkeypatch.setattr(gw, "fleet_chat", fake_fleet_chat)
+        out = await gw._run_subagents(key_row, team, [{"prompt": "hi"}], pub_key=None,
+                                      no_fallback=True)
+        assert seen_models == ["nemotron3.5-lightning-30b"]
+        assert out[0]["ok"] is False
+
+
+# ---------------------------------------------------------------------------
 # team fallback (contract 1.9c): a team key's primary/worker selection must
 # get the same substitution a single key's does -- pick_fallback's own
 # role='primary'/'worker' branches were previously never invoked.
@@ -800,6 +927,59 @@ class TestPublicRequestFlow:
         assert r2.status_code == 429
         assert r2.json()["code"] == "global_cap"
 
+    def test_expired_keys_do_not_count_toward_domain_cap(
+            self, client, intake_headers, captured_mail, fake_fleet):
+        """An expired key's row keeps status='issued' (nothing archives it),
+        so the domain cap must count key liveness, not row status -- otherwise
+        every key a domain ever held occupies its allowance forever."""
+        gw.set_public_settings({"ip_requests_per_day": 100,
+                                "max_keys_per_domain": 1})
+        one = {"email": "a@nasa.gov", "kind": "single", "model": "gemma4-31b-qat",
+              "ctx": 8192, "accept_terms": True}
+        two = {"email": "b@nasa.gov", "kind": "single", "model": "gemma4-31b-qat",
+              "ctx": 8192, "accept_terms": True}
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=one).status_code == 200
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=two).status_code == 429
+        gw.db_exec("UPDATE api_keys SET expires_at='2000-01-01T00:00:00+00:00'")
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=two).status_code == 200
+
+    def test_expired_keys_do_not_count_toward_global_cap(
+            self, client, intake_headers, captured_mail, fake_fleet):
+        gw.set_public_settings({"ip_requests_per_day": 100,
+                                "max_live_keys": 1})
+        one = {"email": "a@nasa.gov", "kind": "single", "model": "gemma4-31b-qat",
+              "ctx": 8192, "accept_terms": True}
+        two = {"email": "b@army.mil", "kind": "single", "model": "gemma4-31b-qat",
+              "ctx": 8192, "accept_terms": True}
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=one).status_code == 200
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=two).status_code == 429
+        gw.db_exec("UPDATE api_keys SET expires_at='2000-01-01T00:00:00+00:00'")
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=two).status_code == 200
+
+    def test_date_only_expiry_is_live_until_end_of_day(
+            self, client, intake_headers, captured_mail, fake_fleet):
+        """A date-only expires_at means the end of that day -- the same
+        reading /public/api/key-status gives it. A key expiring today still
+        counts as live, so a duplicate request is still refused."""
+        from datetime import datetime, timezone
+        gw.set_public_settings({"ip_requests_per_day": 100,
+                                "max_keys_per_email": 1})
+        body = {"email": "today@nasa.gov", "kind": "single",
+               "model": "gemma4-31b-qat", "ctx": 8192, "accept_terms": True}
+        assert client.post("/public/api/request", headers=intake_headers,
+                          json=body).status_code == 200
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        gw.db_exec("UPDATE api_keys SET expires_at=?", (today,))
+        r = client.post("/public/api/request", headers=intake_headers, json=body)
+        assert r.status_code == 409
+        assert r.json()["code"] == "already_active"
+
     def test_missing_intake_token_rejected(self, client):
         r = client.post(
             "/public/api/request",
@@ -931,6 +1111,10 @@ class TestV1ModelsFiltering:
         assert r.status_code == 200
         data = r.json()["data"]
         assert [m["id"] for m in data] == ["gemma4-31b-qat"]
+        # The one field a client can read the key's window from: without it,
+        # a stale context figure in the client's provider profile outlives
+        # every new key.
+        assert [m["context_length"] for m in data] == [8192]
 
     def test_team_key_sees_team_and_primary(self, client, intake_headers,
                                             captured_mail, fake_fleet):
@@ -945,8 +1129,22 @@ class TestV1ModelsFiltering:
                    if line.startswith("key: "))
         r = client.get("/v1/models", headers={"Authorization": "Bearer " + raw})
         assert r.status_code == 200
-        ids = [m["id"] for m in r.json()["data"]]
-        assert ids == ["team", "qwen3.6-35b-a3b"]
+        data = r.json()["data"]
+        assert [m["id"] for m in data] == ["team", "qwen3.6-35b-a3b"]
+        assert [m["context_length"] for m in data] == [8192, 8192]
+
+    def test_key_email_setup_tells_the_client_its_window(
+            self, client, intake_headers, captured_mail, fake_fleet):
+        """The default setup text now names the granted window next to the
+        Cline instruction, so the number the key enforces is the number the
+        user configures -- not whatever their provider profile last held."""
+        client.post(
+            "/public/api/request", headers=intake_headers,
+            json={"email": "window@nasa.gov", "kind": "single",
+                 "model": "gemma4-31b-qat", "ctx": 8192, "accept_terms": True},
+        )
+        text = captured_mail[-1]["text"]
+        assert "set Context Window Size to 8192" in text
 
 
 # ---------------------------------------------------------------------------
