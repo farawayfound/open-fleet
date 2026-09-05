@@ -63,12 +63,13 @@ def _isolate_preload_state():
 
 
 # ---------------------------------------------------------------------------
-# host_reserved / DEFAULT_SPECS: exactly the six personal machines
+# host_reserved / DEFAULT_SPECS: exactly the eight personal machines
 # ---------------------------------------------------------------------------
 
 class TestHostReservedDefaultSpecs:
     def test_default_specs_marks_exactly_the_personal_machines(self):
-        reserved = {"apu-tablet-1", "apu-tablet-2", "gpu-desktop-2", "gpu-laptop-2", "gpu-desktop-1", "mac-laptop-2"}
+        reserved = {"apu-tablet-1", "apu-tablet-2", "gpu-desktop-2", "gpu-laptop-2", "gpu-desktop-1",
+                    "omen", "mac-laptop-2", "masternode"}
         not_reserved = {"apu-box-1", "mac-laptop-1", "gpu-laptop-1", "mac-desktop-1", "cpu-box-1",
                          "server-1", "mini-pc-1", "hub"}
         assert reserved | not_reserved == set(gw.DEFAULT_SPECS)

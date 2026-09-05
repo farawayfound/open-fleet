@@ -21,13 +21,19 @@ spelling:
 |---|---|---|---|
 | Linux + systemd | apu-box-1, hub, cpu-box-1, server-1, gpu-laptop-1 | `systemd` units | `/etc/llmstack/gateway.env` |
 | macOS + cron | mac-desktop-1, mac-laptop-2, mac-laptop-1 | `@reboot` + a 5-minute keepalive | `~/llmstack/gateway.env` |
-| Windows + schtasks | apu-tablet-1, apu-tablet-2, mini-pc-1, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1 | SYSTEM scheduled tasks | `C:\llmstack\gateway.env.cmd` |
+| Windows + schtasks | apu-tablet-1, apu-tablet-2, mini-pc-1, omen, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1 | SYSTEM scheduled tasks | `C:\llmstack\gateway.env.cmd` |
 
 | engine | boxes | upstream |
 |---|---|---|
-| llama.cpp behind llama-swap | apu-box-1, apu-tablet-2, mac-laptop-2, mac-laptop-1, gpu-desktop-1, gpu-laptop-1 | `127.0.0.1:8081` |
+| llama.cpp behind llama-swap | apu-box-1, apu-tablet-2, mac-laptop-2, mac-laptop-1, omen, gpu-desktop-2, gpu-desktop-1, server-1, gpu-laptop-1 | `127.0.0.1:8081` |
 | Ollama | mac-desktop-1, cpu-box-1, mini-pc-1, gpu-laptop-2 | `127.0.0.1:11434` |
 | none (routes, does not serve) | apu-tablet-1, hub | `8081`, where nothing listens |
+
+server-1 and gpu-desktop-2 appeared in neither engine row until 2026-09-03, which
+is what a table maintained by hand does: server-1 runs a llama.cpp it built
+itself and keeps where it built it (`/home/user/llama.cpp/build/bin`), and
+gpu-desktop-2 is a staging peer that serves nothing most of the time, so each
+looked like a special case rather than the ordinary llama.cpp box it is.
 
 Three shapes, three engines, and per-box identity sprinkled through the
 middle. Five values — `LLMSTACK_BIND`, `LLMSTACK_PORT`, `LLMSTACK_UPSTREAM`,

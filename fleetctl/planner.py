@@ -84,6 +84,13 @@ SCHEMA: dict[str, dict[str, tuple[type | tuple, bool]]] = {
         "visible_devices": (str, False),
         "models_from_upstream": (bool, False),
         "build_from_source": (bool, False),
+        # Pin the release-asset pattern when the default matches more than one
+        # build and the wrong one wins. masternode is why: the CUDA entry
+        # matches both -cuda-12.4- and -cuda-13.3-, and 12.4 carries no sm_120
+        # kernels, so a Blackwell card ran everything through PTX JIT at half
+        # the tokens/s. Not a global "newest wins" -- 13.3 drops sm_50..75, so
+        # a pre-Ampere box still needs 12.4.
+        "llama_asset": (str, False),
     },
     "sizing": {
         "vram_gb": ((int, float), False),

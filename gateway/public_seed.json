@@ -49,5 +49,11 @@
   "description": "DeepSeek V4 Flash (0731): 284B stored, 13B active, MIT-licensed, built for long context and agentic work. Runs here at a low bit rate on the one box that can hold it -- the slowest cold load in the fleet."},
  {"public_id": "glm-4.7-flash", "family": "GLM", "name": "GLM-4.7-Flash", "vendor": "Z.ai", "arch": "moe", "params_b": 30, "active_b": 3,
   "fleet_ids": ["glm-4.7-flash"], "allow_primary": 1, "allow_worker": 1, "ctx_max": 262144, "ctx_default": 32768, "sort": 150,
-  "description": "Z.ai's 30B-A3B mixture of experts: capable and efficient at general chat and tool calling for the memory it occupies."}
+  "description": "Z.ai's 30B-A3B mixture of experts: capable and efficient at general chat and tool calling for the memory it occupies."},
+ {"public_id": "ornith-1.5-35b-a3b", "family": "Ornith", "name": "Ornith 1.5 35B-A3B", "vendor": "ornith-ai", "arch": "moe", "params_b": 35, "active_b": 3,
+  "fleet_ids": ["ornith-1.5-35b"], "allow_primary": 1, "allow_worker": 1, "ctx_max": 262144, "ctx_default": 32768, "sort": 160,
+  "description": "A 35B-A3B mixture of experts from ornith-ai: 256 experts with eight live per token, so it decodes at a small model's pace on any box that can hold it. Its own vision projector ships alongside the weights, it keeps a thinking phase, and the full 262k window it was trained for fits in a q8_0 cache. The model the fleet's `default` role now leads with."},
+ {"public_id": "tiel-coder-35b-a3b", "family": "Tiel", "name": "Tiel Coder 35B-A3B", "vendor": "community (peculiar-ragdoll, Qwen 3.6 fine-tune)", "arch": "moe", "params_b": 35, "active_b": 3,
+  "fleet_ids": ["tiel-coder-35b"], "allow_primary": 1, "allow_worker": 1, "ctx_max": 262144, "ctx_default": 32768, "sort": 170,
+  "description": "A coding fine-tune of the Qwen 3.6 35B-A3B mixture of experts, with a vision projector kept from the base. Same 3B-active economics and same 262k window as its parent, leaning to code, patches and tool calls -- the model the fleet's `coder` role leads with."}
 ]

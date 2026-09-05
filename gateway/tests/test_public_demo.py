@@ -23,12 +23,14 @@ def _isolate_routing():
     snapshot = dict(gw._routes_cache)
     gw._inflight.clear()
     gw._host_cooldown.clear()
+    gw._silent_answer.clear()
     gw._host_last_used.clear()
     yield
     gw._routes_cache.clear()
     gw._routes_cache.update(snapshot)
     gw._inflight.clear()
     gw._host_cooldown.clear()
+    gw._silent_answer.clear()
     gw._host_last_used.clear()
 
 
@@ -133,6 +135,25 @@ class TestHostPolicy:
     def test_the_hub_itself_is_matched_by_its_own_name(self):
         settings = {"demo_prefer_hosts": [], "demo_exclude_hosts": [gw.HOST_NAME.lower()]}
         assert gw.demo_host_policy([("", "a"), ("p", "a")], settings) == [("p", "a")]
+
+    def test_a_saturated_preferred_host_does_not_beat_a_free_one(self):
+        # Requirement 1: preference is a tiebreak among equally-free (or
+        # equally-saturated) boxes now, never an override of availability --
+        # a busy gpu-laptop-1 must not jump ahead of an idle mac-desktop-1 just
+        # because the owner listed it first.
+        settings = {"demo_prefer_hosts": ["gpu-laptop-1"], "demo_exclude_hosts": []}
+        gw._routes_cache["cap"] = {("gpu-laptop-1", "b"): 1, ("mac-desktop-1", "a"): 1}
+        gw._inflight["gpu-laptop-1"] = 1  # busy >= slots(1): saturated
+        targets = [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+        assert gw.demo_host_policy(targets, settings) == [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+
+    def test_preference_still_breaks_a_tie_among_equally_free_hosts(self):
+        settings = {"demo_prefer_hosts": ["gpu-laptop-1"], "demo_exclude_hosts": []}
+        gw._routes_cache["cap"] = {("gpu-laptop-1", "b"): 1, ("mac-desktop-1", "a"): 1}
+        # Neither saturated: the free-vs-saturated key is 0/0 for both, so
+        # preference still decides -- the feature is narrowed, not removed.
+        targets = [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+        assert gw.demo_host_policy(targets, settings) == [("gpu-laptop-1", "b"), ("mac-desktop-1", "a")]
 
     def test_host_lists_accept_a_comma_string(self):
         assert gw.clean_host_list(" gpu-laptop-1, mac-laptop-1 ,,") == ["gpu-laptop-1", "mac-laptop-1"]
@@ -436,3 +457,140 @@ class TestChat:
         seed = {r["public_id"]: r for r in gw.load_public_models_seed()}
         fids = seed["qwen3.8-9b-distill"]["fleet_ids"]
         assert "qwen3.8-9B" in fids and "hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M" in fids
+
+
+# ---------------------------------------------------------------------------
+# reasoning suppression: the key each engine actually reads
+#
+# The public demo served empty answers for days because "think": false is
+# accepted and ignored by Ollama's /v1/chat/completions -- the reasoning went
+# to delta.reasoning, demo_stream only ever reads delta.content, and the
+# stream still closed with honest usage, so the failure arrived dressed as a
+# success. These pin both halves: the right key per engine, and the refusal to
+# call a token-spending, character-free stream a success ever again.
+# ---------------------------------------------------------------------------
+
+class TestReasoningOff:
+    def test_ollama_gets_the_key_its_openai_route_actually_reads(self):
+        body = gw.apply_reasoning_off({}, "ollama")
+        assert body["reasoning_effort"] == "none", (
+            "reasoning_effort is the only one of the three spellings Ollama's "
+            "/v1 route honours; think:false alone is what broke the demo")
+        assert body["think"] is False, "still sent for the native /api/chat door"
+
+    def test_llama_swap_keeps_the_chat_template_switch(self):
+        body = gw.apply_reasoning_off({}, "llama-swap")
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        assert "reasoning_effort" not in body and "think" not in body
+
+    def test_the_demo_body_carries_the_dialect_of_the_box_it_is_going_to(self):
+        s = {"demo_max_tokens": 512, "demo_system_prompt": ""}
+        msgs = [{"role": "user", "content": "hi"}]
+        assert gw._demo_upstream_body(msgs, "m", "ollama", s)["reasoning_effort"] == "none"
+        assert "reasoning_effort" not in gw._demo_upstream_body(msgs, "m", "llama-swap", s)
+
+    def test_the_relay_translates_a_caller_that_asked_in_the_wrong_dialect(self):
+        # Exactly what the downstream app's pool sends: both spellings, both inert.
+        asked = {"think": False, "chat_template_kwargs": {"enable_thinking": False}}
+        assert gw.reasoning_off_patch(asked, "ollama") == {"reasoning_effort": "none"}
+        assert gw.reasoning_off_patch({"think": False}, "ollama") == {"reasoning_effort": "none"}
+        assert gw.reasoning_off_patch(
+            {"chat_template_kwargs": {"enable_thinking": False}}, "ollama") == {"reasoning_effort": "none"}
+
+    def test_the_relay_stays_out_of_the_way_when_there_is_nothing_to_translate(self):
+        asked = {"think": False}
+        assert gw.reasoning_off_patch(asked, "llama-swap") == {}, "its own dialect already works"
+        assert gw.reasoning_off_patch({}, "ollama") == {}, "nobody asked for thinking off"
+        assert gw.reasoning_off_patch({"think": True}, "ollama") == {}
+        assert gw.reasoning_off_patch("not a dict", "ollama") == {}
+        assert gw.reasoning_off_patch(
+            {"think": False, "reasoning_effort": "high"}, "ollama") == {}, (
+            "an explicit choice by the caller is not ours to overrule")
+
+
+class TestSilentAnswer:
+    """A stream that spends a real completion budget and shows nothing."""
+
+    @staticmethod
+    def _mute(usage: dict) -> list[bytes]:
+        """What Ollama sends for a thinking model on /v1: well-framed SSE,
+        every delta.content empty, the whole answer in a field the demo does
+        not read, and honest usage at the end."""
+        out = []
+        for word in ("Thinking", " about", " it"):
+            out.append(("data: " + json.dumps(
+                {"choices": [{"delta": {"content": "", "reasoning": word}}]}) + "\n\n").encode())
+        out.append(("data: " + json.dumps({"choices": [], "usage": usage}) + "\n\n").encode())
+        out.append(b"data: [DONE]\n\n")
+        return out
+
+    def test_tokens_spent_with_nothing_shown_is_an_error_not_a_done_frame(
+            self, client, demo_fleet, monkeypatch):
+        calls: list = []
+        _fake_upstream(monkeypatch, {"gpu-laptop-1": self._mute(
+            {"prompt_tokens": 16, "completion_tokens": 512})}, calls)
+        r = client.post("/public/api/demo", headers=DEMO_HEADERS,
+                        json={"messages": [{"role": "user", "content": "hi"}]})
+        ev = _events(r.text)
+        assert not [e for e in ev if e["type"] == "delta"]
+        assert [e["type"] for e in ev] == ["meta", "error"], (
+            "a done frame here is the bug: plausible stats over a blank answer")
+        assert ev[-1]["code"] == "upstream"
+        assert calls == [("gpu-laptop-1", calls[0][1])], (
+            "a box that started answering is never swapped, silent or not")
+        assert gw.silent_answer_cooling("gpu-laptop-1", "qwen3.8-9B"), (
+            "the next visitor must not be offered this model on this box again")
+        assert not gw.host_cooling("gpu-laptop-1"), (
+            "and the SHARED host cooldown must stay untouched -- a demo visitor's "
+            "unlucky prompt does not get to reroute the public site or the companion")
+        row = gw.db_query("SELECT status FROM usage WHERE endpoint=? ORDER BY id DESC LIMIT 1",
+                          (gw.DEMO_ENDPOINT,))[0]
+        assert row["status"] == 502
+
+    def test_a_genuinely_empty_answer_that_cost_nothing_is_still_a_done_frame(
+            self, client, demo_fleet, monkeypatch):
+        """The guard keys on tokens spent, not on emptiness alone -- a model
+        that legitimately returns nothing and is billed for nothing has not
+        hidden an answer anywhere, and must not cool a healthy box."""
+        calls: list = []
+        _fake_upstream(monkeypatch, {"gpu-laptop-1": _sse_chunks(
+            usage={"prompt_tokens": 16, "completion_tokens": 0})}, calls)
+        r = client.post("/public/api/demo", headers=DEMO_HEADERS,
+                        json={"messages": [{"role": "user", "content": "hi"}]})
+        ev = _events(r.text)
+        assert [e["type"] for e in ev] == ["meta", "done"]
+        assert not gw.silent_answer_cooling("gpu-laptop-1", "qwen3.8-9B")
+
+    def test_the_non_streaming_fold_reports_it_as_an_upstream_error(
+            self, client, demo_fleet, monkeypatch):
+        calls: list = []
+        _fake_upstream(monkeypatch, {"gpu-laptop-1": self._mute(
+            {"prompt_tokens": 16, "completion_tokens": 512})}, calls)
+        r = client.post("/public/api/demo", headers=DEMO_HEADERS,
+                        json={"stream": False, "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 502
+        assert r.json()["code"] == "upstream"
+
+    def test_the_error_frame_carries_what_was_spent(self, client, demo_fleet, monkeypatch):
+        """The only surviving evidence that tokens were burned: turning the
+        turn into an error removes the done frame that used to carry usage."""
+        calls: list = []
+        _fake_upstream(monkeypatch, {"gpu-laptop-1": self._mute(
+            {"prompt_tokens": 16, "completion_tokens": 512})}, calls)
+        r = client.post("/public/api/demo", headers=DEMO_HEADERS,
+                        json={"stream": False, "messages": [{"role": "user", "content": "hi"}]})
+        assert r.json()["spent"] == 512
+
+    def test_a_cooling_pair_is_not_offered_again_and_the_demo_says_so(
+            self, client, demo_fleet, monkeypatch):
+        """Every candidate cooling must read as offline, not as another
+        silent turn charged to the next visitor."""
+        gw.mark_silent_answer("gpu-laptop-1", "qwen3.8-9B")
+        gw.mark_silent_answer("mac-desktop-1", "hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M")
+        calls: list = []
+        _fake_upstream(monkeypatch, {"gpu-laptop-1": _sse_chunks("never asked")}, calls)
+        r = client.post("/public/api/demo", headers=DEMO_HEADERS,
+                        json={"messages": [{"role": "user", "content": "hi"}]})
+        ev = _events(r.text)
+        assert ev[0]["type"] == "error" and ev[0]["code"] == "demo_offline"
+        assert calls == [], "no box was asked to repeat the silent generation"
