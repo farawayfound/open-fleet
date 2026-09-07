@@ -128,9 +128,12 @@ ok(!byName["hub-box"].includes("routing #")
    && byName["hub-box"].includes(">hub</span>"),
    "the hub shows its own pill, never a routing number");
 
-ok(byName["box-c"].includes(`showHostDetail('box-c')`),
+// The argument crosses two layers now (JSON.stringify then esc(), see jsArg
+// in index.html) so a plain host name renders as a double-quoted JS string
+// literal with its quotes HTML-escaped: switchHost(&quot;box-a&quot;).
+ok(byName["box-c"].includes(`showHostDetail(&quot;box-c&quot;)`),
    "an offline card opens its last-known detail, not a dead switchHost");
-ok(byName["box-a"].includes(`switchHost('box-a')`),
+ok(byName["box-a"].includes(`switchHost(&quot;box-a&quot;)`),
    "an online card still switches to the machine");
 ok(byName["box-c"].includes("CPU · 0 threads"),
    "a status-less card renders instead of throwing");

@@ -8,9 +8,12 @@ would have caught it.
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
+import sys
 
 from fleetctl import planner
 from fleetctl import steps as steps_mod
@@ -215,3 +218,175 @@ class TestTheFirstCommandAStrangerRuns:
         monkeypatch.setattr(facts_mod.sys, "executable", "/somewhere/.venv/bin/python")
         monkeypatch.setattr(facts_mod.sys, "_base_executable", "/usr/bin/python3", raising=False)
         assert facts_mod.this_python()["exe"] == "/usr/bin/python3"
+
+
+# --------------------------------------------------------------------------
+class TestGatewayEnvValuesAreEscapedForTheShellThatReadsThem:
+    """gateway.env(.cmd) is not a data file on darwin/windows: run-gateway.sh
+    `source`s it and run-gateway.cmd `call`s it. Every value in it comes from
+    host.yml/fleet.yml/--set, or from a foreign line carried across a
+    previous apply (EnvFile.foreign()) -- operator-controlled, not
+    attacker-reachable, but a path or URL with a stray space/`$`/`&`/paren
+    used to run as shell (or corrupt batch parsing) instead of sitting inert
+    as a value."""
+
+    PAYLOAD = "http://x/$(id > /tmp/pwned); true"
+
+    def _render_with_public_api_url(self, facts, repo, tmp_path, value):
+        from fleetctl.steps.stack import EnvFile
+
+        value_escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        (repo / "fleet.yml").write_text(
+            f'network:\n  public_api_url: "{value_escaped}"\n', encoding="utf-8")
+        ctx = ctx_for(facts, repo, tmp_path)
+        return EnvFile()._render(ctx, "TOKEN123")
+
+    def test_darwin_wraps_a_dangerous_value_in_single_quotes(
+            self, darwin_facts, empty_repo, tmp_path):
+        text = self._render_with_public_api_url(darwin_facts, empty_repo, tmp_path,
+                                                 self.PAYLOAD)
+        assert f"export LLMSTACK_PUBLIC_API_URL='{self.PAYLOAD}'" in text
+        # Not the bare payload sitting unquoted after `=`, where bash would
+        # treat `$(...)` as a command substitution rather than as text.
+        assert f"PUBLIC_API_URL={self.PAYLOAD}\n" not in text
+
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="needs a real bash")
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="exercises a POSIX bash: the Windows runner checks out CRLF "
+                               "and Git Bash cannot source a C:\\ path; the fleet's bash boxes "
+                               "are covered by the ubuntu/macos legs of the matrix")
+    def test_sourcing_the_rendered_file_does_not_run_the_payload(
+            self, darwin_facts, empty_repo, tmp_path):
+        marker = tmp_path / "pwned"
+        payload = f"http://x/$(touch {marker}); id"
+        text = self._render_with_public_api_url(darwin_facts, empty_repo, tmp_path,
+                                                 payload)
+        envf = tmp_path / "gateway.env"
+        envf.write_text(text, encoding="utf-8")
+        out = subprocess.run(
+            ["bash", "-c", f'source "{envf}"; printf %s "$LLMSTACK_PUBLIC_API_URL"'],
+            capture_output=True, text=True, timeout=10, check=True)
+        assert out.stdout == payload, "sourced value must equal the literal payload"
+        assert not marker.exists(), "the payload ran as a command instead of sitting inert"
+
+    def test_windows_refuses_a_value_cmd_cannot_carry(
+            self, windows_facts, empty_repo, tmp_path):
+        with pytest.raises(RuntimeError) as exc:
+            self._render_with_public_api_url(
+                windows_facts, empty_repo, tmp_path, "http://x & calc.exe")
+        assert "LLMSTACK_PUBLIC_API_URL" in str(exc.value)
+
+    def test_a_benign_value_is_unaffected_on_either_platform(
+            self, darwin_facts, windows_facts, empty_repo, tmp_path):
+        d = self._render_with_public_api_url(darwin_facts, empty_repo, tmp_path,
+                                             "https://api.example.com/v1")
+        assert "export LLMSTACK_PUBLIC_API_URL=https://api.example.com/v1" in d
+        w = self._render_with_public_api_url(windows_facts, empty_repo, tmp_path,
+                                             "https://api.example.com/v1")
+        assert "set LLMSTACK_PUBLIC_API_URL=https://api.example.com/v1" in w
+
+    def test_a_carried_darwin_value_does_not_gain_a_quote_layer_on_reapply(
+            self, darwin_facts, empty_repo, tmp_path):
+        """A foreign (not-fleetctl-owned) value with a space -- e.g. a
+        hand-set SMTP password -- must round-trip through
+        foreign()/_render() without picking up an extra layer of quoting on
+        every apply: shlex.quote() on write must be matched by
+        shapes.unquote_shell_value() on read, or a value the file already
+        carries drifts (or gains embedded literal quote characters) each
+        time fleetctl runs."""
+        from fleetctl.steps.stack import EnvFile
+
+        ctx = ctx_for(darwin_facts, empty_repo, tmp_path)
+        step_ = EnvFile()
+        first = step_._render(ctx, "TOKEN123", {"FOO_SECRET": "a b"})
+        assert "export FOO_SECRET='a b'" in first
+        carried_again = step_.foreign(ctx, first)
+        assert carried_again["FOO_SECRET"] == "a b"          # unquoted back out
+        second = step_._render(ctx, "TOKEN123", carried_again)
+        assert second == first, "re-rendering a carried value must be idempotent"
+
+
+# --------------------------------------------------------------------------
+class TestPushShTargetsAreStable:
+    """push.sh's apu-box-1/gpu-laptop-1 defaults were the bare mDNS/NetBIOS names
+    `user@apu-box-1` and `user@box.local` -- exactly the class of address
+    deploy-gateway.sh's own commit history documents going stale after a
+    rename or a DHCP change and reading as "offline" while the box was
+    reachable the whole time (see deploy-gateway.sh's ssh_target(), which
+    pins these same two hosts to tailnet addresses). Separately, the apu-box-1
+    admin-token staging pointed at one already-finished Claude Code session's
+    scratchpad path, so "admin token staged" could never actually run and
+    never said so."""
+
+    def _text(self, repo):
+        path = repo / "push.sh"
+        if not path.is_file():
+            pytest.skip("no push.sh in this checkout")
+        return path.read_text(encoding="utf-8")
+
+    def test_ai_max_defaults_to_its_tailnet_address(self, repo):
+        text = self._text(repo)
+        assert '${2:-user@100.64.0.113}' in text
+        assert '${2:-user@apu-box-1}' not in text
+
+    def test_zephyrus_defaults_to_its_tailnet_address(self, repo):
+        text = self._text(repo)
+        assert '${2:-user@100.64.0.36}' in text
+        assert '${2:-user@box.local}' not in text
+
+    def test_the_admin_token_path_is_not_a_dead_session_scratchpad(self, repo):
+        text = self._text(repo)
+        assert "AppData/Local/Temp/claude" not in text
+        assert "AIMAX_ADMIN_TOKEN_FILE" in text
+
+    def test_an_unset_token_var_warns_instead_of_staying_silent(self, repo):
+        text = self._text(repo)
+        assert "NOT staged" in text
+
+
+# --------------------------------------------------------------------------
+class TestUbserverBootstrapHasAFirewallAndNarrowerGrants:
+    """server-1's bootstrap installed no network-layer restriction at all
+    (the break-glass admin token and Cockpit were reachable from the whole
+    LAN), and its models-directory grant went to `o+` (every local account)
+    a line after already granting the narrower `g+` access the usermod
+    above it exists to provide. This does not execute the script (it only
+    runs on a rebuild) -- it reads the checked-in text."""
+
+    def _text(self, repo):
+        path = repo / "hosts" / "server-1" / "bootstrap.sh"
+        if not path.is_file():
+            pytest.skip("no hosts/server-1/bootstrap.sh in this checkout")
+        return path.read_text(encoding="utf-8")
+
+    def test_ufw_default_denies_incoming_and_allows_tailnet_and_ssh(self, repo):
+        text = self._text(repo)
+        assert "ufw default deny incoming" in text
+        assert "ufw allow in on tailscale0" in text
+        assert "ufw allow 22/tcp" in text
+        assert "ufw --force enable" in text
+
+    def test_the_firewall_is_enabled_only_after_sshd_is_confirmed_listening(self, repo):
+        text = self._text(repo)
+        guard_at = text.index(":22")
+        enable_at = text.index("ufw --force enable")
+        assert guard_at < enable_at, "the :22 listening check must precede the enable"
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="exercises a POSIX bash: the Windows runner checks out CRLF "
+                               "and Git Bash cannot source a C:\\ path; the fleet's bash boxes "
+                               "are covered by the ubuntu/macos legs of the matrix")
+    def test_the_script_still_parses_as_bash(self, repo):
+        path = repo / "hosts" / "server-1" / "bootstrap.sh"
+        if not path.is_file():
+            pytest.skip("no hosts/server-1/bootstrap.sh in this checkout")
+        if shutil.which("bash") is None:
+            pytest.skip("no bash to check syntax with")
+        subprocess.run(["bash", "-n", str(path)], check=True, timeout=10)
+
+    def test_the_models_grant_is_group_only_not_world(self, repo):
+        text = self._text(repo)
+        assert "chmod g+x /home/user" in text
+        assert 'chmod -R g+rX "$MODELS_DIR"' in text
+        assert "chmod o+x /home/user" not in text
+        assert 'chmod -R o+rX "$MODELS_DIR"' not in text

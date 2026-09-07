@@ -132,7 +132,8 @@ class Engine(Step):
         elif ctx.plan["engine"].get("build_from_source"):
             steps = [f"build llama.cpp from source with GGML_{(backend or '').upper()}=ON"]
         else:
-            asset = shapes.llama_asset(ctx.family, backend, arch)
+            asset = (ctx.plan["engine"].get("llama_asset")
+                     or shapes.llama_asset(ctx.family, backend, arch))
             steps = [f"fetch the newest llama.cpp build matching /{asset}/"
                      if asset else
                      f"upstream publishes no llama.cpp build for "
@@ -195,7 +196,8 @@ class Engine(Step):
     def _release_archive(self, ctx) -> None:
         backend = ctx.plan["engine"]["backend"] or "cpu"
         arch = ctx.plan["platform"]["arch"] or ""
-        pattern = shapes.llama_asset(ctx.family, backend, arch)
+        pattern = (ctx.plan["engine"].get("llama_asset")
+                   or shapes.llama_asset(ctx.family, backend, arch))
         if not pattern:
             raise RuntimeError(
                 f"upstream publishes no llama.cpp build for "
