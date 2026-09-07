@@ -305,7 +305,14 @@ class EnvFile(Step):
         for line in current.splitlines():
             m = re.match(r"^(?:set |export )?([A-Z][A-Z0-9_]*)=(.*)$", line.strip())
             if m and m.group(1) not in mine:
-                out[m.group(1)] = m.group(2)
+                value = m.group(2)
+                if ctx.family == "darwin":
+                    # env_lines() shlex.quotes darwin values on write (see
+                    # shapes.py) -- undo that here so a carried value is
+                    # re-quoted exactly once on the next apply instead of
+                    # gaining a fresh layer of quoting every time.
+                    value = shapes.unquote_shell_value(value)
+                out[m.group(1)] = value
         return out
 
     def _render(self, ctx, admin_token: str,
@@ -360,7 +367,13 @@ class EnvFile(Step):
         current = current or ""
         m = re.search(r"^(?:set |export )?LLMSTACK_ADMIN_TOKEN=(.*)$", current, re.M)
         if m and m.group(1).strip():
-            return m.group(1).strip()
+            token = m.group(1).strip()
+            if ctx.family == "darwin":
+                # Same shlex quoting env_lines() applies on write (shapes.py)
+                # -- undo it so the token carried into _render() is the bare
+                # value, not `'...'`, and re-quoting it does not drift.
+                token = shapes.unquote_shell_value(token)
+            return token
         staged = ctx.repo / ".admin-token"
         if staged.is_file():
             # push.sh can pre-stage a token so the hub already holds a peer

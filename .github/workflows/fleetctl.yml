@@ -312,7 +312,8 @@ jobs:
         shell: pwsh
         run: |
           $errs = $null
-          foreach ($f in @("install.ps1", "hosts/windows/harden-gateway-task.ps1")) {
+          foreach ($f in @("install.ps1", "hosts/windows/harden-gateway-task.ps1",
+                           "hosts/windows/enable-ssh.ps1")) {
             $null = [System.Management.Automation.Language.Parser]::ParseFile(
               (Resolve-Path $f), [ref]$null, [ref]$errs)
             if ($errs) { $errs | ForEach-Object { $_.Message }; exit 1 }

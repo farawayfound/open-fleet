@@ -96,7 +96,7 @@ class TestWhatTheRepoSays:
     def test_every_box_has_a_tailnet_address(self, repo):
         want, problems = peers.desired(repo)
         assert problems == []
-        assert len(want) == 14
+        assert len(want) == 16
 
     def test_and_every_one_of_them_is_durable(self, repo):
         want, _ = peers.desired(repo)

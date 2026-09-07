@@ -30,6 +30,17 @@ class TestScalars:
         ('a: "8080"', {"a": "8080"}),
         ("a: '1'", {"a": "1"}),
         ("a: 0.0.0.0", {"a": "0.0.0.0"}),
+        # Double-quoted scalars: YAML's own backslash escapes, unescaped --
+        # this used to come back with the backslash kept literally, a silent
+        # divergence from PyYAML (and from what dumps() itself writes, see
+        # TestRoundTrip below).
+        (r'a: "line1\nline2"', {"a": "line1\nline2"}),
+        (r'a: "tab\there"', {"a": "tab\there"}),
+        (r'a: "quote\"inside"', {"a": 'quote"inside'}),
+        (r'a: "back\\slash"', {"a": "back\\slash"}),
+        # Single-quoted scalars: verbatim except YAML's '' -> ' escape.
+        ("a: 'it''s'", {"a": "it's"}),
+        (r"a: 'C:\llmstack'", {"a": r"C:\llmstack"}),
     ])
     def test_reads(self, text, want):
         assert loads(text) == want
@@ -89,6 +100,8 @@ class TestRefusals:
         ("a:\n    b: 1\n", "exactly 2 spaces"),
         ("a:\n  - b: 1\n", "lists of mappings"),
         ("a: [x, y", "open and close on one line"),
+        (r'a: "bad\xthing"', "unsupported escape"),
+        ('a: "foo\\"', "bare backslash"),
     ])
     def test_refuses(self, text, fragment):
         with pytest.raises(HostFileError) as exc:
@@ -134,6 +147,17 @@ class TestRoundTrip:
         for word in ("yes", "no", "on", "off", "true", "null"):
             assert loads(dumps({"v": word}))["v"] == word
 
+    def test_a_backslash_that_forced_quoting_round_trips(self):
+        """dumps() escapes \\ and " when a value needs quoting at all (_fmt);
+        before this fix, loads() did not reverse that, so any value which
+        both contained a backslash and tripped _NEEDS_QUOTES (here: a
+        trailing space) came back from a round trip with an extra literal
+        backslash baked in."""
+        doc = {"v": "a\\b "}
+        text = dumps(doc)
+        assert '"a\\\\b "' in text          # written escaped, per _fmt
+        assert loads(text) == doc            # and read back exactly as it was
+
     def test_an_empty_mapping_becomes_null(self):
         """Documented, not accidental: `key:` with nothing under it reads back
         as None either way, so {} does not survive. The planner never emits
@@ -170,6 +194,9 @@ class TestAgainstRealYaml:
         "list:\n  - one\n  - two\n",
         "a: null\nb: ~\nc:\n",
         "a: true\nb: false\n",
+        'a: "line1\\nline2"\n',
+        'a: "quote\\"inside"\n',
+        "a: 'it''s'\n",
     ])
     def test_agrees_on_small_documents(self, text):
         yaml = self._yaml()

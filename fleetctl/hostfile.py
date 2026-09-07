@@ -50,9 +50,46 @@ _INT = re.compile(r"^[+-]?\d+$")
 _FLOAT = re.compile(r"^[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?$")
 _KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
+# What a double-quoted YAML scalar's backslash escapes mean. Anything else
+# after a backslash is refused rather than guessed at -- \x, \u, an
+# accidental double backslash from a hand-typed Windows path -- consistent
+# with this module's "raise rather than guess" contract everywhere else.
+_DOUBLE_ESCAPES = {"\\": "\\", '"': '"', "n": "\n", "t": "\t"}
+
+
+def _unescape_double(inner: str, line_no: int, line: str) -> str:
+    """The inside of a double-quoted scalar, with YAML's escapes applied.
+
+    PyYAML (real YAML) interprets \\\\, \\", \\n and \\t here; this parser
+    used to return the inside verbatim, keeping the backslash literally --
+    a silent divergence from every value this file's own writer (_fmt, see
+    below) already escapes the other way.
+    """
+    out: list[str] = []
+    i, n = 0, len(inner)
+    while i < n:
+        ch = inner[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= n:
+            raise HostFileError(line_no, line,
+                                "double-quoted string ends with a bare backslash")
+        nxt = inner[i + 1]
+        if nxt not in _DOUBLE_ESCAPES:
+            raise HostFileError(
+                line_no, line,
+                f"unsupported escape sequence \\{nxt} in a double-quoted string")
+        out.append(_DOUBLE_ESCAPES[nxt])
+        i += 2
+    return "".join(out)
+
 
 def _scalar(text: str, line_no: int, line: str) -> Any:
-    """One value. Quoted strings keep whatever is inside them, verbatim."""
+    """One value. Quoted strings keep whatever is inside them -- verbatim
+    for 'single', except YAML's own '' -> ' escape; with \\\\/\\"/\\n/\\t
+    unescaped for "double", to match what PyYAML would read here."""
     s = text.strip()
     if s.startswith(("|", ">")):
         raise HostFileError(line_no, line, "block scalars are not supported")
@@ -61,7 +98,10 @@ def _scalar(text: str, line_no: int, line: str) -> Any:
     if s.startswith(("&", "*", "!")):
         raise HostFileError(line_no, line, "anchors, aliases and tags are not supported")
     if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
-        return s[1:-1]
+        inner = s[1:-1]
+        if s[0] == '"':
+            return _unescape_double(inner, line_no, line)
+        return inner.replace("''", "'")
     if s == "" or s in ("null", "~", "Null", "NULL"):
         return None
     low = s.lower()

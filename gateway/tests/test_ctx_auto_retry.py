@@ -385,3 +385,148 @@ class TestNativeOllamaCtxRetry:
 
         assert r.status_code == 500
         assert len(seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# _classify_upstream_failure(): what kind of thing just happened, for the
+# reactive failure-handling branches (requirement 3) shared across the /v1
+# proxy, fleet_chat, the demo, and the batch dispatcher.
+# ---------------------------------------------------------------------------
+
+
+LLAMA_CPP_CTX_OVERFLOW = json.dumps({
+    "error": {"code": 400,
+             "message": "the request exceeds the available context size, "
+                        "try increasing the context size or enable context "
+                        "shift",
+             "type": "exceed_context_size_error",
+             "n_prompt_tokens": 9000, "n_ctx": 8192}}).encode()
+
+
+class TestClassifyUpstreamFailure:
+    def test_ok_below_400(self):
+        assert gw._classify_upstream_failure(200, "chat/completions") == "ok"
+        assert gw._classify_upstream_failure(204, "chat/completions") == "ok"
+
+    def test_429_and_503_are_busy(self):
+        assert gw._classify_upstream_failure(429, "chat/completions") == "busy"
+        assert gw._classify_upstream_failure(503, "chat/completions") == "busy"
+
+    def test_other_5xx_without_mem_signs_is_other_5xx(self):
+        assert gw._classify_upstream_failure(
+            500, "chat/completions", b'{"error":"internal error"}') == "other_5xx"
+
+    def test_5xx_with_mem_signs_is_oom(self):
+        assert gw._classify_upstream_failure(
+            500, "chat/completions",
+            b'{"error":"cuda error: out of memory"}') == "oom"
+
+    def test_404_on_chat_completions_is_model_missing(self):
+        assert gw._classify_upstream_failure(404, "chat/completions") == "model_missing"
+
+    def test_404_elsewhere_is_not_model_missing(self):
+        assert gw._classify_upstream_failure(404, "models") == "ok"
+
+    def test_llama_cpp_exceed_context_size_error_shape(self):
+        assert gw._classify_upstream_failure(
+            400, "chat/completions", LLAMA_CPP_CTX_OVERFLOW) == "ctx_too_long"
+
+    def test_413_or_422_with_ctx_message_substring_matches(self):
+        for status in (413, 422):
+            for msg in ("prompt is too long", "maximum context length exceeded",
+                       "input is too large for this model"):
+                body = json.dumps({"error": {"message": msg}}).encode()
+                assert gw._classify_upstream_failure(
+                    status, "chat/completions", body) == "ctx_too_long", msg
+
+    def test_ordinary_4xx_is_never_retried(self):
+        # An unrelated client error -- bad JSON, an unknown parameter -- must
+        # never be mistaken for a context-window problem.
+        body = json.dumps({"error": {"message": "invalid value for 'temperature'"}}).encode()
+        assert gw._classify_upstream_failure(400, "chat/completions", body) == "ok"
+        assert gw._classify_upstream_failure(401, "chat/completions") == "ok"
+        assert gw._classify_upstream_failure(403, "chat/completions") == "ok"
+
+    def test_no_body_never_matches_ctx_too_long(self):
+        # A caller that has not read the body yet (the pre-read failover
+        # checks) must not accidentally classify a plain 400 as ctx_too_long.
+        assert gw._classify_upstream_failure(400, "chat/completions") == "ok"
+
+    def test_upstream_failed_still_true_for_every_real_failure_kind(self):
+        # _upstream_failed() is the boolean callers already gate failover on;
+        # it must keep agreeing with the classifier for every kind that used
+        # to make it True, plus the new 'busy' kind.
+        assert gw._upstream_failed(500, "chat/completions") is True
+        assert gw._upstream_failed(429, "chat/completions") is True
+        assert gw._upstream_failed(503, "chat/completions") is True
+        assert gw._upstream_failed(404, "chat/completions") is True
+        assert gw._upstream_failed(404, "models") is False
+        assert gw._upstream_failed(400, "chat/completions") is False
+        assert gw._upstream_failed(200, "chat/completions") is False
+
+
+class TestCtxOverflowFit:
+    def test_ceiling_read_from_llama_cpp_body(self):
+        assert gw._ctx_overflow_ceiling(LLAMA_CPP_CTX_OVERFLOW) == 8192
+
+    def test_ceiling_is_zero_without_a_named_number(self):
+        body = json.dumps({"error": {"message": "prompt is too long"}}).encode()
+        assert gw._ctx_overflow_ceiling(body) == 0
+        assert gw._ctx_overflow_ceiling(b"not even json") == 0
+
+    def test_fit_uses_the_named_ceiling_minus_the_safety_margin(self):
+        fit = gw._fit_after_ctx_overflow(LLAMA_CPP_CTX_OVERFLOW, prior_ctx=16384)
+        assert fit == 8192 - gw.CTX_OVERFLOW_MARGIN
+
+    def test_fit_falls_back_to_halving_without_a_named_ceiling(self):
+        body = json.dumps({"error": {"message": "prompt is too long"}}).encode()
+        assert gw._fit_after_ctx_overflow(body, prior_ctx=65536) == gw.halve_ctx(65536)
+
+    def test_fit_returns_zero_at_the_floor(self):
+        body = json.dumps({"error": {"message": "prompt is too long"}}).encode()
+        assert gw._fit_after_ctx_overflow(body, prior_ctx=4096) == 0
+
+    def test_a_small_named_ceiling_gives_up_rather_than_exceeding_it(self):
+        # A box whose own reported ceiling is well under the floor used to
+        # get clamped UP to the floor (max(4096, 2048-256) == 4096) -- a
+        # fitted "retry" literally double what the box just said it could
+        # hold, guaranteed to overflow again. The honest answer is 0: give
+        # up on this box, the same as halve_ctx() reaching the floor.
+        body = json.dumps({"error": {"code": 400, "message": "too long",
+                                    "type": "exceed_context_size_error",
+                                    "n_prompt_tokens": 3000, "n_ctx": 2048}}).encode()
+        assert gw._fit_after_ctx_overflow(body, prior_ctx=16384) == 0
+
+    def test_a_named_ceiling_at_the_floor_gives_up_instead_of_retrying_at_exactly_it(self):
+        # n_ctx=4096: margin-adjusted fit is 3840, below the floor, so this
+        # must also give up -- not get clamped back up to 4096, which is
+        # exactly the ceiling that just failed (zero margin, guaranteed
+        # repeat failure).
+        body = json.dumps({"error": {"code": 400, "message": "too long",
+                                    "type": "exceed_context_size_error",
+                                    "n_prompt_tokens": 5000, "n_ctx": 4096}}).encode()
+        assert gw._fit_after_ctx_overflow(body, prior_ctx=16384) == 0
+
+
+class TestCtxOverflowRejectDetail:
+    """The shape an exhausted reactive ctx_too_long retry hands back to the
+    caller as an honest 413/context_limit -- instead of the generic 502 that
+    used to be returned once upstream_failed swallowed the real reason."""
+
+    def test_names_the_box_reported_ceiling(self):
+        detail = gw._ctx_overflow_reject_detail(LLAMA_CPP_CTX_OVERFLOW)
+        assert detail["error"]["type"] == "context_limit"
+        assert detail["error"]["limit"] == 8192
+        assert "exceeds" in detail["error"]["message"]
+
+    def test_falls_back_to_a_generic_message_without_one(self):
+        body = json.dumps({"error": {"message": ""}}).encode()
+        detail = gw._ctx_overflow_reject_detail(body)
+        assert detail["error"]["type"] == "context_limit"
+        assert "limit" not in detail["error"]
+        assert detail["error"]["message"]
+
+    def test_survives_a_non_json_body(self):
+        detail = gw._ctx_overflow_reject_detail(b"not even json")
+        assert detail["error"]["type"] == "context_limit"
+        assert detail["error"]["message"]

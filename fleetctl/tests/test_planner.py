@@ -408,14 +408,14 @@ class TestWriting:
 
 
 class TestEveryPlanInTheRepo:
-    """The fourteen real ones. This is the test that would have caught a
+    """The fifteen real ones. This is the test that would have caught a
     hand-edit that broke a box, before a deploy did."""
 
     def _plans(self, repo):
         return sorted(repo.glob("hosts/*/host.yml"))
 
     def test_there_are_some(self, repo):
-        assert len(self._plans(repo)) >= 14
+        assert len(self._plans(repo)) >= 15
 
     def test_each_parses(self, repo):
         for path in self._plans(repo):

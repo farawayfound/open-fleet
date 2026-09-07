@@ -1,0 +1,7 @@
+# Public keys every Windows peer authorizes for the fleet tooling. Public
+# halves only -- nothing here is secret. hosts/windows/enable-ssh.ps1 merges
+# these into C:\ProgramData\ssh\administrators_authorized_keys, which is the
+# ONLY file sshd consults for an Administrator account on Windows.
+#
+# Put your deploy runner's public key here, one per line, e.g.:
+# ssh-ed25519 AAAA... fleet-deploy@ci-runner

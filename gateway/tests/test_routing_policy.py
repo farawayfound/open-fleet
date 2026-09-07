@@ -9,6 +9,7 @@ Run with: $SP/venv/bin/python -m pytest gateway/tests -q
 """
 from __future__ import annotations
 
+import time
 
 import pytest
 
@@ -61,7 +62,12 @@ def _set_meta(**by_host_fid: dict) -> None:
 
 class TestHostClass:
     def test_class_matrix(self, monkeypatch):
-        assert gw.host_class("gpu-laptop-1") == "gpu"
+        # gpu-laptop-1 carries an 8 GB card but is classed `small` on purpose
+        # since 2026-09-06: it is the Athena box, and as gpu-class it would
+        # be tier 0 for any model it holds in VRAM and jump server-1 and
+        # mac-desktop-1, the two boxes it is meant to sit behind.
+        assert gw.host_class("gpu-laptop-1") == "small"
+        assert gw.host_class("mac-laptop-1") == "gpu"
         assert gw.host_class("apu-box-1") == "big"
         assert gw.host_class("server-1") == "small"
         assert gw.host_class("cpu-box-1") == "fallback"
@@ -88,12 +94,27 @@ class TestHostClass:
 # ---------------------------------------------------------------------------
 
 class TestHostTierOwnerRules:
-    def test_zephyrus_vram_fit_beats_resident_ai_max(self):
-        # A small model that fits gpu-laptop-1's 8 GB outright beats the big box
+    def test_gpu_box_vram_fit_beats_resident_ai_max(self):
+        # A model that fits a gpu-class box's card outright beats the big box
         # even when apu-box-1 already holds it resident -- residency is a
-        # tiebreak inside a tier, not a way to jump one.
+        # tiebreak inside a tier, not a way to jump one. mac-laptop-1 is the
+        # example since 2026-09-06; gpu-laptop-1, which used to be, is classed
+        # `small` now (see the next test).
+        _set_meta(**{"mac-laptop-1|m": {"fit": "vram"}, "apu-box-1|m": {"fit": "spill"}})
+        assert gw.host_tier("mac-laptop-1", "m", "primary") < gw.host_tier("apu-box-1", "m", "primary")
+
+    def test_zephyrus_is_the_last_always_on_box_even_when_the_model_fits(self):
+        # The Athena box (2026-09-06): for anything that is not Athena it
+        # answers only after server-1 and mac-desktop-1. A model fitting its 8 GB
+        # card no longer earns it tier 0 -- it shares the small tier with
+        # them, and its rank (always_on 4) sorts it behind both. apu-box-1 stays
+        # ahead of the whole small tier for a primary request.
         _set_meta(**{"gpu-laptop-1|m": {"fit": "vram"}, "apu-box-1|m": {"fit": "spill"}})
-        assert gw.host_tier("gpu-laptop-1", "m", "primary") < gw.host_tier("apu-box-1", "m", "primary")
+        z = gw.host_tier("gpu-laptop-1", "m", "primary")
+        assert z > gw.host_tier("apu-box-1", "m", "primary")
+        assert z > gw.host_tier("server-1", "m", "primary")
+        assert z > gw.host_tier("mac-desktop-1", "m", "primary")
+        assert z < gw.host_tier("cpu-box-1", "m", "primary")
 
     def test_pipedream_vram_beats_ai_max(self):
         _set_meta(**{"gpu-desktop-2|m": {"fit": "vram"}, "apu-box-1|m": {"fit": ""}})
@@ -162,8 +183,10 @@ class TestHostTierOwnerRules:
         by any machine except apu-box-1"), so it sits behind apu-box-1 even here:
         a CPU-only DDR4 box preempting 96 GB of VRAM would be the one place
         this policy made a request slower on purpose."""
-        order = ["gpu-laptop-1", "server-1", "mac-desktop-1", "mini-pc-1"]
-        _set_meta(**{"gpu-laptop-1|m": {"fit": "spill", "moe": False}})
+        # gpu-laptop-1 moved from the front of this order to behind mac-desktop-1 on
+        # 2026-09-06 (the Athena box; see test_zephyrus_is_the_last_always_on_box).
+        order = ["server-1", "mac-desktop-1", "gpu-laptop-1", "mini-pc-1"]
+        _set_meta(**{"gpu-laptop-1|m": {"fit": "vram"}})
         tiers = [gw.host_tier(h, "m", "worker") for h in order]
         assert tiers == sorted(tiers)
         ai_max = gw.host_tier("apu-box-1", "m", "worker")
@@ -211,6 +234,44 @@ class TestSaturationAndCooldown:
         t[0] += 10.0
         assert gw.host_cooling("flakyhost") is False
         assert "flakyhost" not in gw._host_cooldown
+
+    def test_host_saturated_matches_scorer_first_key(self):
+        # _host_saturated() is the predicate factored out of
+        # _score_host_model_pairs's own first sort key (step 1) -- this pins
+        # the two to agree, so demo_host_policy and pick_fallback's busy
+        # trigger can never drift from what the scorer calls "occupied".
+        gw._routes_cache["cap"] = {("hostA", "m"): 1, ("hostB", "m"): 1}
+        gw._routes_cache["running"] = {}
+        gw._routes_cache["meta"] = {}
+        gw._inflight["hostA"] = 1
+        assert gw._host_saturated("hostA", "m") is True
+        assert gw._host_saturated("hostB", "m") is False
+
+    async def test_all_saturated_orders_by_queue_depth_then_tier(self):
+        # Both boxes are saturated (busy >= slots): mac-laptop-1 is the
+        # better-tier box (GPU, tier 0) but has 3 jobs waiting past its 2
+        # slots; apu-box-1 is the lower-tier box (big, tier 1) but only 1 job
+        # waiting past its 1 slot. Queue depth is compared before tier/rank,
+        # so the LESS busy, lower-tier box goes first. (mac-laptop-1 plays the
+        # gpu-class part since 2026-09-06; gpu-laptop-1 is `small` now.)
+        gw._routes_cache["cap"] = {("mac-laptop-1", "m"): 2, ("apu-box-1", "m"): 1}
+        gw._routes_cache["running"] = {}
+        gw._routes_cache["meta"] = {
+            ("mac-laptop-1", "m"): {"fit": "vram"}, ("apu-box-1", "m"): {"fit": "vram"},
+        }
+        gw._inflight["mac-laptop-1"] = 5     # queue_len = 5 - 2 = 3
+        gw._inflight["apu-box-1"] = 2     # queue_len = 2 - 1 = 1
+        out = await gw._score_host_model_pairs(
+            [("mac-laptop-1", "m"), ("apu-box-1", "m")], role="primary")
+        assert out == [("apu-box-1", "m"), ("mac-laptop-1", "m")]
+
+        # A tie in queue depth falls back to the owner's tier/rank policy,
+        # same as before this existed.
+        gw._inflight["mac-laptop-1"] = 3     # queue_len = 1
+        gw._inflight["apu-box-1"] = 2     # queue_len = 1
+        out2 = await gw._score_host_model_pairs(
+            [("mac-laptop-1", "m"), ("apu-box-1", "m")], role="primary")
+        assert out2 == [("mac-laptop-1", "m"), ("apu-box-1", "m")]
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +372,90 @@ class TestResidentWellAndFallback:
         sub = await gw.pick_fallback(req_row, "primary", settings)
         assert sub is not None
         assert sub["public_id"] == "gemma4-26b-a4b"
+
+
+# ---------------------------------------------------------------------------
+# pick_fallback's busy trigger (requirement 2): every box serving the
+# requested row is saturated, not merely unreachable or badly resident.
+# ---------------------------------------------------------------------------
+
+class TestBusyFallback:
+    def _setup(self):
+        # qwen3.6-35b-a3b is resident on gpu-desktop-1 (a GPU box, tier 0 -- a GOOD
+        # home) but gpu-desktop-1 is saturated: without the busy trigger this row
+        # needs no fallback at all under the default not_resident policy.
+        # nemotron3.5-lightning-30b (same active_b=3, diff 0) is resident on
+        # apu-box-1 but apu-box-1 is ALSO saturated. gemma4-26b-a4b (active_b=4,
+        # diff 1) is not resident anywhere, but gpu-laptop-1 can load it and has
+        # a free slot right now.
+        gw._routes_cache.update(
+            t=time.time(), map={},
+            cands={
+                "qwen3.6-35b": ["gpu-desktop-1"],
+                "nemotron3.5-lightning-30b": ["apu-box-1"],
+                "gemma-4-26b": ["gpu-laptop-1"], "gemma4:26b": ["gpu-laptop-1"],
+            },
+            cap={
+                ("gpu-desktop-1", "qwen3.6-35b"): 1,
+                ("apu-box-1", "nemotron3.5-lightning-30b"): 1,
+                ("gpu-laptop-1", "gemma-4-26b"): 1, ("gpu-laptop-1", "gemma4:26b"): 1,
+            },
+            running={
+                "gpu-desktop-1": {"qwen3.6-35b"},
+                "apu-box-1": {"nemotron3.5-lightning-30b"},
+                "gpu-laptop-1": set(),
+            },
+            meta={
+                ("gpu-desktop-1", "qwen3.6-35b"): {"fit": "vram"},
+                ("apu-box-1", "nemotron3.5-lightning-30b"): {"fit": "vram"},
+                ("gpu-laptop-1", "gemma-4-26b"): {"fit": "vram"},
+                ("gpu-laptop-1", "gemma4:26b"): {"fit": "vram"},
+            },
+        )
+        gw._inflight.update({"gpu-desktop-1": 1, "apu-box-1": 1})
+
+    async def test_saturated_but_well_resident_needs_no_fallback_by_default(
+            self, frozen_routes):
+        self._setup()
+        cat = gw.public_catalogue(force=True)["by_public"]
+        req_row = cat["qwen3.6-35b-a3b"]
+        settings = dict(gw.get_public_settings())
+        settings["substitute_when_busy"] = False
+        assert await gw.pick_fallback(req_row, "primary", settings) is None
+
+    async def test_busy_trigger_offers_a_substitute(self, frozen_routes):
+        self._setup()
+        cat = gw.public_catalogue(force=True)["by_public"]
+        req_row = cat["qwen3.6-35b-a3b"]
+        chosen = await gw.pick_fallback(req_row, "primary", gw.get_public_settings())
+        assert chosen is not None
+
+    async def test_free_but_not_resident_beats_resident_but_saturated(
+            self, frozen_routes):
+        # Requirement 2's own test case: a resident-but-saturated candidate
+        # (nemotron3.5-lightning-30b, the closer active-params match) loses
+        # to one with an actual free slot (gemma4-26b-a4b), reversing the
+        # ordinary residency preference for this one trigger.
+        self._setup()
+        cat = gw.public_catalogue(force=True)["by_public"]
+        req_row = cat["qwen3.6-35b-a3b"]
+        chosen = await gw.pick_fallback(req_row, "primary", gw.get_public_settings())
+        assert chosen is not None
+        assert chosen["public_id"] == "gemma4-26b-a4b"
+
+    async def test_all_candidates_saturated_declines_rather_than_swap_queues(
+            self, frozen_routes):
+        # gpu-laptop-1 (gemma4-26b-a4b's only free home in the base fixture) is
+        # now ALSO saturated: every candidate for both the requested row and
+        # its best-ranked substitute has no free decode slot anywhere. A
+        # swap here would only trade one queue for another -- the "buys
+        # nothing" guard must decline it and return None, not force the
+        # best-ranked (but equally stuck) candidate through anyway.
+        self._setup()
+        gw._inflight["gpu-laptop-1"] = 1
+        cat = gw.public_catalogue(force=True)["by_public"]
+        req_row = cat["qwen3.6-35b-a3b"]
+        assert await gw.pick_fallback(req_row, "primary", gw.get_public_settings()) is None
 
 
 # ---------------------------------------------------------------------------

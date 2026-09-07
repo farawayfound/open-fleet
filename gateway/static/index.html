@@ -1414,7 +1414,7 @@ function renderHosts() {
     `<button class="${MODE === "node" && h.name === CUR ? "on" : ""} ${h.online ? "" : "off"}"
        data-host="${esc(h.name)}" draggable="true"
        ondragstart="pillDragStart(event,this)" ondragend="pillDragEnd()"
-       onclick="${h.online ? `switchHost('${esc(h.name)}')` : `showHostDetail('${esc(h.name)}')`}"
+       onclick="${h.online ? `switchHost(${jsArg(h.name)})` : `showHostDetail(${jsArg(h.name)})`}"
        title="${h.online ? "drag to reorder" : "offline — click for last known state, drag to reorder"}">
        <span class="dot"></span>${esc(h.name)}</button>`).join("");
 }
@@ -1490,6 +1490,12 @@ const fmtN = n => (n === null || n === undefined) ? "–" : n.toLocaleString();
 const fmtR = n => (!n && n !== 0) ? "–" : fmtB(n) + "/s";
 const esc = s => String(s === null || s === undefined ? "" : s)
   .replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// A value that lands INSIDE a JS string inside an HTML attribute needs two
+// layers: JSON.stringify makes it a JS string literal (quotes/backslashes/
+// newlines/U+2028 escaped), esc() then HTML-escapes the literal so the
+// attribute cannot end early. The browser undoes the HTML layer first,
+// the JS parser the JSON layer -- the value never gets to be code.
+const jsArg = v => esc(JSON.stringify(String(v ?? '')));
 const dur = s => {
   const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
   return (d ? d+"d " : "") + (h ? h+"h " : "") + m + "m";
@@ -1890,7 +1896,7 @@ function renderMachines(hosts) {
       else if (sp.reserve) pill += ' <span class="pill dim" title="personal box — routed only when every other candidate is busy">reserve</span>';
       else if (pos[h.name]) pill += ` <span class="pill arch" title="position in the routing order — Configurations tab">routing #${pos[h.name]}</span>`;
     }
-    return `<div class="card machine${h.online ? "" : " off"}" onclick="${open}('${esc(h.name)}')">
+    return `<div class="card machine${h.online ? "" : " off"}" onclick="${open}(${jsArg(h.name)})">
       <div class="row" style="justify-content:space-between">
         <span class="mname">${esc(h.name)}</span>
         <span>${pill}</span>
@@ -1974,7 +1980,7 @@ function cfgRow(name, idx) {
   const pin = h.self;  // this box (the hub) routes itself last; not draggable
   return `<div class="cfgrow${pin ? " pinned" : ""}" data-name="${esc(name)}"
       ${pin ? "" : `draggable="true" ondragstart="cfgDragStart(event,this)" ondragend="cfgDragEnd()"`}
-      onclick="cfgDetail('${esc(name)}')">
+      onclick="cfgDetail(${jsArg(name)})">
     <span class="num">${idx != null ? "#" + (idx + 1) : ""}</span>
     <span class="cname">${esc(name)}</span>
     <span class="pill dim">${esc(h.klass || "?")}</span>
@@ -2096,11 +2102,11 @@ function cfgDetail(name) {
         <span class="kstate${h.routed ? "" : " off"}">${h.routed ? "on" : "off"}</span>
         <button class="ksw" role="switch" aria-checked="${h.routed ? "true" : "false"}"
           title="${h.routed ? KSW_ON : KSW_OFF}" aria-label="routing to ${esc(name)}"
-          onclick="toggleRouting(this, '${esc(name)}')"><span class="kknob"></span></button>
+          onclick="toggleRouting(this, ${jsArg(name)})"><span class="kknob"></span></button>
       </span></div>
       <div class="spacer"></div>
       <label class="f"><input type="checkbox" style="width:auto" ${h.reserve ? "checked" : ""}
-        onchange="cfgSetReserve('${esc(name)}', this.checked)">
+        onchange="cfgSetReserve(${jsArg(name)}, this.checked)">
         reserve — personal box, route to it only when every other candidate is busy</label>`}
   </div>`;
   document.body.appendChild(back);
@@ -2132,7 +2138,7 @@ function renderNetmap(hosts) {
         stroke="${h.online ? (wifi ? "var(--warn)" : "var(--accent)") : "#3a4a5a"}"
         stroke-width="1.4" ${wifi ? 'stroke-dasharray="5 5"' : ""} opacity=".7"/>
       ${rate ? `<text x="${mx}" y="${my - 4}" text-anchor="middle" class="nsub">${rate}</text>` : ""}`);
-    svg.push(`<g class="node" onclick="${h.online ? `switchHost('${esc(h.name)}')` : `showHostDetail('${esc(h.name)}')`}">
+    svg.push(`<g class="node" onclick="${h.online ? `switchHost(${jsArg(h.name)})` : `showHostDetail(${jsArg(h.name)})`}">
       <circle class="body" cx="${x}" cy="${y}" r="17" fill="var(--panel2)" stroke="${col}" stroke-width="1.6"/>
       <circle cx="${x}" cy="${y}" r="5" fill="${col}"/>
       <text x="${x}" y="${y + (Math.sin(a) >= 0 ? 34 : -26)}" text-anchor="middle" class="nlabel">${esc(h.name)}</text>
@@ -2323,7 +2329,7 @@ async function loadStatus() {
           String(m.state).match(/ready|running|loaded/i) ? "ok" : "mid"}">${esc(m.state || "?")}</span>
         ${(conf[m.id] || {}).persistent
           ? '<span class="pill dim" title="persistent — resident from startup; change on the Models tab">pinned</span>'
-          : `<button class="act" onclick="unloadOne('${esc(m.id)}')">unload</button>`}</td></tr>`).join("")
+          : `<button class="act" onclick="unloadOne(${jsArg(m.id)})">unload</button>`}</td></tr>`).join("")
     : `<tr><td class="muted">nothing loaded — llama-swap starts a model on first request</td></tr>`;
   // The load picker offers what is configured but not resident; the warm
   // picker mirrors models.json's one `preload` flag (persistent models are
@@ -2574,7 +2580,11 @@ async function rebootHost(host, opts = {}) {
   if (!confirm(`Reboot ${host} now?\n\nEverything it is serving stops until it is back (usually 1–2 minutes).${extra}`))
     return;
   let r;
-  try { r = await hostApi(host, "/reboot", {method: "POST", body: {confirm: true}}); }
+  // The hub refuses its own reboot unless the confirm value is the literal
+  // "hub" (see api_reboot): a box with peers is the control plane for every
+  // other box, so a stray call must not take it down. The dialog above has
+  // already said as much for host === SELF; peers keep the plain form.
+  try { r = await hostApi(host, "/reboot", {method: "POST", body: {confirm: host === SELF ? "hub" : true}}); }
   catch (e) { toast(e.message, true); return; }
   toast(r.message || `rebooting ${host}`);
   REBOOT_BUSY_HOST = host;
@@ -3109,7 +3119,7 @@ function renderPubModels() {
         onchange="pubModUpd(${i},'enabled',this.checked)"></td>
       <td><input type="radio" name="pubfeatured" style="width:auto" ${m.featured ? "checked" : ""}
         title="suggest this model first on the public request form"
-        onchange="setPubFeatured('${esc(m.public_id)}')"></td>
+        onchange="setPubFeatured(${jsArg(m.public_id)})"></td>
       <td class="mono">${esc(m.public_id)}</td>
       <td>${esc(m.name)}</td>
       <td><input value="${esc(m.family || "")}" style="width:90px"
@@ -3131,7 +3141,7 @@ function renderPubModels() {
       <td>${pubModLive(m)}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="act primary" onclick="savePubModel(${i})">save</button>
-        <button class="act danger" onclick="deletePubModel('${esc(m.public_id)}')">×</button>
+        <button class="act danger" onclick="deletePubModel(${jsArg(m.public_id)})">×</button>
       </td>
     </tr>`).join("")
       : `<tr><td class="muted" colspan="15">no public models yet — reseed the catalogue</td></tr>`);
@@ -4100,7 +4110,7 @@ async function loadLibrary() {
       <tr><td class="mono">${esc(l.name)}</td>
           <td class="num">${fmtB(l.size)}</td>
           <td class="muted" style="font-size:11px">${esc(l.path)}</td>
-          <td style="text-align:right"><button class="act danger" onclick="delLocal('${esc(l.path)}')">delete</button></td></tr>`).join("")
+          <td style="text-align:right"><button class="act danger" onclick="delLocal(${jsArg(l.path)})">delete</button></td></tr>`).join("")
       : `<tr><td class="muted">no completed GGUF files yet — check Downloads above</td></tr>`;
   }
   api("/status").then(s => {
@@ -4125,7 +4135,7 @@ async function hfSearch() {
   try {
     const r = await api("/hf/search?q=" + encodeURIComponent($("#hfq").value));
     $("#hfres tbody").innerHTML = r.map(m => `<tr>
-      <td class="mono" style="cursor:pointer" onclick="$('#hfq').value='${esc(m.id)}';hfFiles()">${esc(m.id)}</td>
+      <td class="mono" style="cursor:pointer" onclick="$('#hfq').value=${jsArg(m.id)};hfFiles()">${esc(m.id)}</td>
       <td class="num muted">${fmtN(m.downloads)}↓</td></tr>`).join("")
       || `<tr><td class="muted">no repos matched</td></tr>`;
   } catch (e) { toast(e.message, true); }
@@ -4137,7 +4147,7 @@ async function hfFiles() {
     $("#hfres tbody").innerHTML = r.map(f => `<tr>
       <td class="mono" style="font-size:12px">${esc(f.path)}</td>
       <td class="num">${fmtB(f.size)}</td>
-      <td style="text-align:right"><button class="act" onclick="pull('${esc(repo)}','${esc(f.path)}')">pull</button></td>
+      <td style="text-align:right"><button class="act" onclick="pull(${jsArg(repo)},${jsArg(f.path)})">pull</button></td>
       </tr>`).join("") || `<tr><td class="muted">no .gguf files in that repo</td></tr>`;
   } catch (e) { toast(e.message, true); }
 }
@@ -4252,7 +4262,7 @@ async function loadLmStudio() {
       <td class="num">${fmtB(a.size)}</td>
       <td class="muted" style="font-size:11px">${esc(a.detail || a.reason || why)}</td>
       <td style="text-align:right">${canOllama
-        ? `<button class="act" onclick="lmsOllamaImport('${esc(a.path)}')">give to Ollama</button>`
+        ? `<button class="act" onclick="lmsOllamaImport(${jsArg(a.path)})">give to Ollama</button>`
         : ""}</td></tr>`;
   }).join("") : `<tr><td class="muted">both catalogues agree — nothing to do</td></tr>`;
 

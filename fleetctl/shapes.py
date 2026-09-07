@@ -38,6 +38,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -380,6 +381,51 @@ ENV_STYLE = {
 
 ENV_COMMENT = {"linux": "# {t}", "darwin": "# {t}", "windows": "rem {t}"}
 
+# gateway.env(.cmd) is not a data file on darwin/windows -- run-gateway.sh
+# `source`s it and run-gateway.cmd `call`s it, so an unescaped value in
+# either rendering is a line of shell/batch, not a string. Every value here
+# is operator-supplied (host.yml, fleet.yml, --set, or a foreign line carried
+# across from a previous apply -- see stack.py's EnvFile.foreign()), so the
+# realistic failure is a stray space/`$`/`&`/`%`/paren rather than an
+# attacker, but it must not run as code either way.
+#
+# darwin: shlex.quote() every value. It is a no-op on the plain paths/URLs
+# every box actually carries (it only adds quotes when a character outside
+# `\w@%+=:,./-` is present), so this changes no file that had no reason to
+# change, and it round-trips: stack.py unquotes with `unquote_shell_value()`
+# before a carried value is re-quoted on the next apply, so re-running apply
+# does not pile up quote layers.
+#
+# windows: `set` has no general-purpose escaping for `&`, `|`, `<`, `>`,
+# `^`, `%` or `"` -- cmd.exe can parse a `set KEY=VALUE` line as more than
+# one command, or expand `%...%` as a variable reference, before the wrapper
+# ever sees the value. Rather than guess at an escaping cmd will honour,
+# refuse to write it: this matches the module's existing raise-rather-than-
+# guess contract (hostfile.py) and turns a silent hijack into a loud plan
+# failure naming the offending key.
+_CMD_UNSAFE = set('&|<>^%"')
+
+
+def unquote_shell_value(raw: str) -> str:
+    """Reverse shlex.quote() on a value read back out of a darwin
+    gateway.env line (see stack.py EnvFile.foreign()/_token()).
+
+    A line this parser did not itself quote -- hand-edited, or written by a
+    fleetctl version that predates this fix -- is not always a single
+    well-formed shell word. Rather than guess at those, this returns the raw
+    text unchanged, exactly as it would have been carried before quoting
+    existed.
+    """
+    try:
+        parts = shlex.split(raw, posix=True)
+    except ValueError:
+        return raw
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 0:
+        return ""
+    return raw
+
 
 def env_lines(family: str, values: dict[str, Any],
               notes: dict[str, str] | None = None) -> list[str]:
@@ -408,6 +454,19 @@ def env_lines(family: str, values: dict[str, Any],
             value = "0"
         elif isinstance(value, (list, tuple)):
             value = ",".join(str(v) for v in value)
+        value = str(value)
+        if family == "darwin":
+            value = shlex.quote(value)
+        elif family == "windows":
+            bad = _CMD_UNSAFE.intersection(value)
+            if bad:
+                raise RuntimeError(
+                    f"{key}={value!r} contains {''.join(sorted(bad))!r} -- "
+                    f"cmd's `set` has no safe way to carry that character, "
+                    f"and gateway.env.cmd is `call`ed as batch, not read as "
+                    f"data. Fix the value in host.yml/fleet.yml (or the "
+                    f"--set that supplied it) rather than writing a file "
+                    f"that would run part of it as a command.")
         out.append(style.format(k=key, v=value))
     return out
 
