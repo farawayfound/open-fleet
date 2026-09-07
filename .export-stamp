@@ -1,8 +1,8 @@
 {
   "format": 1,
-  "private_sha": "9f0b000c5ad3ccef966c2c1f110fcef46a168d43",
-  "exported_at": "2026-09-07T02:39:57+00:00",
-  "files": 91,
+  "private_sha": "00543f46ed0f21fd75aa5a12c61232783d5540a4",
+  "exported_at": "2026-09-07T15:36:41+00:00",
+  "files": 94,
   "overlay_files": 15,
   "executable": [
     "gateway/bin/llmstack-gpuconf",

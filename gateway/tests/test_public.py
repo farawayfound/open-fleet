@@ -1028,11 +1028,12 @@ class TestPublicCatalogueEndpoints:
         r = client.get("/public/api/models")
         assert r.status_code == 200
         body = r.json()
-        assert len(body["models"]) == 19
+        assert len(body["models"]) == 20
         ids = {m["public_id"] for m in body["models"]}
         assert "gemma4-31b-qat" in ids
         assert "qwen3.8-9b-distill" in ids
         assert "ornith-1.5-35b-a3b" in ids
+        assert "ornith-1.5-9b" in ids
         assert "tiel-coder-35b-a3b" in ids
         resident = next(m for m in body["models"] if m["public_id"] == "gemma4-31b-qat")
         assert resident["availability"] == "resident"
