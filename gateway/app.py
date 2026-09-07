@@ -11797,9 +11797,18 @@ def preload_plan() -> list[dict]:
 
 
 async def _preload_touch(item: dict) -> None:
-    """Ask one box for a single token of the pinned model. Loads it when it is
-    missing and restarts the ttl clock when it is not -- llama-swap counts
-    that clock from the last request, not from the load."""
+    """Ask one box to hold the pinned model. Loads it when it is missing and
+    restarts the ttl clock when it is not -- llama-swap counts that clock
+    from the last request, not from the load.
+
+    On a llama.cpp box this is a metadata request (touch_upstream), NOT a
+    completion. It used to ask for one token, which did keep the model warm
+    and also took the box's single inference slot: measured on mac-laptop-1
+    2026-09-07, that probe was the only thing in a controlled run that
+    evicted a ~1 GiB prompt-cache entry and dropped the next real request
+    from a 2-second cache hit to a 70-second full prompt re-read. An Ollama
+    box has no llama-swap and keeps its own clock, so it still gets the
+    keep_alive generate -- the only way /v1 can express one there."""
     cand, host, fid = item["cand"], item["host"], item["fleet_id"]
     engine = _routes_cache.get("engine", {}).get(host, "")
     if engine == "ollama" and cand:
@@ -11809,12 +11818,12 @@ async def _preload_touch(item: dict) -> None:
                                {"model": fid, "keep_alive": "30m"},
                                timeout=PRELOAD_LOAD_TIMEOUT)
         status = r.status_code
+    elif not cand:
+        ok, detail = await touch_upstream(fid)
+        status = 200 if ok else 502
     else:
-        payload = json.dumps({"model": fid, "max_tokens": 1, "stream": False,
-                              "messages": [{"role": "user", "content": "Reply with OK."}]
-                              }).encode()
-        r = await _post_chat(cand, payload, PRELOAD_LOAD_TIMEOUT)
-        status = r.status_code
+        status, _body = await _peer_admin(cand, "POST", "models/touch",
+                                          {"model": fid}, timeout=PRELOAD_LOAD_TIMEOUT)
     if status >= 400:
         _mark_host_down(host, COOLDOWN_UPSTREAM_5XX if status >= 500 else 5.0,
                         "preload answered HTTP " + str(status))
@@ -14332,7 +14341,11 @@ async def _try_load(mid: str, want_ctx: int, job: dict) -> tuple[bool, str]:
     props = await upstream_props(mid)
     got = props.get("n_ctx")
     if want_ctx and isinstance(got, int) and got > 0 and got < want_ctx:
-        return False, ("loaded with only " + str(got) + " tokens of context, "
+        # `want_ctx` is per SLOT, which is what /props reports -- see the
+        # division at the call site.
+        slots = props.get("slots")
+        per = " per slot" if isinstance(slots, int) and slots > 1 else ""
+        return False, ("loaded with only " + str(got) + " tokens of context" + per + ", "
                        + "not the " + str(want_ctx) + " configured")
     return True, ""
 
@@ -14389,7 +14402,14 @@ async def _verify_apply(queue: list[dict], before: dict[str, dict]) -> None:
     for rec in queue:
         mid = str(rec.get("id"))
         pinned = int(rec.get("ctx", 0) or 0) > 0
-        want = resolve_ctx(rec)[0] if pinned else 0
+        # `ctx` is the TOTAL llama.cpp is given (-c), and llama.cpp divides it
+        # among the slots `parallel` asks for, so a two-slot record asking for
+        # 131072 comes up correctly reporting 65536 -- which is also all
+        # /props can report, since it answers per slot. Comparing the total
+        # against that failed every multi-slot record and rolled it back
+        # (mac-laptop-1, 2026-09-07, moving the work model to 2 slots).
+        slots = max(1, int(rec.get("parallel", 1) or 1))
+        want = resolve_ctx(rec)[0] // slots if pinned else 0
         ok, why, tail = await attempt(
             mid, want, "loading the new config (evicts whatever is resident)")
         if ok:
@@ -14795,6 +14815,64 @@ async def api_model_load(request: Request,
     _manual_load.update(model=mid, status="loading", why="", at=now())
     asyncio.create_task(_manual_load_task(mid))
     return {"started": mid, "load": dict(_manual_load)}
+
+
+async def touch_upstream(mid: str, timeout: float = PRELOAD_LOAD_TIMEOUT) -> tuple[bool, str]:
+    """Ask llama-swap for a model WITHOUT asking a model to generate.
+
+    `GET /upstream/<id>/health` is the same lever _try_load() and the warm-up
+    button pull: llama-swap starts the model when it is not resident (and
+    blocks until it is up), and any /upstream request refreshes the ttl clock
+    it counts from -- but the request never reaches llama-server's slot/KV
+    pipeline, so it cannot disturb what is cached there.
+
+    That distinction is the whole reason this exists. The keep-warm loop used
+    to send a one-token completion, and on mac-laptop-1 (2026-09-07) that was the
+    only operation in a measured run that evicted a ~1 GiB prompt-cache entry
+    and pushed the next real request off the cache-hit path -- turning a
+    2-second turn into a 70-second one, because a box with `--parallel 1` has
+    exactly one slot and the probe takes it. Returns (ok, detail)."""
+    assert client is not None
+    try:
+        r = await client.get("/upstream/" + quote(mid, safe="") + "/health",
+                             timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 -- the caller decides what a failure means
+        return False, f"{type(exc).__name__}: {exc}"[:160]
+    if r.status_code >= 400:
+        return False, "HTTP " + str(r.status_code)
+    return True, "ok"
+
+
+@app.post("/admin/api/models/touch")
+async def api_model_touch(request: Request,
+                          admin: dict = Depends(require_admin)) -> dict:
+    """Keep one model loaded ({"model": id}) without occupying a slot.
+
+    What the fleet's keep-warm loop calls on a llama.cpp box. Unlike
+    /admin/api/models/load this is synchronous and returns only when the
+    model is up (or the attempt failed), because the caller is a convergence
+    loop that wants the verdict, not a dashboard that wants a job to watch."""
+    if UPSTREAM_MODELS:
+        raise HTTPException(
+            501, "an Ollama box has no llama-swap to touch -- a keep_alive "
+            "generate is what holds a model there")
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 -- not JSON is a caller error, not a 500
+        raise HTTPException(400, "expected {model: id}")
+    mid = str((payload or {}).get("model") or "").strip() \
+        if isinstance(payload, dict) else ""
+    if not mid:
+        raise HTTPException(400, "expected {model: id}")
+    known = {str(r.get("id")) for r in load_models() if r.get("enabled", True)}
+    if mid not in known:
+        raise HTTPException(404, "not a model this box serves: " + mid[:64])
+    started = time.time()
+    ok, detail = await touch_upstream(mid)
+    if not ok:
+        raise HTTPException(502, "touch failed: " + detail)
+    _running_cache["t"] = 0.0
+    return {"model": mid, "ms": int((time.time() - started) * 1000), "detail": detail}
 
 
 @app.put("/admin/api/models/warm")
