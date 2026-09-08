@@ -1,62 +1,14 @@
 // Render the dashboard's machine grid outside a browser.
 //
-// The page's whole script block is evaluated in a vm with a DOM stub thin
-// enough to be obvious and thick enough for renderMachines(): everything it
-// touches is a querySelector, an innerHTML assignment or an event listener
-// that never fires. Then the grid is rendered from hand-built overview rows
-// -- online, offline, killswitched, reserve, hub, self -- and the resulting
-// HTML is asserted on. Catches exactly what a syntax check cannot: a template
-// that throws on a null status, a pill on the wrong card.
-import fs from "node:fs";
-import path from "node:path";
+// The page's whole script block is evaluated by dashboard_page.mjs (the shared
+// harness); this file drives what that gives back. The grid is rendered from
+// hand-built overview rows -- online, offline, killswitched, reserve, hub,
+// self -- and the resulting HTML is asserted on. Catches exactly what a syntax
+// check cannot: a template that throws on a null status, a pill on the wrong
+// card.
 import vm from "node:vm";
-import {fileURLToPath} from "node:url";
 
-// Resolved from this file, never written out: an absolute path here would
-// carry a developer's home directory into the public export, which denylists
-// it. gateway/tests/ -> gateway/static/index.html.
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PAGE = path.join(HERE, "..", "static", "index.html");
-const html = fs.readFileSync(PAGE, "utf8");
-const src = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
-
-const sink = {};                       // selector -> last innerHTML written
-const el = (sel) => ({
-  set innerHTML(v) { sink[sel] = v; },
-  get innerHTML() { return sink[sel] || ""; },
-  set textContent(v) { sink[sel + ":text"] = v; },
-  get textContent() { return sink[sel + ":text"] || ""; },
-  classList: {add() {}, remove() {}, contains: () => false, toggle() {}},
-  setAttribute() {}, getAttribute: () => null, removeAttribute() {},
-  addEventListener() {}, appendChild() {}, insertBefore() {}, remove() {},
-  querySelector: () => null, querySelectorAll: () => [],
-  style: {}, dataset: {}, closest: () => null, focus() {}, scrollTo() {},
-});
-const doc = {
-  querySelector: (s) => el(s),
-  querySelectorAll: () => [],
-  getElementById: (s) => el("#" + s),
-  createElement: () => el("<new>"),
-  addEventListener() {}, body: el("body"), documentElement: el("html"),
-  cookie: "", hidden: false,
-};
-const ctx = {
-  document: doc, window: {addEventListener() {}, location: {search: "", hash: ""}},
-  location: {search: "", hash: "", pathname: "/"},
-  localStorage: {getItem: () => null, setItem() {}, removeItem() {}},
-  fetch: async () => { throw new Error("no network in this harness"); },
-  console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
-  requestAnimationFrame: () => 0, navigator: {clipboard: {writeText: async () => {}}},
-  EventSource: class { addEventListener() {} close() {} },
-  Intl, Date, Math, JSON, URLSearchParams, URL, TextEncoder, TextDecoder,
-  Promise, Error, Array, Object, Map, Set, RegExp, String, Number, Boolean,
-  AbortController, Headers: class {}, FormData: class {}, Blob: class {},
-  addEventListener() {}, removeEventListener() {}, matchMedia: () => ({matches: false,
-    addEventListener() {}}), getComputedStyle: () => ({}), alert() {}, confirm: () => true,
-};
-ctx.globalThis = ctx;
-vm.createContext(ctx);
-vm.runInContext(src, ctx, {filename: "index.html<script>"});
+import {ctx, sink, html, src} from "./dashboard_page.mjs";
 
 const spec = (over = {}) => ({cpu: "CPU", gpu: "GPU", ram_gb: 128, vram_gb: 96,
                              mem_bw_gbs: 256, gpu_tflops: 40, ...over});

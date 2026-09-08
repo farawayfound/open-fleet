@@ -986,17 +986,23 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <b>think</b> controls hybrid reasoning. On <code>auto</code> these models can
       spend an entire <code>max_tokens</code> budget thinking and return empty
       content — set <code>off</code> if a client reports blank replies.<br>
-      <b>warm</b> is this box's standby policy: <code>startup</code> preloads the
-      model whenever the engine starts (one per box; pair with ttl 0 to keep it
-      for good), <code>always</code> pins it resident beside the swap group so
-      nothing evicts it. The Overview card's “warm at startup” control drives
-      the same flag.</p>
+      <b>boot</b> is the one model this box loads the moment its engine starts
+      and keeps warm — a radio, because the swap group holds one model at a
+      time and a second choice would only evict the first. Click the selected
+      circle again to clear it: the box then loads nothing until somebody asks
+      for something. Pair it with ttl 0 so the model stays. <b>pinned</b> is
+      the other half of the standby policy: <code>always</code> gives the model
+      its own group beside the swap group, resident from start-up and safe from
+      eviction, which is why a pinned model does not take the boot slot. Both
+      apply on <b>Save &amp; apply</b>; the Overview card's “warm at startup”
+      picker drives the same boot flag and applies the moment you press Set.</p>
     <div style="overflow-x:auto">
       <table id="mtab">
         <thead><tr>
           <th>On</th><th>Model id</th><th>GGUF</th>
           <th class="num">ctx</th><th class="num">ngl</th><th class="num">n-cpu-moe</th>
-          <th>think</th><th class="num">ttl s</th><th>warm</th><th>extra flags</th><th></th>
+          <th>think</th><th class="num">ttl s</th><th>boot</th><th>pinned</th>
+          <th>extra flags</th><th></th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -2319,8 +2325,19 @@ async function loadStatus() {
   // The context each resident model actually got. A model can be loaded and
   // still be the wrong shape for the job it is doing, and this is the number
   // that says so.
-  const ctxOf = m => m.n_ctx ? fmtN(m.n_ctx) + " ctx" +
-    (m.slots > 1 ? ` · ${m.slots} slots (${fmtN(Math.floor(m.n_ctx / m.slots))} each)` : "") : "";
+  // llama.cpp's /props reports n_ctx PER SLOT, not the total the server was
+  // given -- see upstream_props() and the note at the ctx verify in app.py.
+  // So the total is n_ctx * slots, and the per-conversation window IS n_ctx.
+  // This used to print n_ctx as the total and then divide it by slots again,
+  // which showed a two-slot 131,072 model as "65,536 ctx · 2 slots (32,768
+  // each)" -- both numbers half the truth, on the one line whose whole job is
+  // to say what the model actually got.
+  const ctxOf = m => {
+    if (!m.n_ctx) return "";
+    const slots = Math.max(1, m.slots || 1);
+    return fmtN(m.n_ctx * slots) + " ctx" +
+      (slots > 1 ? ` · ${slots} slots (${fmtN(m.n_ctx)} each)` : "");
+  };
   const conf = Object.fromEntries((s.models_configured || []).map(c => [c.id, c]));
   $("#running tbody").innerHTML = run.length
     ? run.map(m => `<tr><td class="mono">${esc(m.id)}${
@@ -3842,24 +3859,47 @@ function renderModels() {
               `<option value="${v}" ${(m.reasoning||"auto") === v ? "selected" : ""}>${v}</option>`).join("")}
           </select></td>
       <td><input class="s" type="number" value="${m.ttl}" onchange="upd(${i},'ttl',+this.value)"></td>
-      <td><select onchange="updWarm(${i},this.value)" style="width:96px"
-            data-help="warm standby">
-            ${[["", "off"], ["preload", "startup"], ["persistent", "always"]].map(([v, t]) =>
-              `<option value="${v}" ${(m.persistent ? "persistent" : m.preload ? "preload" : "") === v ? "selected" : ""}>${t}</option>`).join("")}
+      <td style="text-align:center"><input type="radio" name="bootmodel" style="width:auto"
+            data-help="warm standby"
+            ${m.preload && !m.persistent ? "checked" : ""} ${m.persistent ? "disabled" : ""}
+            title="${m.persistent
+              ? "pinned already \u2014 resident from start-up and never evicted"
+              : "load this model when the engine starts, and keep it warm; click again to clear"}"
+            onclick="bootPick(${i})"></td>
+      <td><select onchange="updPinned(${i},this.value)" style="width:82px">
+            ${[["", "no"], ["persistent", "always"]].map(([v, t]) =>
+              `<option value="${v}" ${(m.persistent ? "persistent" : "") === v ? "selected" : ""}>${t}</option>`).join("")}
           </select></td>
       <td><input value="${esc(m.extra_flags)}" onchange="upd(${i},'extra_flags',this.value)" style="min-width:160px"></td>
       <td><button class="act danger" onclick="MODELS.splice(${i},1);renderModels()">×</button></td>
-    </tr>`).join("") || `<tr><td colspan="11" class="muted">${UPSTREAM.enabled
+    </tr>`).join("") || `<tr><td colspan="12" class="muted">${UPSTREAM.enabled
       ? "no llama-swap models here — this box is Ollama-managed, see the table above"
       : "no models configured yet — download a GGUF on the Library tab, then add it here"}</td></tr>`;
 }
 const upd = (i, k, v) => { MODELS[i][k] = v; };
-// warm: "" = load on demand; "preload" = load at engine start-up (one per
-// box -- the save refuses two, the swap group holds one model); "persistent"
-// = own warm group, resident forever, nothing may evict it.
-const updWarm = (i, v) => {
-  MODELS[i].preload = v === "preload";
+// The boot slot (models.json's `preload`) is a radio and not a per-row switch
+// because a box has exactly one: the swap group holds one model at a time, so
+// a second preload is not a second warm model, it is one cold load followed by
+// another that evicts it -- which is why check_preload_count refuses the save
+// outright. Clicking the checked circle clears the slot, and the box then
+// loads nothing until a request asks for something. A radio cannot report
+// "none" by itself (there is no unchecked state to click), so this reads the
+// flag we are about to change: `was` is the state the click just overwrote in
+// the DOM, and re-rendering puts the DOM back in step with MODELS either way.
+const bootPick = (i) => {
+  const was = !!MODELS[i].preload && !MODELS[i].persistent;
+  MODELS.forEach(m => { if (!m.persistent) m.preload = false; });
+  if (!was) MODELS[i].preload = true;
+  renderModels();
+};
+// pinned: its own llama-swap group, resident from start-up, nothing may evict
+// it. It is warm at boot by definition (render_swap_config preloads every
+// persistent model), so it gives up the boot slot rather than holding one the
+// radio would then have to show as unavailable.
+const updPinned = (i, v) => {
   MODELS[i].persistent = v === "persistent";
+  if (MODELS[i].persistent) MODELS[i].preload = false;
+  renderModels();
 };
 function addModel() {
   MODELS.push(Object.assign({}, DEFAULTS, {id: "new-model-" + (MODELS.length + 1)}));

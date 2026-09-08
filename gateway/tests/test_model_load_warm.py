@@ -382,3 +382,97 @@ class TestStatusCarriesLoadAndWarmState:
             {"id": "b", "preload": True, "persistent": True},
         ]
         assert body["manual_load"] == dict(gw._manual_load)
+
+
+class TestTouchEndpoint:
+    """POST /admin/api/models/touch {"model": id} -- keep a model loaded
+    without occupying an inference slot.
+
+    The fleet's keep-warm loop used to ask for one token. That worked, and it
+    also took the box's only slot: measured on mac-laptop-1 2026-09-07, the probe
+    was the single operation in a controlled run that evicted a ~1 GiB
+    prompt-cache entry and dropped the next real request from a 2-second
+    cache hit to a 70-second full prompt re-read. `GET /upstream/<id>/health`
+    on llama-swap is the same load-and-refresh lever (_try_load pulls it too)
+    and never reaches llama-server's slot/KV pipeline.
+    """
+
+    class _Upstream:
+        def __init__(self, status=200, boom=None):
+            self.status, self.boom, self.paths = status, boom, []
+
+        async def get(self, path, timeout=None):
+            self.paths.append(path)
+            if self.boom:
+                raise self.boom
+            return type("R", (), {"status_code": self.status})()
+
+    def test_it_asks_llama_swap_for_the_model_and_never_completes(
+            self, registry, client, admin_headers, monkeypatch):
+        gw.save_models([rec("keeper", preload=True)])
+        up = self._Upstream()
+        monkeypatch.setattr(gw, "client", up)
+
+        r = client.post("/admin/api/models/touch", headers=admin_headers,
+                        json={"model": "keeper"})
+
+        assert r.status_code == 200
+        assert r.json()["model"] == "keeper"
+        assert up.paths == ["/upstream/keeper/health"]
+
+    def test_a_model_id_is_url_quoted(
+            self, registry, client, admin_headers, monkeypatch):
+        gw.save_models([rec("qwen3.8/27b")])
+        up = self._Upstream()
+        monkeypatch.setattr(gw, "client", up)
+
+        client.post("/admin/api/models/touch", headers=admin_headers,
+                    json={"model": "qwen3.8/27b"})
+
+        assert up.paths == ["/upstream/" + quote("qwen3.8/27b", safe="") + "/health"]
+
+    def test_a_model_this_box_does_not_serve_is_a_404(
+            self, registry, client, admin_headers, monkeypatch):
+        gw.save_models([rec("keeper")])
+        monkeypatch.setattr(gw, "client", self._Upstream())
+        r = client.post("/admin/api/models/touch", headers=admin_headers,
+                        json={"model": "nope"})
+        assert r.status_code == 404
+
+    def test_a_disabled_model_is_not_touchable(
+            self, registry, client, admin_headers, monkeypatch):
+        gw.save_models([rec("keeper", enabled=False)])
+        monkeypatch.setattr(gw, "client", self._Upstream())
+        r = client.post("/admin/api/models/touch", headers=admin_headers,
+                        json={"model": "keeper"})
+        assert r.status_code == 404
+
+    def test_an_upstream_failure_is_a_502_not_a_500(
+            self, registry, client, admin_headers, monkeypatch):
+        gw.save_models([rec("keeper")])
+        monkeypatch.setattr(gw, "client", self._Upstream(status=503))
+        r = client.post("/admin/api/models/touch", headers=admin_headers,
+                        json={"model": "keeper"})
+        assert r.status_code == 502
+
+    def test_a_connection_error_is_reported_not_raised(
+            self, registry, client, admin_headers, monkeypatch):
+        gw.save_models([rec("keeper")])
+        monkeypatch.setattr(gw, "client",
+                            self._Upstream(boom=RuntimeError("no llama-swap")))
+        r = client.post("/admin/api/models/touch", headers=admin_headers,
+                        json={"model": "keeper"})
+        assert r.status_code == 502
+        assert "no llama-swap" in r.json()["detail"]
+
+    def test_an_ollama_box_has_nothing_to_touch(
+            self, client, admin_headers, monkeypatch):
+        """No llama-swap there; a keep_alive generate is what holds a model."""
+        monkeypatch.setattr(gw, "UPSTREAM_MODELS", True)
+        r = client.post("/admin/api/models/touch", headers=admin_headers,
+                        json={"model": "anything"})
+        assert r.status_code == 501
+
+    def test_it_needs_a_model_id(self, registry, client, admin_headers):
+        assert client.post("/admin/api/models/touch", headers=admin_headers,
+                           json={}).status_code == 400
