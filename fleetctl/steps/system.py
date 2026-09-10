@@ -187,8 +187,15 @@ class Grants(Step):
 
     def apply(self, ctx) -> None:
         script = ctx.repo / "hosts" / "linux" / "grants.sh"
-        helper = shapes.join(ctx.family, ctx.plan["paths"]["bin"], "llmstack-gpuconf")
-        ctx.sudo(["bash", str(script), ctx.plan["service"]["user"], helper])
+        # The helper's SOURCE is the checkout's copy. Passing the installed
+        # path made grants.sh `install` the file onto itself, which coreutils
+        # refuses ("are the same file") -- and that failed every fresh apply
+        # right after the step that had just installed the helper.
+        helper = ctx.repo / "gateway" / "bin" / "llmstack-gpuconf"
+        args = ["bash", str(script), ctx.plan["service"]["user"]]
+        if helper.is_file():
+            args.append(str(helper))
+        ctx.sudo(args)
         ctx.did("fleet sudoers grant installed")
 
 
@@ -306,7 +313,18 @@ class Firewall(Step):
             if r is None:
                 continue                      # the tool is not installed
             if r.returncode == 0:
-                return Check(MISSING, f"{tool} is running",
+                # The old code returned MISSING here unconditionally, so on
+                # Linux this step could never converge: apply added the rule
+                # and the re-check still said "is running" -> UNCHANGED,
+                # which aborted every apply on a box with an active firewall
+                # (mini-pc-1, 2026-09-09). A rule for the port, or a blanket
+                # allow on the tailnet interface (the fleet posture), is OK.
+                blob = (r.stdout or "") + (r.stderr or "")
+                if tool == "ufw" and "inactive" in blob.lower():
+                    return Check(SKIPPED, "ufw installed but inactive")
+                if f"{port}/tcp" in blob or "on tailscale0" in blob:
+                    return Check(OK, f"{tool}: {port}/tcp reachable")
+                return Check(MISSING, f"{tool} is running without a rule for {port}/tcp",
                              [f"allow {port}/tcp on the tailnet interface"])
             # Installed, and would not answer. `ufw status` unprivileged
             # exits with "You need to be root to run this script", which the
