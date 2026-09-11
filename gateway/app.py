@@ -1549,6 +1549,9 @@ FLEET_MODEL_NAMES: dict[str, tuple[str, ...]] = {
         "hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M",  # the Ollama tag
     ),
     "qwopus3.6-35b-coder": ("Qwopus3.6-35B", "Qwopus3.6-A3B"),
+    "ornith-1.5-9b": (
+        "hf.co/ornith-ai/Ornith-1.5-9B-GGUF:Q4_K_M",  # cpu-box-1's Ollama tag
+    ),
     "gemma-4-26b": ("gemma4:26b",),
     "qwen3.5-4b": ("qwen3.5:4b",),
 }
@@ -9200,7 +9203,7 @@ async def _http_error_handler(request: Request, exc: HTTPException) -> JSONRespo
 
 # ---- seeded catalogue -------------------------------------------------
 
-# The 15-row catalogue baked into the binary. Used only when
+# The catalogue baked into the binary. Used only when
 # gateway/public_seed.json (or LLMSTACK_PUBLIC_SEED) is missing or empty --
 # the orchestrator supplies that file, but a fresh checkout without it still
 # boots with a usable Fleet Pass.
@@ -9332,6 +9335,12 @@ PUBLIC_MODELS_SEED: list[dict] = [
     # the geometry settles it -- 40 blocks, matching Qwen 3.6 35B-A3B, where
     # Ornith has 41. Trained window and attention shape are Qwen 3.6's too,
     # which is why this row and qwen3.6-35b-a3b carry the same ctx_max.
+    {"public_id": "ornith-1.5-9b", "family": "Ornith", "name": "Ornith 1.5 9B",
+     "vendor": "ornith-ai", "arch": "dense", "params_b": 9, "active_b": 9,
+     "fleet_ids": ["ornith-1.5-9b", "hf.co/ornith-ai/Ornith-1.5-9B-GGUF:Q4_K_M"],
+     "allow_primary": 0, "allow_worker": 1,
+     "ctx_max": 262144, "ctx_default": 16384, "sort": 165,
+     "description": "The small sibling of Ornith 1.5 35B-A3B: a dense 9B on the Qwen 3.5 architecture, trained for the same 262k window. It answers at a pace a bigger model cannot and holds its shape on tool calls, which is why the fleet's own assistant runs its tool loop on it."},
     {"public_id": "tiel-coder-35b-a3b", "family": "Tiel", "name": "Tiel Coder 35B-A3B",
      "vendor": "community (peculiar-ragdoll, Qwen 3.6 fine-tune)", "arch": "moe",
      "params_b": 35, "active_b": 3,
@@ -9471,6 +9480,10 @@ _PRE_HARDWARE_CTX_MAX: dict[str, int] = {
     # migrates properly if that number is ever raised.
     "ornith-1.5-35b-a3b": 262144,
     "tiel-coder-35b-a3b": 262144,
+    # Joined 2026-09-07 on the same terms: 262144 is what the GGUF header
+    # reports (qwen35.context_length), not a number anyone chose. The boxes
+    # that serve it run a smaller window; this is the ceiling, not the plan.
+    "ornith-1.5-9b": 262144,
 }
 
 
@@ -11797,9 +11810,18 @@ def preload_plan() -> list[dict]:
 
 
 async def _preload_touch(item: dict) -> None:
-    """Ask one box for a single token of the pinned model. Loads it when it is
-    missing and restarts the ttl clock when it is not -- llama-swap counts
-    that clock from the last request, not from the load."""
+    """Ask one box to hold the pinned model. Loads it when it is missing and
+    restarts the ttl clock when it is not -- llama-swap counts that clock
+    from the last request, not from the load.
+
+    On a llama.cpp box this is a metadata request (touch_upstream), NOT a
+    completion. It used to ask for one token, which did keep the model warm
+    and also took the box's single inference slot: measured on mac-laptop-1
+    2026-09-07, that probe was the only thing in a controlled run that
+    evicted a ~1 GiB prompt-cache entry and dropped the next real request
+    from a 2-second cache hit to a 70-second full prompt re-read. An Ollama
+    box has no llama-swap and keeps its own clock, so it still gets the
+    keep_alive generate -- the only way /v1 can express one there."""
     cand, host, fid = item["cand"], item["host"], item["fleet_id"]
     engine = _routes_cache.get("engine", {}).get(host, "")
     if engine == "ollama" and cand:
@@ -11809,12 +11831,12 @@ async def _preload_touch(item: dict) -> None:
                                {"model": fid, "keep_alive": "30m"},
                                timeout=PRELOAD_LOAD_TIMEOUT)
         status = r.status_code
+    elif not cand:
+        ok, detail = await touch_upstream(fid)
+        status = 200 if ok else 502
     else:
-        payload = json.dumps({"model": fid, "max_tokens": 1, "stream": False,
-                              "messages": [{"role": "user", "content": "Reply with OK."}]
-                              }).encode()
-        r = await _post_chat(cand, payload, PRELOAD_LOAD_TIMEOUT)
-        status = r.status_code
+        status, _body = await _peer_admin(cand, "POST", "models/touch",
+                                          {"model": fid}, timeout=PRELOAD_LOAD_TIMEOUT)
     if status >= 400:
         _mark_host_down(host, COOLDOWN_UPSTREAM_5XX if status >= 500 else 5.0,
                         "preload answered HTTP " + str(status))
@@ -14332,7 +14354,11 @@ async def _try_load(mid: str, want_ctx: int, job: dict) -> tuple[bool, str]:
     props = await upstream_props(mid)
     got = props.get("n_ctx")
     if want_ctx and isinstance(got, int) and got > 0 and got < want_ctx:
-        return False, ("loaded with only " + str(got) + " tokens of context, "
+        # `want_ctx` is per SLOT, which is what /props reports -- see the
+        # division at the call site.
+        slots = props.get("slots")
+        per = " per slot" if isinstance(slots, int) and slots > 1 else ""
+        return False, ("loaded with only " + str(got) + " tokens of context" + per + ", "
                        + "not the " + str(want_ctx) + " configured")
     return True, ""
 
@@ -14389,7 +14415,14 @@ async def _verify_apply(queue: list[dict], before: dict[str, dict]) -> None:
     for rec in queue:
         mid = str(rec.get("id"))
         pinned = int(rec.get("ctx", 0) or 0) > 0
-        want = resolve_ctx(rec)[0] if pinned else 0
+        # `ctx` is the TOTAL llama.cpp is given (-c), and llama.cpp divides it
+        # among the slots `parallel` asks for, so a two-slot record asking for
+        # 131072 comes up correctly reporting 65536 -- which is also all
+        # /props can report, since it answers per slot. Comparing the total
+        # against that failed every multi-slot record and rolled it back
+        # (mac-laptop-1, 2026-09-07, moving the work model to 2 slots).
+        slots = max(1, int(rec.get("parallel", 1) or 1))
+        want = resolve_ctx(rec)[0] // slots if pinned else 0
         ok, why, tail = await attempt(
             mid, want, "loading the new config (evicts whatever is resident)")
         if ok:
@@ -14795,6 +14828,64 @@ async def api_model_load(request: Request,
     _manual_load.update(model=mid, status="loading", why="", at=now())
     asyncio.create_task(_manual_load_task(mid))
     return {"started": mid, "load": dict(_manual_load)}
+
+
+async def touch_upstream(mid: str, timeout: float = PRELOAD_LOAD_TIMEOUT) -> tuple[bool, str]:
+    """Ask llama-swap for a model WITHOUT asking a model to generate.
+
+    `GET /upstream/<id>/health` is the same lever _try_load() and the warm-up
+    button pull: llama-swap starts the model when it is not resident (and
+    blocks until it is up), and any /upstream request refreshes the ttl clock
+    it counts from -- but the request never reaches llama-server's slot/KV
+    pipeline, so it cannot disturb what is cached there.
+
+    That distinction is the whole reason this exists. The keep-warm loop used
+    to send a one-token completion, and on mac-laptop-1 (2026-09-07) that was the
+    only operation in a measured run that evicted a ~1 GiB prompt-cache entry
+    and pushed the next real request off the cache-hit path -- turning a
+    2-second turn into a 70-second one, because a box with `--parallel 1` has
+    exactly one slot and the probe takes it. Returns (ok, detail)."""
+    assert client is not None
+    try:
+        r = await client.get("/upstream/" + quote(mid, safe="") + "/health",
+                             timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 -- the caller decides what a failure means
+        return False, f"{type(exc).__name__}: {exc}"[:160]
+    if r.status_code >= 400:
+        return False, "HTTP " + str(r.status_code)
+    return True, "ok"
+
+
+@app.post("/admin/api/models/touch")
+async def api_model_touch(request: Request,
+                          admin: dict = Depends(require_admin)) -> dict:
+    """Keep one model loaded ({"model": id}) without occupying a slot.
+
+    What the fleet's keep-warm loop calls on a llama.cpp box. Unlike
+    /admin/api/models/load this is synchronous and returns only when the
+    model is up (or the attempt failed), because the caller is a convergence
+    loop that wants the verdict, not a dashboard that wants a job to watch."""
+    if UPSTREAM_MODELS:
+        raise HTTPException(
+            501, "an Ollama box has no llama-swap to touch -- a keep_alive "
+            "generate is what holds a model there")
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 -- not JSON is a caller error, not a 500
+        raise HTTPException(400, "expected {model: id}")
+    mid = str((payload or {}).get("model") or "").strip() \
+        if isinstance(payload, dict) else ""
+    if not mid:
+        raise HTTPException(400, "expected {model: id}")
+    known = {str(r.get("id")) for r in load_models() if r.get("enabled", True)}
+    if mid not in known:
+        raise HTTPException(404, "not a model this box serves: " + mid[:64])
+    started = time.time()
+    ok, detail = await touch_upstream(mid)
+    if not ok:
+        raise HTTPException(502, "touch failed: " + detail)
+    _running_cache["t"] = 0.0
+    return {"model": mid, "ms": int((time.time() - started) * 1000), "detail": detail}
 
 
 @app.put("/admin/api/models/warm")
@@ -16401,13 +16492,34 @@ async def api_served_models(admin: dict = Depends(require_admin)) -> dict:
 @app.get("/admin/api/routes")
 async def api_routes(admin: dict = Depends(require_admin)) -> dict:
     """Which host answers each model id, as the /v1 proxy would decide,
-    plus any name the fleet disagrees about (see alias_conflicts())."""
+    plus any name the fleet disagrees about (see alias_conflicts()).
+
+    "As the proxy would decide" means the SCORER's pick (model_hosts(), the
+    same ranking resolve_targets() gives a request), not the routing map
+    itself: model_routes() fills that map with `routes.setdefault(m, peer)`
+    in poll order -- this box first, then peers in peers.json order -- so
+    it records who SERVES a name, never who would be chosen. Until
+    2026-09-09 this table reported the map, and for a whole evening it said
+    qwen3.8-27b lived on server-1 (polled first, a CPU box at 4 tok/s)
+    while mac-laptop-1 sat awake at tier 0 holding the model resident; two
+    sessions read that as the fleet's decision and one built a fallback on
+    it. `serving` lists every box that could answer, so a reader can see
+    the alternatives the scorer ranked."""
     routes = await model_routes(force=True)
     peer_can = _routes_cache.get("alias", {})
     local_can = await served_canonical_map()
+    cands = _routes_cache.get("cands", {})
 
     def canon(m: str, h: str) -> str:
         return (peer_can.get((h, m)) if h else local_can.get(m)) or m
+
+    chosen: dict[str, str] = {}
+    for m, first_seen in routes.items():
+        try:
+            hosts = await model_hosts(m)
+        except Exception:  # noqa: BLE001 -- a scorer hiccup must not blank the table
+            hosts = []
+        chosen[m] = hosts[0] if hosts else first_seen
 
     return {
         "self": HOST_NAME,
@@ -16417,8 +16529,9 @@ async def api_routes(admin: dict = Depends(require_admin)) -> dict:
         "models": sorted(
             (
                 {"model": m, "host": h or HOST_NAME, "canonical": canon(m, h),
-                 "alias": canon(m, h) != m}
-                for m, h in routes.items()
+                 "alias": canon(m, h) != m,
+                 "serving": sorted((c or HOST_NAME) for c in cands.get(m, []))}
+                for m, h in chosen.items()
             ),
             key=lambda r: (r["host"], r["model"]),
         ),
@@ -16431,6 +16544,48 @@ async def api_routes(admin: dict = Depends(require_admin)) -> dict:
         # are never each other's alternatives.
         "split_models": split_models(),
     }
+
+
+@app.get("/admin/api/resolve")
+async def api_resolve(model: str, prompt_tokens: int = 0, gen_tokens: int = 256,
+                      role: str = "primary", admin: dict = Depends(require_admin)) -> dict:
+    """Where a request for `model` would go right now, best first, with the
+    inputs behind each rank -- the answer the /v1 proxy computes for a real
+    request (resolve_targets), shaped by the request's own size.
+
+    This is the surface for anything that has to know where a turn will
+    LAND before sending it (the hub's work-lane fallback), and for the
+    next "why did the fleet pick that box" question: every term of the
+    scorer's key is here by name, so a wrong answer can be read off rather
+    than reproduced. `served` is false when no box answers to the name."""
+    prompt_tokens = max(0, int(prompt_tokens))
+    gen_tokens = max(0, int(gen_tokens))
+    role = role if role in ("primary", "worker") else "primary"
+    ranked = await resolve_targets(model, role=role, prompt_tokens=prompt_tokens,
+                                   gen_tokens=gen_tokens, need_ctx=prompt_tokens + gen_tokens)
+    running = _routes_cache.get("running", {})
+    cap = _routes_cache.get("cap", {})
+    meta_all = _routes_cache.get("meta", {})
+    targets = []
+    for cand, fid in ranked:
+        hname = cand or HOST_NAME
+        resident = fid in running.get(hname, set())
+        tier, rank = host_tier(cand, fid, role)
+        tps = await asyncio.to_thread(measured_tps, fid)
+        pp = await asyncio.to_thread(measured_pp, fid)
+        meta = meta_all.get((cand, fid)) or {}
+        targets.append({
+            "host": hname, "fleet_id": fid, "resident": resident,
+            "saturated": _host_saturated(cand, fid), "cooling": host_cooling(hname),
+            "reserved": host_reserved(hname), "tier": tier, "rank": rank,
+            "ctx": host_model_ctx(cand, fid), "fit": str(meta.get("fit") or ""),
+            "inflight": int(_inflight.get(hname, 0)),
+            "slots": max(1, int(cap.get((cand, fid), 1))),
+            "est_s": round(_est_wall(cand, fid, resident, tps, pp, prompt_tokens, gen_tokens), 1),
+        })
+    return {"model": model, "role": role, "prompt_tokens": prompt_tokens,
+            "gen_tokens": gen_tokens, "served": bool(targets), "targets": targets,
+            "generated_at": now()}
 
 
 @app.get("/admin/api/roles")
