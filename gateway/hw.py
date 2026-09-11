@@ -40,10 +40,156 @@ def _read_int(path: Path) -> int | None:
         return None
 
 
-def amdgpu_stats() -> list[dict]:
-    """Read amdgpu telemetry straight from sysfs -- no ROCm runtime needed."""
+def amdgpu_pdev(dev: Path) -> str | None:
+    """The card's PCI slot, e.g. '0000:c5:00.0'.
+
+    /sys/class/drm/cardN/device is a symlink into the PCI tree, so the slot is
+    the last component of what it points at. This is the only thing that ties a
+    sysfs card to the `drm-pdev:` line in a process's fdinfo, which is how the
+    fallback below attributes engine time to the right GPU on a box with more
+    than one. None when the path is not a link (a test's fake tree, an older
+    kernel layout) -- the caller then simply does not filter by slot.
+    """
+    try:
+        return dev.readlink().name or None
+    except OSError:
+        return None
+
+
+def _engine_ns(value: str) -> int:
+    """'105422134447 ns' -> 105422134447. The unit is always ns in the DRM
+    fdinfo spec, but it is part of the value, so it has to come off."""
+    try:
+        return int(value.split()[0])
+    except (IndexError, ValueError):
+        return 0
+
+
+def amdgpu_fdinfo_engine_ns(pdev: str | None,
+                            proc_root: Path = Path("/proc")) -> tuple[int, int]:
+    """Nanoseconds of GPU engine time every DRM client on this box has used,
+    and how many clients that was.
+
+    The DRM core exposes per-client engine accounting in /proc/<pid>/fdinfo/<fd>
+    for each open /dev/dri handle: `drm-driver`, `drm-pdev`, `drm-client-id`
+    and a monotonically increasing `drm-engine-<name>` per engine. Summing gfx
+    and compute is what amdgpu_top and nvtop do -- the rest (dec, enc) is video
+    transcode and is not the load anyone means by "is the GPU busy".
+
+    Three details that are not obvious:
+
+    * The fd list is pre-filtered by readlink BEFORE any fdinfo is opened. A
+      busy box has thousands of open fds and only a handful are DRM handles;
+      reading every fdinfo to find that out would cost more than the reading is
+      worth. The match is on the target CONTAINING /dev/dri/ rather than
+      starting with it, so the tests can build a fake proc tree under a temp
+      directory -- a false positive there costs nothing, because the
+      drm-driver/drm-pdev check below still has to pass.
+    * Clients are DEDUPED by drm-client-id. A process that dup()s its DRM fd
+      has several fdinfo files carrying the same counters, and summing them
+      reports a single llama-server as several hundred percent busy.
+    * Every OSError is skipped in silence. /proc is full of processes this
+      user may not read, and that is the normal case, not a fault.
+    """
+    seen: dict[str, int] = {}
+    try:
+        pids = [p for p in proc_root.iterdir() if p.name.isdigit()]
+    except OSError:
+        return 0, 0
+    for pid in pids:
+        try:
+            fds = list((pid / "fd").iterdir())
+        except OSError:  # gone between the listing and the read, or not ours
+            continue
+        for fd in fds:
+            try:
+                target = str(fd.readlink()).replace("\\", "/")
+            except OSError:
+                continue
+            if "/dev/dri/" not in target:
+                continue
+            try:
+                text = (pid / "fdinfo" / fd.name).read_text()
+            except OSError:
+                continue
+            fields: dict[str, str] = {}
+            for line in text.splitlines():
+                k, sep, v = line.partition(":")
+                if sep:
+                    fields[k.strip()] = v.strip()
+            if fields.get("drm-driver") != "amdgpu":
+                continue
+            if pdev and fields.get("drm-pdev") and fields["drm-pdev"] != pdev:
+                continue
+            ns = (_engine_ns(fields.get("drm-engine-gfx", ""))
+                  + _engine_ns(fields.get("drm-engine-compute", "")))
+            # Keyed by client id where there is one; a dup'd fd repeats the
+            # same client, so max() rather than += -- and max() rather than
+            # "first wins" because the counters may have ticked on between the
+            # two reads and the later one is the truer figure.
+            key = fields.get("drm-client-id") or (pid.name + ":" + fd.name)
+            seen[key] = max(seen.get(key, 0), ns)
+    return sum(seen.values()), len(seen)
+
+
+# Per-pdev {slot: (monotonic seconds, total engine ns)} from the last reading.
+# Busy-ness is a rate, and fdinfo gives a total, so it takes two samples to say
+# anything at all -- and this function must never be the one to sleep between
+# them, because it is called from the status endpoint the whole dashboard hangs
+# off. The dashboard polls every few seconds; consecutive polls ARE the two
+# samples.
+_fdinfo_cache: dict[str, tuple[float, int]] = {}
+
+
+def amdgpu_fdinfo_busy_percent(pdev: str | None, *,
+                               proc_root: Path = Path("/proc"),
+                               now: float | None = None) -> float | None:
+    """GPU utilisation as a percentage, derived from the engine-time delta
+    since the previous call. None on the first call for a card (nothing to
+    diff against yet) and None when two calls land closer together than 0.2 s,
+    where the ratio is mostly sampling jitter."""
+    now = time.monotonic() if now is None else now
+    total_ns, _clients = amdgpu_fdinfo_engine_ns(pdev, proc_root)
+    key = pdev or ""
+    prev = _fdinfo_cache.get(key)
+    _fdinfo_cache[key] = (now, total_ns)
+    if prev is None:
+        return None
+    elapsed = now - prev[0]
+    if elapsed < 0.2:
+        return None
+    # Floored at zero, not just capped at 100: the total DROPS when a client
+    # exits (its engine time leaves with it), so a llama-server restart between
+    # two polls yields a negative delta, and "-40% busy" on the fleet page is a
+    # worse answer than "idle".
+    pct = (total_ns - prev[1]) / (elapsed * 1e9) * 100
+    return max(0.0, min(100.0, round(pct, 1)))
+
+
+def amdgpu_stats(drm_root: Path = Path("/sys/class/drm")) -> list[dict]:
+    """Read amdgpu telemetry straight from sysfs -- no ROCm runtime needed.
+
+    With one exception, and apu-box-1 is it. On the GMKtec EVO-X2 (Radeon 8060S,
+    Strix Halo gfx1151, PCI 1002:1586) the kernel's SMU-derived activity
+    counter never populates: measured on the box on 2026-09-10, mid-inference,
+    /sys/class/drm/card0/device/gpu_busy_percent read 0 while llama-server's
+    own DRM fdinfo carried drm-driver: amdgpu, the card's drm-pdev, and a
+    climbing drm-engine-compute of 105422134447 ns. The fleet page averages
+    busy_percent across a host's cards, so the box that serves the most work
+    rendered as 0% GPU while it was serving. So: a positive sysfs reading still
+    wins -- it is cheaper and the discrete cards (gpu-laptop-1's RX 6700S) report it
+    correctly -- and only 0 or an unreadable file falls through to the
+    per-client engine-time delta that amdgpu_top and nvtop compute from.
+
+    `busy_source` records which of the two answered, because "0% because the
+    box is idle" and "0% because neither source would say" are different facts
+    and the number alone cannot tell them apart. It is additive: the dashboard
+    reads busy_percent and nothing else.
+
+    `drm_root` is a seam for the tests, which cannot fake /sys.
+    """
     out = []
-    for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+    for card in sorted(drm_root.glob("card[0-9]*")):
         dev = card / "device"
         if not (dev / "gpu_busy_percent").exists():
             continue
@@ -58,10 +204,23 @@ def amdgpu_stats() -> list[dict]:
             temp = temp or _read_int(hw / "temp1_input")
             power = power or _read_int(hw / "power1_average")
             sclk = sclk or _read_int(hw / "freq1_input")
+        busy = _read_int(dev / "gpu_busy_percent")
+        if busy is not None and busy > 0:
+            source = "sysfs"
+        else:
+            fdinfo_busy = amdgpu_fdinfo_busy_percent(amdgpu_pdev(dev))
+            if fdinfo_busy is not None:
+                busy, source = fdinfo_busy, "fdinfo"
+            else:
+                # sysfs answered honestly with a zero, or did not answer and
+                # neither did fdinfo. Two different facts, and busy_source is
+                # the only place the difference survives.
+                source = "sysfs" if busy is not None else "none"
         out.append(
             {
                 "card": card.name,
-                "busy_percent": _read_int(dev / "gpu_busy_percent"),
+                "busy_percent": busy,
+                "busy_source": source,
                 "vram_total": vram_total,
                 "vram_used": vram_used,
                 "gtt_used": gtt_used,

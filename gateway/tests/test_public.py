@@ -1028,11 +1028,12 @@ class TestPublicCatalogueEndpoints:
         r = client.get("/public/api/models")
         assert r.status_code == 200
         body = r.json()
-        assert len(body["models"]) == 19
+        assert len(body["models"]) == 20
         ids = {m["public_id"] for m in body["models"]}
         assert "gemma4-31b-qat" in ids
         assert "qwen3.8-9b-distill" in ids
         assert "ornith-1.5-35b-a3b" in ids
+        assert "ornith-1.5-9b" in ids
         assert "tiel-coder-35b-a3b" in ids
         resident = next(m for m in body["models"] if m["public_id"] == "gemma4-31b-qat")
         assert resident["availability"] == "resident"
@@ -1056,6 +1057,88 @@ class TestPublicCatalogueEndpoints:
         forbidden = {"api_url", "url", "ip", "net", "storage", "disk", "services",
                     "temps", "error", "swap", "token", "tokens", "mounts", "peers", "os"}
         self._walk(r.json(), forbidden)
+
+    # ── /public/api/proof ───────────────────────────────────────────────────
+    # The numbers a post or a profile card may quote. They exist as an
+    # endpoint so nobody types a machine count into a README, a site page and
+    # a slide and has the three disagree a week later.
+
+    def test_proof_card_answers_without_a_key(self, client, fake_fleet):
+        r = client.get("/public/api/proof")
+        assert r.status_code == 200
+        body = r.json()
+        for key in ("generated_at", "boxes", "accelerator_memory_gb",
+                    "models", "context_max_tokens"):
+            assert key in body, key
+
+    def test_proof_card_counts_agree_with_the_overview(self, client, fake_fleet):
+        """The whole point: the page and whatever quotes it read one source."""
+        overview = client.get("/public/api/overview").json()
+        proof = client.get("/public/api/proof").json()
+        assert proof["boxes"]["registered"] == overview["totals"]["hosts"]
+        assert proof["boxes"]["online"] == overview["totals"]["online"]
+        assert proof["models"]["count"] == overview["totals"]["models"]
+        assert proof["generated_at"] == overview["generated_at"]
+
+    def test_proof_card_never_leaks_forbidden_fields(self, client, fake_fleet):
+        """It is built from the sanitized overview, so it should inherit that
+        guarantee -- asserted rather than assumed, because a field added here
+        later could reach past it."""
+        r = client.get("/public/api/proof")
+        assert r.status_code == 200
+        forbidden = {"api_url", "url", "ip", "net", "storage", "disk", "services",
+                    "temps", "error", "swap", "token", "tokens", "mounts", "peers", "os",
+                    "hosts", "host", "name"}
+        self._walk(r.json(), forbidden)
+
+    def test_proof_card_names_no_host_real_or_aliased(self, client, fake_fleet):
+        """A count is publishable; an inventory is not. Not even the Box N
+        aliases belong here -- the overview is where those are answered."""
+        raw = client.get("/public/api/proof").text
+        assert gw.HOST_NAME not in raw
+        assert "peer1" not in raw and "bigbox" not in raw
+        assert "Box " not in raw
+
+    def test_proof_card_families_are_deduplicated_and_sorted(self, client, fake_fleet):
+        body = client.get("/public/api/proof").json()
+        names = body["models"]["family_names"]
+        assert names == sorted(set(names))
+        assert body["models"]["families"] == len(names)
+        assert body["models"]["count"] >= body["models"]["families"]
+
+    def test_proof_card_reports_residency_and_the_best_context(self, client, fake_fleet):
+        """The fake fleet keeps gemma4-31b-qat resident locally and
+        qwen3.8-27b resident on a peer, and 131072 is the highest ceiling any
+        box there offers."""
+        body = client.get("/public/api/proof").json()
+        assert body["models"]["resident"] >= 1
+        assert body["context_max_tokens"] == 131072
+
+    def test_proof_card_online_memory_never_exceeds_registered(self, client, fake_fleet):
+        mem = client.get("/public/api/proof").json()["accelerator_memory_gb"]
+        assert 0 <= mem["online"] <= mem["registered"]
+        assert isinstance(mem["online"], int) and isinstance(mem["registered"], int)
+
+    def test_proof_card_survives_a_box_with_no_declared_spec(self):
+        """The hub declares no vram_gb at all. A missing, null or unparseable
+        spec must contribute zero rather than break the sum for everyone."""
+        overview = {
+            "generated_at": "2026-09-10T00:00:00Z",
+            "hosts": [
+                {"online": True, "specs": {"vram_gb": 96}},
+                {"online": True, "specs": {"vram_gb": None}},    # the hub
+                {"online": False, "specs": {}},                  # asleep laptop
+                {"online": True},                                # no specs key
+                {"online": True, "specs": {"vram_gb": "not a number"}},
+            ],
+            "models": [],
+        }
+        card = gw.build_proof_card(overview)
+        assert card["accelerator_memory_gb"] == {"registered": 96, "online": 96}
+        assert card["boxes"] == {"registered": 5, "online": 4}
+        assert card["models"] == {"count": 0, "families": 0,
+                                  "family_names": [], "resident": 0}
+        assert card["context_max_tokens"] == 0
 
     def test_overview_uses_box_aliases_never_real_names_or_os(
         self, client, fake_fleet, monkeypatch,

@@ -9,14 +9,14 @@ The counting, taken off the real scripts:
 
   SHAPE           boxes                       supervisor      env file
   linux-systemd   apu-box-1 hub cpu-box-1       systemd units   /etc/llmstack/
-                  server-1 gpu-laptop-1                           gateway.env
+                  mini-pc-1 server-1 gpu-laptop-1                  gateway.env
   macos-cron      mac-desktop mac-laptop-2 mac-laptop-1      crontab lines   ~/llmstack/
                                               (@reboot + a    gateway.env
                                               5-minute
                                               keepalive)
   windows-        apu-tablet-1 apu-tablet-2        SYSTEM          C:\\llmstack\\
-  schtasks        mini-pc-1 gpu-desktop-2         scheduled       gateway.env.cmd
-                  gpu-laptop-2 gpu-desktop-1               tasks
+  schtasks        gpu-desktop-2 gpu-laptop-2 gpu-desktop-1     scheduled       gateway.env.cmd
+                                              tasks
 
   ENGINE      boxes                                     upstream
   llama.cpp   apu-box-1 apu-tablet-1 apu-tablet-2 mac-laptop-2        127.0.0.1:8081
