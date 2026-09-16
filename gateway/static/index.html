@@ -617,6 +617,11 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <div class="field"><label class="f">daily cap</label>
         <input class="s" id="ps_auto_daily_cap" type="number"></div>
     </div>
+    <p class="hint">The window is clamped at mint to what the chosen model can actually be served with,
+      so asking for more than the fleet holds is safe &mdash; the key gets the ceiling, never a promise
+      the boxes cannot keep. It is stamped on each key when it is minted, so changing it here decides
+      what the <em>next</em> key gets; <strong>Apply ctx to live keys</strong> below pushes it onto the
+      keys already out in somebody&rsquo;s cover letter (raise-only, clamped per key to its own model).</p>
     <div class="spacer"></div>
     <label class="f">setup text</label>
     <textarea id="ps_auto_setup" style="min-height:90px"></textarea>
@@ -626,6 +631,8 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div class="row">
       <button class="act primary" onclick="savePubSettings()">Save settings</button>
       <button class="act" onclick="mintAutoTestKey()">Mint a test key</button>
+      <button class="act" onclick="resizeLiveKeyCtx(true)">Preview ctx on live keys</button>
+      <button class="act" onclick="resizeLiveKeyCtx(false)">Apply ctx to live keys</button>
       <button class="act" onclick="loadPubAuto()">Refresh</button>
     </div>
     <div id="pubautokey" style="margin-top:8px"></div>
@@ -693,6 +700,28 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       keeping the order its <span class="mono">sort</span> values already gave it.
       <b>Keep it loaded</b> asks every box that can hold the suggested model to stay warm
       on it — never interrupting one that is serving, and never downloading.</div>
+    <div class="spacer"></div>
+    <div class="row">
+      <div class="field"><label class="f">overflow slowdown (x)</label>
+        <input class="s" id="ps_overflow_slowdown" type="number" step="0.1" min="0" max="10"></div>
+      <div class="field"><label class="f">pressure warm-up</label>
+        <select id="ps_pressure_warm" style="width:90px"><option value="1">on</option><option value="0">off</option></select></div>
+      <div class="field"><label class="f">may use reserve boxes</label>
+        <select id="ps_pressure_warm_reserve" style="width:90px"><option value="1">on</option><option value="0">off</option></select></div>
+      <div class="field"><label class="f">sustained for (s)</label>
+        <input class="s" id="ps_pressure_warm_after" type="number" min="5" max="600"></div>
+      <div class="field"><label class="f">re-touch every (s)</label>
+        <input class="s" id="ps_pressure_warm_cooldown" type="number" min="60" max="3600"></div>
+    </div>
+    <div class="hint"><b>Overflow slowdown</b> keeps a free-but-much-slower box from
+      outranking a busy-but-fast one in routing: a free candidate more than this many
+      times slower than the fastest saturated candidate sorts behind it instead of ahead.
+      <span class="mono">0</span> turns the rule off. <b>Pressure warm-up</b> loads a
+      second box for a model whose first-choice box has stayed saturated for the
+      sustained window below — <b>may use reserve boxes</b> lets it reach for a reserve
+      box (e.g. apu-tablet-1) once every non-reserve candidate is busy; re-touch sets the
+      minimum spacing between repeat warm touches of the same box while pressure
+      persists.</div>
   </div>
   <div class="spacer"></div>
   <div class="card">
@@ -986,17 +1015,23 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <b>think</b> controls hybrid reasoning. On <code>auto</code> these models can
       spend an entire <code>max_tokens</code> budget thinking and return empty
       content — set <code>off</code> if a client reports blank replies.<br>
-      <b>warm</b> is this box's standby policy: <code>startup</code> preloads the
-      model whenever the engine starts (one per box; pair with ttl 0 to keep it
-      for good), <code>always</code> pins it resident beside the swap group so
-      nothing evicts it. The Overview card's “warm at startup” control drives
-      the same flag.</p>
+      <b>boot</b> is the one model this box loads the moment its engine starts
+      and keeps warm — a radio, because the swap group holds one model at a
+      time and a second choice would only evict the first. Click the selected
+      circle again to clear it: the box then loads nothing until somebody asks
+      for something. Pair it with ttl 0 so the model stays. <b>pinned</b> is
+      the other half of the standby policy: <code>always</code> gives the model
+      its own group beside the swap group, resident from start-up and safe from
+      eviction, which is why a pinned model does not take the boot slot. Both
+      apply on <b>Save &amp; apply</b>; the Overview card's “warm at startup”
+      picker drives the same boot flag and applies the moment you press Set.</p>
     <div style="overflow-x:auto">
       <table id="mtab">
         <thead><tr>
           <th>On</th><th>Model id</th><th>GGUF</th>
           <th class="num">ctx</th><th class="num">ngl</th><th class="num">n-cpu-moe</th>
-          <th>think</th><th class="num">ttl s</th><th>warm</th><th>extra flags</th><th></th>
+          <th>think</th><th class="num">ttl s</th><th>boot</th><th>pinned</th>
+          <th>extra flags</th><th></th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -1230,6 +1265,13 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div class="spacer"></div>
     <label class="f">allowed models (none checked = all allowed)</label>
     <div class="row" id="ag_models" data-help="allowed models" style="margin-top:5px"></div>
+    <div class="spacer"></div>
+    <div class="row">
+      <div class="field" style="flex:1;min-width:240px"><label class="f">prefer hosts (first wins)</label>
+        <input id="ag_prefer_hosts" data-help="prefer/exclude hosts" placeholder="gpu-laptop-1"></div>
+      <div class="field" style="flex:1;min-width:240px"><label class="f">never use</label>
+        <input id="ag_exclude_hosts" data-help="prefer/exclude hosts" placeholder="mac-laptop-1, apu-box-1"></div>
+    </div>
     <div class="spacer"></div>
     <div class="row">
       <div class="field"><label class="f">temperature</label><input class="s" id="ag_temp" type="number" step="0.05" placeholder="—"></div>
@@ -1669,6 +1711,34 @@ function actProgress(j) {
       : `${fmtN(p.done)} / ${fmtN(p.total)}${
           p.failed ? ` · <span style="color:var(--bad)">${fmtN(p.failed)} failed</span>` : ""}`}</div>`;
 }
+// The manual-routing cell on an Active-jobs row: only a real per-key
+// inference job carries key_id (C2 in gateway/app.py) -- everything else
+// (team/demo/native/download/batch) gets an empty cell so the table stays
+// aligned. Best-effort policy readout: AGENTS is only populated once the
+// Agents tab has been visited this session.
+function routeCell(j, i, scope) {
+  if (j.kind !== "inference" || j.key_id == null) return `<td class="muted">—</td>`;
+  const opts = sortedHosts().filter(h => h.online)
+    .map(h => `<option value="${esc(h.name)}">${esc(h.name)}</option>`).join("");
+  const a = AGENTS.find(x => x.key_id === j.key_id);
+  const p = a && a.profile;
+  let policy = "—";
+  if (p) {
+    try {
+      const pr = JSON.parse(p.prefer_hosts || "[]"), ex = JSON.parse(p.exclude_hosts || "[]");
+      const parts = [];
+      if (pr.length) parts.push("prefer: " + pr.join(", "));
+      if (ex.length) parts.push("exclude: " + ex.join(", "));
+      if (parts.length) policy = parts.join(" · ");
+    } catch {}
+  }
+  return `<td style="font-size:12px;white-space:nowrap">
+    <div class="muted" style="font-size:11px;margin-bottom:2px">${esc(policy)}</div>
+    <select id="pjh_${scope}_${i}" style="width:100px;font-size:12px">${opts}</select>
+    <button class="act" style="padding:2px 6px;font-size:11px" onclick="preferJobHost('${scope}',${i})">prefer</button>
+    <button class="act" style="padding:2px 6px;font-size:11px" onclick="preferJobHost('${scope}',${i},true)">clear</button>
+  </td>`;
+}
 function actRow(j, i, scope) {
   return `<tr>
     <td><span class="pill ${j.kind === "inference" ? "mid" : ""}">${esc(j.kind)}</span></td>
@@ -1679,6 +1749,7 @@ function actRow(j, i, scope) {
       j.detail ? `<div class="muted" style="font-size:11px">${esc(j.detail)}</div>` : ""}</td>
     <td class="num muted mono" style="font-size:12px">${age(j.age_s)}</td>
     <td style="width:20%">${actProgress(j)}</td>
+    ${routeCell(j, i, scope)}
     <td style="text-align:right"><button class="act danger" ${j.aborted ? "disabled" : ""}
       onclick="abortJob('${scope}',${i})">${j.aborted ? "aborting…" : "Abort"}</button></td>
   </tr>`;
@@ -1705,9 +1776,9 @@ async function loadActive() {
   $("#abortall").disabled = !ACTIVE.length;
   $("#acttab tbody").innerHTML =
     `<tr><th>kind</th><th>host</th><th>job</th><th class="num">age</th>
-      <th>progress</th><th></th></tr>` +
+      <th>progress</th><th>route</th><th></th></tr>` +
     (ACTIVE.length ? ACTIVE.map((j, i) => actRow(j, i, "fleet")).join("")
-      : `<tr><td class="muted" colspan="6">${ACT_IDLE}</td></tr>`);
+      : `<tr><td class="muted" colspan="7">${ACT_IDLE}</td></tr>`);
   // A box that cannot answer is not a box with nothing running, and saying
   // otherwise is exactly the sort of quiet lie an operator acts on.
   const blind = (d.hosts || []).filter(h => h.error);
@@ -1739,9 +1810,9 @@ async function loadNodeActive() {
   $("#nactmeta").textContent = NACTIVE.length ? `— ${NACTIVE.length} running` : "";
   $("#nabortall").disabled = !NACTIVE.length;
   $("#nacttab tbody").innerHTML =
-    `<tr><th>kind</th><th>job</th><th class="num">age</th><th>progress</th><th></th></tr>` +
+    `<tr><th>kind</th><th>job</th><th class="num">age</th><th>progress</th><th>route</th><th></th></tr>` +
     (NACTIVE.length ? NACTIVE.map((j, i) => actRow(j, i, "node")).join("")
-      : `<tr><td class="muted" colspan="5">nothing running on this machine</td></tr>`);
+      : `<tr><td class="muted" colspan="6">nothing running on this machine</td></tr>`);
 }
 
 async function abortJob(scope, i) {
@@ -1754,6 +1825,51 @@ async function abortJob(scope, i) {
     await hostApi(on, `/active/${encodeURIComponent(j.id)}/abort`, {method: "POST"});
   } catch (e) { return toast(e.message, true); }
   toast(`abort sent to ${on}`);
+  scope === "fleet" ? loadActive() : loadNodeActive();
+}
+
+// Manual per-key host routing from an Active-jobs row (phase 1's
+// prefer_hosts/exclude_hosts on the agent profile, C in the routing plan).
+// GET-then-PUT the key's own profile so only prefer_hosts changes -- the PUT
+// route writes every profile field unconditionally, so sending a bare
+// {prefer_hosts} body would blank the rest (see saveAgent() above, the same
+// shape this mirrors). The GET must be the SINGULAR per-key route
+// (api_agents_get, /agents/{key_id}) -- the plural /agents route takes no
+// key_id filter at all (FastAPI silently drops the unknown query param and
+// returns the most-recently-created key's page instead), which used to
+// splice an unrelated key's profile onto this one. That singular route also
+// hands back prefer_hosts/exclude_hosts already parsed to real arrays
+// (unlike the plural list's raw JSON-text profile), so exclude_hosts below
+// is read directly rather than JSON.parse'd again.
+async function preferJobHost(scope, i, clear) {
+  const j = (scope === "fleet" ? ACTIVE : NACTIVE)[i];
+  if (!j || j.key_id == null) return;
+  const on = j.on || j.host;
+  const sel = $(`#pjh_${scope}_${i}`);
+  const host = sel ? sel.value : "";
+  if (!clear && !host) return toast("pick a host first", true);
+  let p = {};
+  try {
+    p = await hostApi(on, "/agents/" + encodeURIComponent(j.key_id));
+  } catch (e) {
+    // No live profile yet for this key is the common case (most fleet keys
+    // never went through the Agents tab) -- fall through with defaults, same
+    // as the old item.profile == null fallback. Any other failure (host
+    // unreachable, auth) still aborts.
+    if (!/no such live profile/i.test(e.message || "")) return toast(e.message, true);
+  }
+  let overrides = {};
+  try { overrides = JSON.parse(p.param_overrides || "{}"); } catch {}
+  let allowed = [];
+  try { allowed = JSON.parse(p.allowed_models || "[]"); } catch {}
+  const exclude = Array.isArray(p.exclude_hosts) ? p.exclude_hosts : [];
+  try {
+    await hostApi(on, "/agents/" + j.key_id, {method: "PUT", body: {
+      enabled: p.enabled !== 0, name: p.name || "", system_prompt: p.system_prompt || "",
+      rules: p.rules || "", allowed_models: allowed, force_model: p.force_model || "",
+      param_overrides: overrides, prefer_hosts: clear ? [] : [host], exclude_hosts: exclude}});
+  } catch (e) { return toast(e.message, true); }
+  toast(clear ? "prefer-host cleared" : `now preferring ${host}`);
   scope === "fleet" ? loadActive() : loadNodeActive();
 }
 
@@ -2319,8 +2435,19 @@ async function loadStatus() {
   // The context each resident model actually got. A model can be loaded and
   // still be the wrong shape for the job it is doing, and this is the number
   // that says so.
-  const ctxOf = m => m.n_ctx ? fmtN(m.n_ctx) + " ctx" +
-    (m.slots > 1 ? ` · ${m.slots} slots (${fmtN(Math.floor(m.n_ctx / m.slots))} each)` : "") : "";
+  // llama.cpp's /props reports n_ctx PER SLOT, not the total the server was
+  // given -- see upstream_props() and the note at the ctx verify in app.py.
+  // So the total is n_ctx * slots, and the per-conversation window IS n_ctx.
+  // This used to print n_ctx as the total and then divide it by slots again,
+  // which showed a two-slot 131,072 model as "65,536 ctx · 2 slots (32,768
+  // each)" -- both numbers half the truth, on the one line whose whole job is
+  // to say what the model actually got.
+  const ctxOf = m => {
+    if (!m.n_ctx) return "";
+    const slots = Math.max(1, m.slots || 1);
+    return fmtN(m.n_ctx * slots) + " ctx" +
+      (slots > 1 ? ` · ${slots} slots (${fmtN(m.n_ctx)} each)` : "");
+  };
   const conf = Object.fromEntries((s.models_configured || []).map(c => [c.id, c]));
   $("#running tbody").innerHTML = run.length
     ? run.map(m => `<tr><td class="mono">${esc(m.id)}${
@@ -3217,11 +3344,21 @@ function renderPubPreload() {
         : `<span class="pill ok">keeping <span class="mono">${esc(p.model)}</span> loaded</span>`;
   const hosts = (p.hosts || []).map(h =>
     `<span class="pill ${PRELOAD_PILL[h.phase] || "dim"}" title="${esc(h.detail || "")}">
-      ${esc(h.box || h.host)} — ${esc(h.phase)}</span>`).join(" ");
+      ${esc(h.box || h.host)} — ${esc(h.phase)}${h.reason === "pressure" ? " ⚡ demand" : ""}</span>`).join(" ");
+  // Raw demand, shown even before any warm attempt fires -- a model can be
+  // under sustained pressure for a while before pressure_warm_after_s lets
+  // the loop actually reach for a second box.
+  const pressured = (p.pressured || []).map(x =>
+    `<span class="pill mid" title="${fmtN(x.count)} saturated resolve(s) in the last 2 minutes, first seen ${fmtN(x.age_s)}s ago">
+      ${esc(x.fleet_id)} — under pressure</span>`).join(" ");
   el.innerHTML = head + (hosts ? `<div style="margin-top:6px">${hosts}</div>` : "") +
+    (pressured ? `<div style="margin-top:6px"><span class="muted" style="font-size:12px">demand right now:</span> ${pressured}</div>` : "") +
     `<div class="hint">Only boxes that already hold the weights and can fit the whole
      model appear here; the loop never downloads and never interrupts a box that is
-     serving. Use the warm-up button on a key to put a model on a new box.</div>`;
+     serving. Use the warm-up button on a key to put a model on a new box.
+     A <span class="mono">⚡ demand</span> pill marks a box the pressure-warm loop
+     picked up because its first-choice box stayed saturated — see Settings for
+     the knobs that control it.</div>`;
 }
 async function runPubPreload() {
   try {
@@ -3541,6 +3678,11 @@ function renderPubSettings() {
     featSel.value = s.featured_model || "";
   }
   putBool("#ps_preload", s.preload_featured);
+  put("#ps_overflow_slowdown", s.overflow_max_slowdown);
+  putBool("#ps_pressure_warm", s.pressure_warm_enabled);
+  putBool("#ps_pressure_warm_reserve", s.pressure_warm_reserve);
+  put("#ps_pressure_warm_after", s.pressure_warm_after_s);
+  put("#ps_pressure_warm_cooldown", s.pressure_warm_cooldown_s);
   putBool("#ps_demo_enabled", s.demo_enabled);
   const demoSel = $("#ps_demo_model");
   if (demoSel && demoSel !== document.activeElement) {
@@ -3594,6 +3736,11 @@ async function savePubSettings() {
       .map(x => x.trim()).filter(Boolean),
     featured_model: $("#ps_featured").value,
     preload_featured: $("#ps_preload").value === "1",
+    overflow_max_slowdown: +$("#ps_overflow_slowdown").value || 0,
+    pressure_warm_enabled: $("#ps_pressure_warm").value === "1",
+    pressure_warm_reserve: $("#ps_pressure_warm_reserve").value === "1",
+    pressure_warm_after_s: +$("#ps_pressure_warm_after").value || 0,
+    pressure_warm_cooldown_s: +$("#ps_pressure_warm_cooldown").value || 0,
     demo_enabled: $("#ps_demo_enabled").value === "1",
     demo_model: $("#ps_demo_model").value,
     demo_ip_rph: +$("#ps_demo_ip_rph").value || 0,
@@ -3661,6 +3808,37 @@ async function mintAutoTestKey() {
     PUBKEY_IDS = null;
     toast("test key minted");
     loadPubKeys(); loadPubStats(); loadPubEvents(); loadPubAuto();
+  } catch (e) { toast(e.message, true); }
+}
+// The retrofit half of `auto-issue ctx`: the field decides the next key, this
+// decides the keys already in somebody's cover letter. Raise-only and clamped
+// per key server-side, so the worst a mis-click does is nothing.
+async function resizeLiveKeyCtx(dry) {
+  const out = $("#pubautokey");
+  const ctx = +$("#ps_auto_ctx").value || 0;
+  if (!dry && !confirm("Raise the context window on every live auto-issued key to "
+      + (ctx ? ctx.toLocaleString() : "the saved setting")
+      + " tokens? Keys already handed out start answering with the bigger window; "
+      + "their setup text still quotes the old number, but a client that reads "
+      + "/v1/models picks the new one up. Nothing is lowered.")) return;
+  try {
+    const r = await rawApi("/public/keys/resize-ctx", {method: "POST",
+      body: {ctx: ctx, scope: "auto", dry_run: !!dry}});
+    const rows = (r.keys || []).map(k =>
+      `<div class="mono" style="font-size:12px">#${k.id} ${esc(k.source)} ${esc(k.ref)} &mdash; `
+      + `${k.from.toLocaleString()} &rarr; ${k.to.toLocaleString()}`
+      + `${k.to < r.target ? ` <span class="muted">(capped at this model's ${k.ceiling.toLocaleString()})</span>` : ""}</div>`).join("");
+    const left = (r.unsynced || []).map(u =>
+      `<div class="mono" style="font-size:12px">#${u.id} ${esc(u.ref || "")} &mdash; left at ${(+u.ctx || 0).toLocaleString()}: `
+      + (u.reason === "dual_profile"
+        ? `both an agent and a team profile are live for this key; archive one (Agents / Teams tab).`
+        : `its ${u.kind === "team" ? "team" : "agent"} profile is archived or disabled, so it enforces no window at all `
+          + `&mdash; restore or re-enable it (${u.kind === "team" ? "Teams" : "Agents"} tab) or revoke the key.`) + `</div>`).join("");
+    out.innerHTML = `<div class="hint">${dry ? "Would raise" : "Raised"} ${r.updated} of ${r.scanned} live `
+      + `auto-issued key(s) to ${r.target.toLocaleString()} ctx; ${r.skipped} already at or above it.`
+      + ((r.unsynced || []).length ? ` <b>${r.unsynced.length} left alone</b> (listed last).` : "") + `</div>${rows}${left}`;
+    toast(dry ? `${r.updated} key(s) would move` : `${r.updated} key(s) raised`);
+    if (!dry) { loadPubKeys(); loadPubEvents(); loadPubAuto(); }
   } catch (e) { toast(e.message, true); }
 }
 // The demo's own report: the boxes the policy would use right now (real
@@ -3842,24 +4020,47 @@ function renderModels() {
               `<option value="${v}" ${(m.reasoning||"auto") === v ? "selected" : ""}>${v}</option>`).join("")}
           </select></td>
       <td><input class="s" type="number" value="${m.ttl}" onchange="upd(${i},'ttl',+this.value)"></td>
-      <td><select onchange="updWarm(${i},this.value)" style="width:96px"
-            data-help="warm standby">
-            ${[["", "off"], ["preload", "startup"], ["persistent", "always"]].map(([v, t]) =>
-              `<option value="${v}" ${(m.persistent ? "persistent" : m.preload ? "preload" : "") === v ? "selected" : ""}>${t}</option>`).join("")}
+      <td style="text-align:center"><input type="radio" name="bootmodel" style="width:auto"
+            data-help="warm standby"
+            ${m.preload && !m.persistent ? "checked" : ""} ${m.persistent ? "disabled" : ""}
+            title="${m.persistent
+              ? "pinned already \u2014 resident from start-up and never evicted"
+              : "load this model when the engine starts, and keep it warm; click again to clear"}"
+            onclick="bootPick(${i})"></td>
+      <td><select onchange="updPinned(${i},this.value)" style="width:82px">
+            ${[["", "no"], ["persistent", "always"]].map(([v, t]) =>
+              `<option value="${v}" ${(m.persistent ? "persistent" : "") === v ? "selected" : ""}>${t}</option>`).join("")}
           </select></td>
       <td><input value="${esc(m.extra_flags)}" onchange="upd(${i},'extra_flags',this.value)" style="min-width:160px"></td>
       <td><button class="act danger" onclick="MODELS.splice(${i},1);renderModels()">×</button></td>
-    </tr>`).join("") || `<tr><td colspan="11" class="muted">${UPSTREAM.enabled
+    </tr>`).join("") || `<tr><td colspan="12" class="muted">${UPSTREAM.enabled
       ? "no llama-swap models here — this box is Ollama-managed, see the table above"
       : "no models configured yet — download a GGUF on the Library tab, then add it here"}</td></tr>`;
 }
 const upd = (i, k, v) => { MODELS[i][k] = v; };
-// warm: "" = load on demand; "preload" = load at engine start-up (one per
-// box -- the save refuses two, the swap group holds one model); "persistent"
-// = own warm group, resident forever, nothing may evict it.
-const updWarm = (i, v) => {
-  MODELS[i].preload = v === "preload";
+// The boot slot (models.json's `preload`) is a radio and not a per-row switch
+// because a box has exactly one: the swap group holds one model at a time, so
+// a second preload is not a second warm model, it is one cold load followed by
+// another that evicts it -- which is why check_preload_count refuses the save
+// outright. Clicking the checked circle clears the slot, and the box then
+// loads nothing until a request asks for something. A radio cannot report
+// "none" by itself (there is no unchecked state to click), so this reads the
+// flag we are about to change: `was` is the state the click just overwrote in
+// the DOM, and re-rendering puts the DOM back in step with MODELS either way.
+const bootPick = (i) => {
+  const was = !!MODELS[i].preload && !MODELS[i].persistent;
+  MODELS.forEach(m => { if (!m.persistent) m.preload = false; });
+  if (!was) MODELS[i].preload = true;
+  renderModels();
+};
+// pinned: its own llama-swap group, resident from start-up, nothing may evict
+// it. It is warm at boot by definition (render_swap_config preloads every
+// persistent model), so it gives up the boot slot rather than holding one the
+// radio would then have to show as unavailable.
+const updPinned = (i, v) => {
   MODELS[i].persistent = v === "persistent";
+  if (MODELS[i].persistent) MODELS[i].preload = false;
+  renderModels();
 };
 function addModel() {
   MODELS.push(Object.assign({}, DEFAULTS, {id: "new-model-" + (MODELS.length + 1)}));
@@ -4445,7 +4646,7 @@ async function loadAgents() {
     ? `${page.total.toLocaleString()} ${arch ? "archived profile(s)" : "key(s)"}` : "";
   $("#agpager").innerHTML = pager("agents", page.total, lim, "loadAgents");
   $("#agtab tbody").innerHTML =
-    `<tr><th>key</th><th>agent</th><th>models</th><th>prompt</th><th>state</th><th></th></tr>` +
+    `<tr><th>key</th><th>agent</th><th>models</th><th>policy</th><th>prompt</th><th>state</th><th></th></tr>` +
     (AGENTS.length ? AGENTS.map(a => {
       const p = a.profile;
       let models = "any";
@@ -4454,11 +4655,22 @@ async function loadAgents() {
           models = p.force_model ? "forced: " + p.force_model : (l.length ? l.join(", ") : "any");
         } catch {}
       }
+      let policy = "—";
+      if (p) {
+        try {
+          const pr = JSON.parse(p.prefer_hosts || "[]"), ex = JSON.parse(p.exclude_hosts || "[]");
+          const parts = [];
+          if (pr.length) parts.push("prefer: " + pr.join(", "));
+          if (ex.length) parts.push("exclude: " + ex.join(", "));
+          if (parts.length) policy = parts.join(" · ");
+        } catch {}
+      }
       return `<tr>
         <td>${esc(a.key_name)} <span class="mono muted" style="font-size:11px">${esc(a.prefix)}…</span>
           ${a.key_archived ? `<br><span class="pill arch">key archived too</span>` : ""}</td>
         <td>${p ? esc(p.name || "unnamed") : '<span class="muted">no profile</span>'}</td>
         <td class="mono" style="font-size:12px">${p ? esc(models) : "—"}</td>
+        <td class="mono" style="font-size:12px">${p ? esc(policy) : "—"}</td>
         <td class="muted" style="font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
           ${p ? esc((p.system_prompt || "").slice(0, 90)) : "—"}</td>
         <td>${!p ? "" : arch ? `<span class="pill arch">archived</span>`
@@ -4469,7 +4681,7 @@ async function loadAgents() {
           : `<button class="act" onclick="editAgent(${a.key_id})">${p ? "edit" : "create"}</button>`}</td>
       </tr>`;
     }).join("")
-      : `<tr><td class="muted" colspan="6">${arch ? "nothing archived"
+      : `<tr><td class="muted" colspan="7">${arch ? "nothing archived"
           : "no API keys yet — mint one on the API keys tab first"}</td></tr>`);
 }
 async function agentVerb(keyId, verb) {
@@ -4490,11 +4702,16 @@ function editAgent(keyId) {
   try { ov = JSON.parse(p.param_overrides || "{}"); } catch {}
   let allowed = [];
   try { allowed = JSON.parse(p.allowed_models || "[]"); } catch {}
+  let prefer = [], exclude = [];
+  try { prefer = JSON.parse(p.prefer_hosts || "[]"); } catch {}
+  try { exclude = JSON.parse(p.exclude_hosts || "[]"); } catch {}
   $("#agtitle").textContent = "Agent profile for key: " + (a ? a.key_name : keyId);
   $("#ag_name").value = p.name || "";
   $("#ag_on").value = p.enabled === 0 ? "0" : "1";
   $("#ag_sys").value = p.system_prompt || "";
   $("#ag_rules").value = p.rules || "";
+  $("#ag_prefer_hosts").value = prefer.join(", ");
+  $("#ag_exclude_hosts").value = exclude.join(", ");
   $("#ag_temp").value = ov.temperature ?? "";
   $("#ag_topp").value = ov.top_p ?? "";
   $("#ag_maxtok").value = ov.max_tokens ?? "";
@@ -4515,12 +4732,15 @@ async function saveAgent() {
   if ($("#ag_topp").value !== "") overrides.top_p = +$("#ag_topp").value;
   if ($("#ag_maxtok").value !== "") overrides.max_tokens = +$("#ag_maxtok").value;
   const allowed = $$("#ag_models input:checked").map(i => i.dataset.agModel);
+  const preferHosts = $("#ag_prefer_hosts").value.split(",").map(x => x.trim()).filter(Boolean);
+  const excludeHosts = $("#ag_exclude_hosts").value.split(",").map(x => x.trim()).filter(Boolean);
   try {
     await api("/agents/" + AGCUR, {method: "PUT", body: {
       enabled: $("#ag_on").value === "1",
       name: $("#ag_name").value, system_prompt: $("#ag_sys").value,
       rules: $("#ag_rules").value, allowed_models: allowed,
-      force_model: $("#ag_force").value, param_overrides: overrides}});
+      force_model: $("#ag_force").value, param_overrides: overrides,
+      prefer_hosts: preferHosts, exclude_hosts: excludeHosts}});
     toast("profile saved — takes effect on the key's next request");
     $("#ageditor").style.display = "none"; loadAgents();
   } catch (e) { toast(e.message, true); }
@@ -4899,6 +5119,10 @@ const HELP = {
     "A request for any model not checked is refused with 403 at the gateway. Nothing checked "
     + "means every model on this host is allowed &mdash; the list is a restriction, not a "
     + "grant."],
+  "prefer/exclude hosts": ["Prefer / exclude hosts",
+    "Which fleet boxes this key's requests should land on first, and which to never use "
+    + "&mdash; same rule as the public demo's prefer/exclude, applied per key instead of "
+    + "globally. A saturated preferred box never jumps an idle non-preferred one."],
   "temperature": ["Default temperature",
     "Fills the sampler in only when the client leaves it unset; a client that sends its own "
     + "value wins. Blank leaves the model's own default alone."],

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 from types import SimpleNamespace
 
@@ -166,6 +167,250 @@ class TestAgentCtxLimit:
         r = client.put("/admin/api/agents/" + str(kid), headers=admin_headers,
                        json={**body, "ctx_limit": None})
         assert r.json()["ctx_limit"] in (None, 0)
+
+
+# ---------------------------------------------------------------------------
+# prefer_hosts/exclude_hosts on an agent profile: PUT round-trip, the
+# unknown_hosts advisory, the archived view, and the migration that adds the
+# two columns to a hub that predates this feature.
+# ---------------------------------------------------------------------------
+
+class TestAgentHostPolicyApi:
+    @pytest.fixture(autouse=True)
+    def _isolate_meta(self):
+        """unknown_hosts is read off _routes_cache['meta'], a module
+        singleton this file's other tests never touch -- but it persists for
+        the whole session via the session-scoped `client` fixture, so a
+        snapshot/restore here keeps this class from leaking fleet state into
+        whatever test runs after it."""
+        snapshot = dict(gw._routes_cache.get("meta") or {})
+        yield
+        gw._routes_cache["meta"] = snapshot
+
+    def test_put_round_trips_lists_as_a_comma_string_and_as_a_list(
+            self, client, admin_headers):
+        raw, meta = gw.mint_key("agent-hostpolicy-1")
+        kid = int(meta["id"])
+        body = {"enabled": True, "name": "x", "allowed_models": [],
+                "force_model": "", "prefer_hosts": " gpu-laptop-1, mac-laptop-1 ,,",
+                "exclude_hosts": ["apu-box-1", "apu-box-1", ""]}
+        r = client.put("/admin/api/agents/" + str(kid), headers=admin_headers, json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert json.loads(out["prefer_hosts"]) == ["gpu-laptop-1", "mac-laptop-1"]
+        assert json.loads(out["exclude_hosts"]) == ["apu-box-1"]
+
+        # A second save with real lists (not a comma string) round-trips the
+        # same way -- clean_host_list() accepts either shape.
+        r2 = client.put("/admin/api/agents/" + str(kid), headers=admin_headers,
+                        json={**body, "prefer_hosts": ["mini-pc-1", "mini-pc-1"],
+                              "exclude_hosts": []})
+        assert json.loads(r2.json()["prefer_hosts"]) == ["mini-pc-1"]
+        assert json.loads(r2.json()["exclude_hosts"]) == []
+
+    def test_editing_a_profile_does_not_wipe_the_host_policy(
+            self, client, admin_headers):
+        """The regression this exists to guard: the downstream app's doRotateHubKey
+        PUTs a fixed body with neither field on every lane-key rotation.
+        Since prefer_hosts/exclude_hosts follow the exact ctx_limit rule
+        (UPDATE only when the key is present in the payload), a rotation
+        that omits them must leave a previously-saved policy untouched --
+        exactly TestAgentCtxLimit.test_editing_a_profile_does_not_wipe_the_
+        context_cap's own shape, for the same reason."""
+        raw, meta = gw.mint_key("agent-hostpolicy-2")
+        kid = int(meta["id"])
+        gw.db_exec(
+            "INSERT INTO agents(key_id,enabled,name,allowed_models,force_model,"
+            "param_overrides,prefer_hosts,exclude_hosts,updated_at) "
+            "VALUES (?,1,?,?,?,?,?,?,?)",
+            (kid, "fleet-pass", '["gemma4-12b"]', "gemma4-12b", "{}",
+             '["gpu-laptop-1"]', '["apu-box-1"]', gw.now()),
+        )
+        # The fixed body the downstream app's doRotateHubKey actually sends: no
+        # prefer_hosts/exclude_hosts keys at all.
+        r = client.put("/admin/api/agents/" + str(kid), headers=admin_headers,
+                       json={"name": "rotated", "enabled": True,
+                             "allowed_models": ["gemma4-12b"],
+                             "force_model": "gemma4-12b", "system_prompt": "",
+                             "rules": "", "param_overrides": {}})
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert json.loads(out["prefer_hosts"]) == ["gpu-laptop-1"]
+        assert json.loads(out["exclude_hosts"]) == ["apu-box-1"]
+
+    def test_unknown_hosts_are_accepted_and_reported_never_blocking_the_save(
+            self, client, admin_headers):
+        gw._routes_cache["meta"] = {("mac-desktop-1", "some-model"): {}}
+        raw, meta = gw.mint_key("agent-hostpolicy-3")
+        kid = int(meta["id"])
+        r = client.put("/admin/api/agents/" + str(kid), headers=admin_headers,
+                       json={"enabled": True, "name": "x", "allowed_models": [],
+                             "force_model": "", "prefer_hosts": ["typo-box"],
+                             "exclude_hosts": ["mac-desktop-1"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["unknown_hosts"] == ["typo-box"]
+
+    def test_archived_view_still_carries_the_host_policy(
+            self, client, admin_headers):
+        raw, meta = gw.mint_key("agent-hostpolicy-4")
+        kid = int(meta["id"])
+        client.put("/admin/api/agents/" + str(kid), headers=admin_headers,
+                   json={"enabled": True, "name": "x", "allowed_models": [],
+                         "force_model": "", "prefer_hosts": ["gpu-laptop-1"],
+                         "exclude_hosts": ["apu-box-1"]})
+        r = client.delete("/admin/api/agents/" + str(kid), headers=admin_headers)
+        assert r.status_code == 200, r.text
+        rows = client.get("/admin/api/agents", headers=admin_headers,
+                          params={"archived": True}).json()["items"]
+        row = [x for x in rows if x["key_id"] == kid][0]
+        assert json.loads(row["profile"]["prefer_hosts"]) == ["gpu-laptop-1"]
+        assert json.loads(row["profile"]["exclude_hosts"]) == ["apu-box-1"]
+
+    def test_singular_get_returns_real_arrays_not_the_json_text_column(
+            self, client, admin_headers):
+        """the downstream app's doRotateHubKey carries a predecessor key's host policy
+        forward by GETting this exact route and checking
+        Array.isArray(prevBody?.prefer_hosts) -- unlike every other reader
+        on this page (the PUT response, the plural listing, editAgent() in
+        gateway/static/index.html), which all get the raw JSON-TEXT column
+        and json.loads() it themselves. If this route ever regressed to
+        returning the TEXT string like its siblings, Array.isArray would be
+        false and the carry-forward would silently drop the policy again --
+        the exact bug class TestAgentHostPolicyApi.
+        test_editing_a_profile_does_not_wipe_the_host_policy guards from the
+        PUT side."""
+        raw, meta = gw.mint_key("agent-hostpolicy-get-1")
+        kid = int(meta["id"])
+        client.put("/admin/api/agents/" + str(kid), headers=admin_headers,
+                   json={"enabled": True, "name": "x", "allowed_models": [],
+                         "force_model": "", "prefer_hosts": ["gpu-laptop-1", "mac-laptop-1"],
+                         "exclude_hosts": ["apu-box-1"]})
+
+        r = client.get("/admin/api/agents/" + str(kid), headers=admin_headers)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert isinstance(out["prefer_hosts"], list), \
+            "the carry-forward's Array.isArray check needs a real list here"
+        assert isinstance(out["exclude_hosts"], list)
+        assert out["prefer_hosts"] == ["gpu-laptop-1", "mac-laptop-1"]
+        assert out["exclude_hosts"] == ["apu-box-1"]
+
+    def test_singular_get_defaults_to_empty_lists_when_never_set(
+            self, client, admin_headers):
+        raw, meta = gw.mint_key("agent-hostpolicy-get-2")
+        kid = int(meta["id"])
+        client.put("/admin/api/agents/" + str(kid), headers=admin_headers,
+                   json={"enabled": True, "name": "x", "allowed_models": [],
+                         "force_model": ""})
+
+        r = client.get("/admin/api/agents/" + str(kid), headers=admin_headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["prefer_hosts"] == []
+        assert r.json()["exclude_hosts"] == []
+
+    def test_singular_get_404s_for_a_key_with_no_agent_profile(
+            self, client, admin_headers):
+        raw, meta = gw.mint_key("agent-hostpolicy-get-3")
+        r = client.get("/admin/api/agents/" + str(meta["id"]),
+                       headers=admin_headers)
+        assert r.status_code == 404
+
+    def test_singular_get_404s_for_an_archived_profile(
+            self, client, admin_headers):
+        """The predecessor's agent profile is NOT archived by a rotation --
+        pausePredecessor only disables the key -- so this proves the 404 is
+        about the profile actually being filed away, not about the ordinary
+        post-rotation state a carry-forward will usually see."""
+        raw, meta = gw.mint_key("agent-hostpolicy-get-4")
+        kid = int(meta["id"])
+        client.put("/admin/api/agents/" + str(kid), headers=admin_headers,
+                   json={"enabled": True, "name": "x", "allowed_models": [],
+                         "force_model": "", "prefer_hosts": ["gpu-laptop-1"]})
+        client.delete("/admin/api/agents/" + str(kid), headers=admin_headers)
+
+        r = client.get("/admin/api/agents/" + str(kid), headers=admin_headers)
+        assert r.status_code == 404
+
+    def test_singular_get_404s_for_a_nonexistent_key(self, client, admin_headers):
+        r = client.get("/admin/api/agents/9999999", headers=admin_headers)
+        assert r.status_code == 404
+
+    def test_singular_get_requires_admin(self, client):
+        raw, meta = gw.mint_key("agent-hostpolicy-get-5")
+        r = client.get("/admin/api/agents/" + str(meta["id"]))
+        assert r.status_code in (401, 403)
+
+
+class TestAgentHostPolicyMigration:
+    """The MIGRATIONS tuple is the only migration runner (db_init(), keyed
+    off the module-level DB_PATH) -- these point it at a throwaway sqlite
+    file built from the pre-feature `agents` schema instead of touching the
+    live test DB."""
+
+    def _pre_migration_schema(self, path) -> None:
+        conn = sqlite3.connect(str(path))
+        try:
+            conn.execute(
+                "CREATE TABLE agents ("
+                "id              INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "key_id          INTEGER NOT NULL UNIQUE,"
+                "enabled         INTEGER NOT NULL DEFAULT 1,"
+                "name            TEXT NOT NULL DEFAULT '',"
+                "system_prompt   TEXT NOT NULL DEFAULT '',"
+                "rules           TEXT NOT NULL DEFAULT '',"
+                "allowed_models  TEXT NOT NULL DEFAULT '[]',"
+                "force_model     TEXT NOT NULL DEFAULT '',"
+                "param_overrides TEXT NOT NULL DEFAULT '{}',"
+                "updated_at      TEXT"
+                ")"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_a_pre_migration_agents_table_gets_the_two_columns(
+            self, tmp_path, monkeypatch):
+        scratch = tmp_path / "pre-migration.db"
+        self._pre_migration_schema(scratch)
+        monkeypatch.setattr(gw, "DB_PATH", scratch)
+
+        gw.db_init()
+
+        cols = {r["name"]: r for r in gw.db_query("PRAGMA table_info(agents)")}
+        assert "prefer_hosts" in cols, "MIGRATIONS must add prefer_hosts to an old DB"
+        assert "exclude_hosts" in cols, "MIGRATIONS must add exclude_hosts to an old DB"
+        assert cols["prefer_hosts"]["notnull"] == 1
+        assert cols["prefer_hosts"]["dflt_value"] == "'[]'"
+        assert cols["exclude_hosts"]["notnull"] == 1
+        assert cols["exclude_hosts"]["dflt_value"] == "'[]'"
+        # Existing (pre-migration) rows backfill to the empty-policy default,
+        # i.e. today's unrestricted resolve_targets order, unchanged.
+        conn = sqlite3.connect(str(scratch))
+        try:
+            conn.execute(
+                "INSERT INTO agents(key_id,enabled,name,allowed_models,"
+                "force_model,param_overrides,updated_at) "
+                "VALUES (999,1,'x','[]','','{}','2026-01-01T00:00:00Z')"
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT prefer_hosts, exclude_hosts FROM agents WHERE key_id=999"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row == ("[]", "[]")
+
+    def test_re_running_migrations_on_an_already_migrated_db_is_a_no_op(
+            self, tmp_path, monkeypatch):
+        scratch = tmp_path / "already-migrated.db"
+        self._pre_migration_schema(scratch)
+        monkeypatch.setattr(gw, "DB_PATH", scratch)
+
+        gw.db_init()
+        gw.db_init()  # must not raise -- ALTER TABLE ADD COLUMN is a no-op here
+
+        cols = {r["name"] for r in gw.db_query("PRAGMA table_info(agents)")}
+        assert {"prefer_hosts", "exclude_hosts"} <= cols
 
 
 # ---------------------------------------------------------------------------
@@ -1028,11 +1273,12 @@ class TestPublicCatalogueEndpoints:
         r = client.get("/public/api/models")
         assert r.status_code == 200
         body = r.json()
-        assert len(body["models"]) == 19
+        assert len(body["models"]) == 20
         ids = {m["public_id"] for m in body["models"]}
         assert "gemma4-31b-qat" in ids
         assert "qwen3.8-9b-distill" in ids
         assert "ornith-1.5-35b-a3b" in ids
+        assert "ornith-1.5-9b" in ids
         assert "tiel-coder-35b-a3b" in ids
         resident = next(m for m in body["models"] if m["public_id"] == "gemma4-31b-qat")
         assert resident["availability"] == "resident"
@@ -1056,6 +1302,88 @@ class TestPublicCatalogueEndpoints:
         forbidden = {"api_url", "url", "ip", "net", "storage", "disk", "services",
                     "temps", "error", "swap", "token", "tokens", "mounts", "peers", "os"}
         self._walk(r.json(), forbidden)
+
+    # ── /public/api/proof ───────────────────────────────────────────────────
+    # The numbers a post or a profile card may quote. They exist as an
+    # endpoint so nobody types a machine count into a README, a site page and
+    # a slide and has the three disagree a week later.
+
+    def test_proof_card_answers_without_a_key(self, client, fake_fleet):
+        r = client.get("/public/api/proof")
+        assert r.status_code == 200
+        body = r.json()
+        for key in ("generated_at", "boxes", "accelerator_memory_gb",
+                    "models", "context_max_tokens"):
+            assert key in body, key
+
+    def test_proof_card_counts_agree_with_the_overview(self, client, fake_fleet):
+        """The whole point: the page and whatever quotes it read one source."""
+        overview = client.get("/public/api/overview").json()
+        proof = client.get("/public/api/proof").json()
+        assert proof["boxes"]["registered"] == overview["totals"]["hosts"]
+        assert proof["boxes"]["online"] == overview["totals"]["online"]
+        assert proof["models"]["count"] == overview["totals"]["models"]
+        assert proof["generated_at"] == overview["generated_at"]
+
+    def test_proof_card_never_leaks_forbidden_fields(self, client, fake_fleet):
+        """It is built from the sanitized overview, so it should inherit that
+        guarantee -- asserted rather than assumed, because a field added here
+        later could reach past it."""
+        r = client.get("/public/api/proof")
+        assert r.status_code == 200
+        forbidden = {"api_url", "url", "ip", "net", "storage", "disk", "services",
+                    "temps", "error", "swap", "token", "tokens", "mounts", "peers", "os",
+                    "hosts", "host", "name"}
+        self._walk(r.json(), forbidden)
+
+    def test_proof_card_names_no_host_real_or_aliased(self, client, fake_fleet):
+        """A count is publishable; an inventory is not. Not even the Box N
+        aliases belong here -- the overview is where those are answered."""
+        raw = client.get("/public/api/proof").text
+        assert gw.HOST_NAME not in raw
+        assert "peer1" not in raw and "bigbox" not in raw
+        assert "Box " not in raw
+
+    def test_proof_card_families_are_deduplicated_and_sorted(self, client, fake_fleet):
+        body = client.get("/public/api/proof").json()
+        names = body["models"]["family_names"]
+        assert names == sorted(set(names))
+        assert body["models"]["families"] == len(names)
+        assert body["models"]["count"] >= body["models"]["families"]
+
+    def test_proof_card_reports_residency_and_the_best_context(self, client, fake_fleet):
+        """The fake fleet keeps gemma4-31b-qat resident locally and
+        qwen3.8-27b resident on a peer, and 131072 is the highest ceiling any
+        box there offers."""
+        body = client.get("/public/api/proof").json()
+        assert body["models"]["resident"] >= 1
+        assert body["context_max_tokens"] == 131072
+
+    def test_proof_card_online_memory_never_exceeds_registered(self, client, fake_fleet):
+        mem = client.get("/public/api/proof").json()["accelerator_memory_gb"]
+        assert 0 <= mem["online"] <= mem["registered"]
+        assert isinstance(mem["online"], int) and isinstance(mem["registered"], int)
+
+    def test_proof_card_survives_a_box_with_no_declared_spec(self):
+        """The hub declares no vram_gb at all. A missing, null or unparseable
+        spec must contribute zero rather than break the sum for everyone."""
+        overview = {
+            "generated_at": "2026-09-10T00:00:00Z",
+            "hosts": [
+                {"online": True, "specs": {"vram_gb": 96}},
+                {"online": True, "specs": {"vram_gb": None}},    # the hub
+                {"online": False, "specs": {}},                  # asleep laptop
+                {"online": True},                                # no specs key
+                {"online": True, "specs": {"vram_gb": "not a number"}},
+            ],
+            "models": [],
+        }
+        card = gw.build_proof_card(overview)
+        assert card["accelerator_memory_gb"] == {"registered": 96, "online": 96}
+        assert card["boxes"] == {"registered": 5, "online": 4}
+        assert card["models"] == {"count": 0, "families": 0,
+                                  "family_names": [], "resident": 0}
+        assert card["context_max_tokens"] == 0
 
     def test_overview_uses_box_aliases_never_real_names_or_os(
         self, client, fake_fleet, monkeypatch,

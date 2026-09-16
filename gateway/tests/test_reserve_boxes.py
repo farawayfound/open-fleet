@@ -1,6 +1,8 @@
 """Personal machines -- gpu-desktop-2 under somebody's desk, gpu-desktop-1 when its
-owner is at the keyboard, gpu-laptop-2's gaming rig, apu-tablet-1/apu-tablet-2 (the
-two Z13s), mac-laptop-2 (the M4 that sleeps) -- stay full members of the fleet:
+owner is at the keyboard, gpu-laptop-2's gaming rig, apu-tablet-2 (the Z13 someone
+sits at; apu-tablet-1, the other Z13, stopped being personal when it became a
+Fedora fleet box on 2026-09-16), mac-laptop-2 (the M4 that sleeps) -- stay full
+members of the fleet:
 registered, warm with whatever their owner is running, answering when
 asked. What they must never do is get PLANNED for: the router should not
 route a stranger's request onto gpu-desktop-2 just because its two 3090s beat
@@ -63,15 +65,17 @@ def _isolate_preload_state():
 
 
 # ---------------------------------------------------------------------------
-# host_reserved / DEFAULT_SPECS: exactly the eight personal machines
+# host_reserved / DEFAULT_SPECS: exactly the seven personal machines
 # ---------------------------------------------------------------------------
 
 class TestHostReservedDefaultSpecs:
     def test_default_specs_marks_exactly_the_personal_machines(self):
-        reserved = {"apu-tablet-1", "apu-tablet-2", "gpu-desktop-2", "gpu-laptop-2", "gpu-desktop-1",
+        reserved = {"apu-tablet-2", "gpu-desktop-2", "gpu-laptop-2", "gpu-desktop-1",
                     "gpu-laptop-3", "mac-laptop-2", "gpu-laptop-4"}
-        not_reserved = {"apu-box-1", "mac-laptop-1", "gpu-laptop-1", "mac-desktop-1", "cpu-box-1",
-                         "server-1", "mini-pc-1", "hub"}
+        # apu-tablet-1 left this set on 2026-09-16: on Fedora it is a fleet box
+        # sharing the writing lane with apu-box-1, not a machine someone sits at.
+        not_reserved = {"apu-box-1", "apu-tablet-1", "mac-laptop-1", "gpu-laptop-1", "mac-desktop-1",
+                         "cpu-box-1", "server-1", "mini-pc-1", "hub"}
         assert reserved | not_reserved == set(gw.DEFAULT_SPECS)
         for host in reserved:
             assert gw.DEFAULT_SPECS[host].get("reserve") is True, host

@@ -278,11 +278,16 @@ class Services(Step):
                         system=True)
                 # StartWhenAvailable so a missed trigger is still honoured, no
                 # execution time limit (a service is not a job to be killed
-                # after three days), and a relaunch if the action fails.
+                # after three days), and a relaunch if the action fails --
+                # 99 times, a minute apart, not 3: on 2026-09-16 apu-tablet-1's
+                # gateway failed to bind :8080 three times behind a lingering
+                # uvicorn, Task Scheduler gave up, and the box read as offline
+                # for half an hour. These are services; they retry until
+                # someone looks, not until a counter runs out.
                 ctx.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
                          f"$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
                          f"-DontStopIfGoingOnBatteries -StartWhenAvailable "
-                         f"-MultipleInstances IgnoreNew -RestartCount 3 "
+                         f"-MultipleInstances IgnoreNew -RestartCount 99 "
                          f"-RestartInterval (New-TimeSpan -Minutes 1) "
                          f"-ExecutionTimeLimit ([TimeSpan]::Zero); "
                          f"Set-ScheduledTask -TaskName '{name}' -Settings $s | Out-Null"],

@@ -121,6 +121,23 @@ $want = @(
   "set LLMSTACK_LLAMA_BENCH=$llamaDir\llama-bench.exe",
   "set LLMSTACK_SWAP_CONFIG=$state\llama-swap.yaml"
 )
+# Every llama-server llama-swap starts inherits this file (run-llama-swap.cmd
+# calls it), so it is the one place a backend environment knob reaches the
+# engine on a box that has no per-model env in its swap config.
+#
+# GGML_VK_ENABLE_MEMORY_PRIORITY (Vulkan only): on an integrated AMD GPU the
+# Windows driver reports the device as INTEGRATED, and llama.cpp then puts
+# model weights in DEVICE_LOCAL | HOST_VISIBLE memory (ggml-vulkan's UMA
+# branch; there is no env switch out of it). Under WDDM that memory type is
+# pageable, and without a residency priority the driver leaves the weights
+# system-backed: apu-tablet-1, 2026-09-15, Flash-Next loaded with 0.6 GB of
+# 57 GB in the carve, an 85 GB commit against 64 GB of RAM, and the box
+# paged for 20 minutes. With the extension enabled llama.cpp tags its device
+# allocations high-priority and the driver promotes them into the carve
+# (measured: 54.6 GB dedicated after the first request, system RAM back to
+# idle). Harmless where VK_EXT_memory_priority is absent -- llama.cpp only
+# enables it when the driver advertises the extension.
+if ($Backend -eq "vulkan") { $want += "set GGML_VK_ENABLE_MEMORY_PRIORITY=1" }
 foreach ($w in $want) {
   $key = ($w -split '=')[0]
   if ($lines | Where-Object { $_ -like "$key=*" }) { $lines = $lines | ForEach-Object { if ($_ -like "$key=*") { $w } else { $_ } } }
@@ -153,7 +170,7 @@ $t.Settings.DisallowStartIfOnBatteries = $false
 $t.Settings.StopIfGoingOnBatteries     = $false
 $t.Settings.StartWhenAvailable         = $true
 $t.Settings.MultipleInstances          = "IgnoreNew"
-$t.Settings.RestartCount               = 3
+$t.Settings.RestartCount               = 99
 $t.Settings.RestartInterval            = "PT1M"
 $t.Settings.ExecutionTimeLimit         = "PT0S"
 Set-ScheduledTask -InputObject $t | Out-Null

@@ -640,6 +640,33 @@ class TestTheEnvFileHasValuesThePlanNeverHeardOf:
         assert "set HF_TOKEN=hf_x" in text
 
 
+class TestFirewalldRuleIsReadFromListPortsNotState:
+    """`firewall-cmd --state` prints "running" and nothing else, so a check
+    that looked for the port in that output could never say OK on firewalld:
+    apu-tablet-1's first Fedora apply (2026-09-16) added 8080/tcp and then
+    aborted with UNCHANGED one step before the services were written."""
+
+    def probing(self, ports_text):
+        def probe(argv, timeout=60):
+            if argv[:2] == ["firewall-cmd", "--state"]:
+                return SimpleNamespace(returncode=0, stdout="running\n", stderr="")
+            if argv[:2] == ["firewall-cmd", "--list-ports"]:
+                return SimpleNamespace(returncode=0, stdout=ports_text, stderr="")
+            return None
+        return probe
+
+    def test_a_present_rule_is_ok(self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        ctx.probe = self.probing("8080/tcp\n")
+        result = Firewall().check(ctx)
+        assert result.state == OK, result.detail
+
+    def test_a_missing_rule_is_still_missing(self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        ctx.probe = self.probing("\n")
+        assert Firewall().check(ctx).state == MISSING
+
+
 class TestAFirewallYouCannotSeeIsStillAFirewall:
     """`ufw status` unprivileged exits "You need to be root to run this".
 

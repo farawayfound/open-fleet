@@ -56,7 +56,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterable
+from typing import Any, AsyncIterator, Callable, Iterable
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -396,6 +396,12 @@ MIGRATIONS = (
     "ALTER TABLE usage ADD COLUMN archived_at TEXT",
     "CREATE INDEX IF NOT EXISTS usage_archived ON usage(archived_at, id)",
     "CREATE INDEX IF NOT EXISTS bench_archived ON bench(archived_at, id)",
+    # measured_tps()/measured_pp() aggregate one model's last 14 days of usage
+    # per host; with only usage_ts to lean on that was a scan of every row in
+    # the window, ~6 s for the busiest model on hub (2026-09-15) -- paid
+    # inline by /admin/api/resolve and the scorer whenever the 300 s cache
+    # lapsed, which is longer than the lane planner waits for an answer.
+    "CREATE INDEX IF NOT EXISTS usage_model_ts ON usage(model, ts)",
     # Which box actually served the request. This is the orchestrator's memory:
     # measured tokens/sec per (host, model) is what load balancing weighs.
     "ALTER TABLE usage ADD COLUMN host TEXT",
@@ -404,6 +410,12 @@ MIGRATIONS = (
     # caller actually asked for when a fallback answered in its place.
     "ALTER TABLE api_keys ADD COLUMN max_rph INTEGER",
     "ALTER TABLE agents ADD COLUMN ctx_limit INTEGER",
+    # Manual host routing (feat/manual-host-routing): per-agent prefer/exclude
+    # host lists, exactly like demo_prefer_hosts/demo_exclude_hosts but scoped
+    # to one key's agent profile. JSON arrays of lower-cased host names, same
+    # storage shape as allowed_models.
+    "ALTER TABLE agents ADD COLUMN prefer_hosts TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE agents ADD COLUMN exclude_hosts TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE teams ADD COLUMN ctx_limit INTEGER",
     "ALTER TABLE usage ADD COLUMN fallback_from TEXT",
     # Fleet Pass warm-up: the unguessable token behind the "load my model now"
@@ -1410,7 +1422,13 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 # '-' reads as a new flag. An HF/LM-Studio-chosen filename is not trusted
 # input, so every such field is checked against this before it ever reaches
 # build_cmd() or is written to models.json.
-SAFE_PATH = re.compile(r"^[^\s'\"`\\$&|;<>(){}*?!~\x00-\x1f]+$")
+# A backslash is NOT in the excluded set: on a Windows box every model path
+# is one (C:\llmstack\state\models\..., D:\AI\models\...), and the value is
+# embedded as one argv token in llama-swap's YAML `cmd`, never handed to a
+# POSIX shell. Excluding it (2026-09-15, the audit's 0639b22) made the
+# renderer skip EVERY record on apu-tablet-1 the first time its config was
+# regenerated, and llama-swap came up with `models: {}`.
+SAFE_PATH = re.compile(r"^[^\s'\"`$&|;<>(){}*?!~\x00-\x1f]+$")
 
 
 def unsafe_path(value) -> str | None:
@@ -1549,8 +1567,16 @@ FLEET_MODEL_NAMES: dict[str, tuple[str, ...]] = {
         "hf.co/empero-ai/Qwen3.8-9B-Distill-GGUF:Q4_K_M",  # the Ollama tag
     ),
     "qwopus3.6-35b-coder": ("Qwopus3.6-35B", "Qwopus3.6-A3B"),
+    "ornith-1.5-9b": (
+        "hf.co/ornith-ai/Ornith-1.5-9B-GGUF:Q4_K_M",  # cpu-box-1's Ollama tag
+    ),
     "gemma-4-26b": ("gemma4:26b",),
     "qwen3.5-4b": ("qwen3.5:4b",),
+    "nemotron3.5-lightning-30b": (
+        # gpu-laptop-2's Ollama tag (2026-09-16): the same unsloth UD-Q4_K_XL file
+        # gpu-laptop-3 and gpu-desktop-1 serve through llama.cpp, pulled with `ollama pull`.
+        "hf.co/unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF:UD-Q4_K_XL",
+    ),
 }
 SPELLING_TO_CANONICAL: dict[str, str] = {
     s: c for c, spellings in FLEET_MODEL_NAMES.items() for s in spellings}
@@ -2051,6 +2077,22 @@ def apply_agent(agent: dict, payload: dict) -> dict:
         elif k not in payload:
             payload[k] = v
     return payload
+
+
+def _agent_host_policy_lists(agent: dict | None) -> tuple[list[str], list[str]]:
+    """An agent's prefer_hosts/exclude_hosts, parsed the same defensive way
+    apply_agent() reads allowed_models -- a malformed column is treated as
+    empty, never a 500."""
+    if not agent:
+        return [], []
+
+    def _load(col: str) -> list[str]:
+        try:
+            return json.loads(agent.get(col) or "[]")
+        except json.JSONDecodeError:
+            return []
+
+    return _load("prefer_hosts"), _load("exclude_hosts")
 
 
 # --------------------------------------------------------------------------
@@ -4605,6 +4647,10 @@ async def lifespan(_: FastAPI):
     # hold it, so the first request against a fresh key is not a cold load.
     # Idle on a box with no peers -- see preload_orchestrator().
     preload = asyncio.create_task(_preload_loop())
+    # Pulls a freshly loaded model's weights in with one warm request on a
+    # box where "ready" does not mean resident (Windows). A no-op elsewhere
+    # unless LLMSTACK_WARM_ON_LOAD=1 -- see the block above _warm_on_load_loop.
+    warm_load = asyncio.create_task(_warm_on_load_loop())
     # Before the watchdog, so a signal arriving in the first instants of a
     # short-lived process still finds the drain hooked rather than half of it.
     install_drain_signal_handlers()
@@ -4618,6 +4664,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        warm_load.cancel()
         preload.cancel()
         lmsync.cancel()
         warm.cancel()
@@ -4721,6 +4768,12 @@ _inflight: dict[str, int] = {}
 # one would make that turn pay a cold load to save a later one.
 _host_last_used: dict[str, float] = {}
 
+# Demand bookkeeping for pressure-warm: fleet id -> ascending timestamps of
+# "this model's best candidate had no free slot" observations, pruned to a
+# rolling window in _record_pressure(). Lightweight and in-memory, the same
+# kind of thing _host_last_used already is.
+_pressure_events: dict[str, list[float]] = {}
+
 
 def _track(host: str):
     """Count a request against `host` until the returned closure runs."""
@@ -4797,6 +4850,22 @@ def _busy_cooldown_seconds() -> float:
     return v if v > 0 else COOLDOWN_BUSY_DEFAULT
 
 
+# Unlike busy_cooldown_seconds, a stored 0 here is a deliberate "off" (the
+# demotion rule below is simply never applied) -- not "use the default".
+OVERFLOW_SLOWDOWN_DEFAULT = 2.0
+
+
+def _overflow_max_slowdown() -> float:
+    raw = get_public_settings().get("overflow_max_slowdown")
+    if raw is None:
+        return OVERFLOW_SLOWDOWN_DEFAULT
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return OVERFLOW_SLOWDOWN_DEFAULT
+    return v if v >= 0 else OVERFLOW_SLOWDOWN_DEFAULT
+
+
 def _mark_host_down(host: str, seconds: float, why: str = "") -> None:
     host = host or HOST_NAME
     until = time.time() + max(1.0, seconds)
@@ -4807,6 +4876,43 @@ def _mark_host_down(host: str, seconds: float, why: str = "") -> None:
 
 def _mark_host_ok(host: str) -> None:
     _host_cooldown.pop(host or HOST_NAME, None)
+
+
+# A stall repeats. The first "no first byte" from a box is usually a cold
+# load caught half-way; the fifth in a row is a box that cannot answer at all.
+# apu-tablet-1 on 2026-09-15: a Windows Update reboot brought its Flash-Next
+# back with the weights paged out to disk, every request then faulted them in
+# at 6 tok/s of prompt reading, and the flat 120 s cooldown put the box
+# straight back in rotation -- 16 requests in a day went there, none was
+# answered, and each caller paid the whole deadline before apu-box-1 took it.
+# Worse, the abort left llama-server busy for two to five more minutes
+# ("stop processing" arrives long after the cancel), so the NEXT request,
+# 120 s later, queued behind a zombie and stalled too. Each consecutive stall
+# now doubles the sit-out up to COOLDOWN_STALL_MAX; an answer from the box --
+# a first byte, a full body -- resets it to one step. Keyed by host like
+# _host_cooldown: a box that cannot answer for one model is paging for all.
+COOLDOWN_STALL_MAX = 1800.0
+_stall_streak: dict[str, int] = {}
+
+
+def _stall_cooldown(host: str) -> float:
+    """Record one more stall on `host` and answer how long it sits out."""
+    host = host or HOST_NAME
+    n = _stall_streak.get(host, 0) + 1
+    _stall_streak[host] = n
+    return min(COOLDOWN_STALL_MAX, COOLDOWN_STALL * (2 ** (n - 1)))
+
+
+def _clear_stall(host: str) -> None:
+    """The box answered -- a first byte or a whole body reached us. Called
+    at the inference success points only, never from _mark_host_ok(): the
+    keep-warm loop marks a box ok after a /health touch, and a box whose
+    weights are paged out answers /health just fine."""
+    _stall_streak.pop(host or HOST_NAME, None)
+
+
+def stall_streak(host: str) -> int:
+    return _stall_streak.get(host or HOST_NAME, 0)
 
 
 def host_cooling(host: str) -> bool:
@@ -4986,6 +5092,11 @@ def _job_view(rec: dict) -> dict:
         "aborted": bool(rec.get("aborted")),
         "origin": rec.get("origin") or "",
         "progress": rec.get("progress"),
+        # The api_keys row this inference call is billed against, when it is
+        # one -- absent (serializes as null) on every job that never set it
+        # (team/demo/native/download/batch). The dashboard's manual-routing
+        # controls gate on this being non-null.
+        "key_id": rec.get("key_id"),
     }
 
 
@@ -5093,9 +5204,10 @@ def measured_tps(model: str) -> dict[str, float]:
     Read from the usage log, not from a benchmark: it reflects the model as
     configured on that box (quant, slots, context) under real traffic. Small
     samples are ignored -- a single 3-token reply proves nothing."""
-    hit = _tps_cache.get(model)
-    if hit and time.time() - hit[0] < 300:
-        return hit[1]
+    return _measured_cached(_tps_cache, model, _query_tps)
+
+
+def _query_tps(model: str) -> dict[str, float]:
     out: dict[str, float] = {}
     try:
         for r in db_query(
@@ -5109,8 +5221,64 @@ def measured_tps(model: str) -> dict[str, float]:
                 out[str(r["host"])] = float(r["ct"]) / (float(r["ms"]) / 1000.0)
     except Exception:  # noqa: BLE001 -- no history is a valid answer
         pass
-    _tps_cache[model] = (time.time(), out)
     return out
+
+
+MEASURED_TTL = 300.0
+_measured_lock = threading.Lock()
+_measured_refreshing: set[tuple[int, str]] = set()
+
+
+def _measured_cached(cache: dict[str, tuple[float, dict[str, float]]], model: str,
+                     query: Callable[[str], dict[str, float]]) -> dict[str, float]:
+    """The one cache policy behind measured_tps() and measured_pp():
+    stale-while-revalidate.
+
+    A fresh entry (younger than MEASURED_TTL) is returned as it is. A STALE
+    entry is ALSO returned as it is -- and one background thread is started
+    to recompute it, so the next reader sees the new number. Only a model
+    with no entry at all pays the query inline, once.
+
+    Why: the query aggregates a model's last 14 days of usage per host, and
+    for the busiest model it took ~6 s on hub (2026-09-15) even after the
+    index above -- and it was paid INLINE, by whichever request happened to
+    arrive after the 300 s cache lapsed. /admin/api/resolve is that request
+    for the lane planner in downstream-app, which gives up at 4 s: every fifth
+    minute the planner concluded it could not ask about Flash-Next at all,
+    dropped the candidate, and a draft that should have landed on an idle
+    apu-box-1 went to a busy 27B instead. A routing estimate five minutes old
+    is a fine answer; a routing estimate that arrives too late to be used
+    is not one.
+
+    The refresh thread is deduplicated per (cache, model) so a burst of stale
+    reads starts one query, not one per reader. A refresh that fails leaves
+    the stale entry in place (a wrong-but-recent number beats none) and
+    clears the in-flight mark so the next stale read tries again."""
+    now = time.time()
+    hit = cache.get(model)
+    if hit and now - hit[0] < MEASURED_TTL:
+        return hit[1]
+    if hit is None:
+        out = query(model)
+        cache[model] = (time.time(), out)
+        return out
+    mark = (id(cache), model)
+    with _measured_lock:
+        start = mark not in _measured_refreshing
+        if start:
+            _measured_refreshing.add(mark)
+    if start:
+        def _refresh() -> None:
+            try:
+                out = query(model)
+                cache[model] = (time.time(), out)
+            except Exception:  # noqa: BLE001 -- keep the stale entry
+                pass
+            finally:
+                with _measured_lock:
+                    _measured_refreshing.discard(mark)
+        threading.Thread(target=_refresh, name=f"measured-refresh:{model}", daemon=True).start()
+    return hit[1]
 
 
 def _spec_speed(host: str) -> float:
@@ -5135,9 +5303,10 @@ def measured_pp(model: str) -> dict[str, float]:
     This is the number the qwen3.6-35b incident was missing. Decode speed
     alone made gpu-laptop-1 look fine; it was the 42k-token prompt that took
     forty seconds to read on an 8 GB card."""
-    hit = _pp_cache.get(model)
-    if hit and time.time() - hit[0] < 300:
-        return hit[1]
+    return _measured_cached(_pp_cache, model, _query_pp)
+
+
+def _query_pp(model: str) -> dict[str, float]:
     out: dict[str, float] = {}
     try:
         for r in db_query(
@@ -5152,7 +5321,6 @@ def measured_pp(model: str) -> dict[str, float]:
                 out[str(r["host"])] = float(r["pt"]) / (float(r["ms"]) / 1000.0)
     except Exception:  # noqa: BLE001 -- no history is a valid answer
         pass
-    _pp_cache[model] = (time.time(), out)
     return out
 
 
@@ -6076,10 +6244,56 @@ async def _peer_served(p: dict) -> dict:
     return out
 
 
+_routes_refresh_task: asyncio.Task | None = None
+
+
+def _routes_refresh_done(task: asyncio.Task) -> None:
+    """Retrieve a background refresh's outcome so a failure is logged once
+    instead of surfacing as "Task exception was never retrieved"."""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001 -- the stale table stays; next read retries
+        log.exception("routing refresh failed; serving the previous table")
+
+
 async def model_routes(force: bool = False) -> dict[str, str]:
-    """model id (or alias) -> peer name, with '' meaning this host."""
+    """model id (or alias) -> peer name, with '' meaning this host.
+
+    Stale-while-revalidate (2026-09-16). The table used to be rebuilt INLINE
+    by whichever request found it older than ROUTE_TTL: that request awaited
+    a sweep of every routed peer, and with three boxes offline (gpu-desktop-2,
+    apu-tablet-2, gpu-laptop-4) the sweep sat on their connect timeouts. Measured
+    from mini-pc-1: /admin/api/resolve answered in 0.03-0.1 s, except one call
+    every ~30 s that took 6.1 s -- past the downstream app's 4 s planner timeout, so
+    that lane call quietly fell to the direct pool (an evaluate onto apu-box-1's
+    Flash-Next, a cover letter queued on one box) while the fleet sat idle.
+
+    Now a stale table is served as it stands and refreshed behind the
+    caller, once, however many readers find it stale at the same moment.
+    Three cases still wait for a fresh sweep, sharing one in-flight refresh:
+    the first fill after startup (nothing to serve yet), an explicit
+    invalidation (`_routes_cache["t"] = 0.0`, which the killswitch and the
+    models editor use to make their change visible on the next read), and
+    `force=True` (the callers that need the table to reflect a change they
+    just made). The 30 s TTL is unchanged; only who pays for the refresh."""
+    global _routes_refresh_task
     if not force and time.time() - _routes_cache["t"] < ROUTE_TTL:
         return _routes_cache["map"]
+    populated = _routes_cache["t"] > 0.0
+    if _routes_refresh_task is None or _routes_refresh_task.done():
+        _routes_refresh_task = asyncio.create_task(_refresh_routes())
+        _routes_refresh_task.add_done_callback(_routes_refresh_done)
+    if not force and populated:
+        return _routes_cache["map"]
+    await asyncio.shield(_routes_refresh_task)
+    return _routes_cache["map"]
+
+
+async def _refresh_routes() -> dict[str, str]:
+    """One full rebuild of the routing table: the local catalogue plus a
+    sweep of every routed peer. model_routes() decides who waits for it."""
     routes: dict[str, str] = {}
     cands: dict[str, list[str]] = {}
     cap: dict[tuple[str, str], int] = {}
@@ -6161,6 +6375,63 @@ def _host_saturated(cand: str, fid: str) -> bool:
     return _inflight.get(hname, 0) >= slots
 
 
+# A free candidate the scorer judged disproportionately slower than the
+# fastest saturated one (the overflow rule inside _score_host_model_pairs)
+# is remembered here for a short while, keyed exactly as callers pass
+# (cand, fid) to _host_saturated -- so a caller with its OWN prefer/exclude
+# policy (demo_host_policy, agent_host_policy) does not resurrect that same
+# slow box just because its "saturated" bit alone reads False. Short-lived
+# and best-effort, like _silent_answer: a stale entry simply falls out of
+# the window and is dropped on the next read that finds it expired.
+_overflow_demoted: dict[tuple[str, str], float] = {}
+_OVERFLOW_DEMOTED_TTL = 30.0
+
+
+def _effectively_saturated(cand: str, fid: str) -> bool:
+    """_host_saturated(), plus a candidate still inside its overflow-demoted
+    window. This is what _host_policy's shared core sorts on, so an agent's
+    or the demo's own `prefer` cannot pull a just-demoted slow box back
+    ahead of a saturated-but-fast one -- see _score_host_model_pairs."""
+    if _host_saturated(cand, fid):
+        return True
+    key = (cand, fid)
+    ts = _overflow_demoted.get(key)
+    if ts is None:
+        return False
+    if time.time() - ts > _OVERFLOW_DEMOTED_TTL:
+        _overflow_demoted.pop(key, None)
+        return False
+    return True
+
+
+def _record_pressure(fid: str) -> None:
+    """Note that `fid`'s best candidate was just found saturated. Pruned to
+    the rolling PRESSURE_WINDOW (sized with headroom above the top of
+    pressure_warm_after_s's own bounds -- see PRESSURE_WINDOW's own
+    comment) and capped defensively -- this is demand signal, not an audit
+    log."""
+    evs = _pressure_events.setdefault(fid, [])
+    now = time.time()
+    evs.append(now)
+    cutoff = now - PRESSURE_WINDOW
+    while evs and evs[0] < cutoff:
+        evs.pop(0)
+    if len(evs) > 500:
+        del evs[:-500]
+
+
+def _note_pressure(ranked: list[tuple[str, str]]) -> None:
+    """Record pressure when the top-ranked candidate for a resolved request
+    is saturated -- called from resolve_targets()'s one choke point, so
+    every caller (the real /v1 dispatch, the admin resolve preview) feeds
+    the same demand signal identically."""
+    if not ranked:
+        return
+    cand, fid = ranked[0]
+    if _host_saturated(cand, fid):
+        _record_pressure(fid)
+
+
 async def _score_host_model_pairs(
     pairs: list[tuple[str, str]], role: str = "primary",
     prompt_tokens: int = 0, gen_tokens: int = 256, need_ctx: int = 0,
@@ -6200,7 +6471,19 @@ async def _score_host_model_pairs(
     27B on a laptop while the 120B sat idle on the big box -- the policy
     said which model plays the role best, and the ranking ignored it. Boxes
     that would spill or run it on CPU still sit behind every box that holds
-    it, whatever the ladder says."""
+    it, whatever the ladder says.
+
+    A free box can still lose to a saturated one: when it is more than
+    `overflow_max_slowdown` times slower than the fastest SATURATED
+    candidate's own loaded estimate, it is "overflow-demoted" into the same
+    last bucket saturated boxes occupy (0 disables the rule; see
+    _overflow_max_slowdown()). Real saturation still wins over a merely
+    overflow-demoted box within that bucket -- a demoted box's queue depth
+    is trivially zero (nobody is actually waiting on it), which would
+    otherwise let it win the queue-depth tiebreak against a genuinely busy,
+    faster box and undo the demotion. The decision is remembered in
+    _overflow_demoted so _host_policy's callers (demo/agent prefer lists)
+    cannot resurrect a box this scorer just pushed back."""
     if len(pairs) <= 1:
         return pairs
     cap = _routes_cache.get("cap", {})
@@ -6219,7 +6502,7 @@ async def _score_host_model_pairs(
             pp_cache[mid] = await asyncio.to_thread(measured_pp, mid)
         return pp_cache[mid]
 
-    scored = []
+    rows = []
     for cand, mid in pairs:
         hname = cand or HOST_NAME
         slots = max(1, int(cap.get((cand, mid), 1)))
@@ -6245,24 +6528,64 @@ async def _score_host_model_pairs(
         # For a fleet role: holds-it before spills-it, then the ladder.
         pref = ((0 if tier <= 1 else 1, role_index(fleet_role, cand, mid))
                 if fleet_role else ())
+        rows.append({
+            "cand": cand, "mid": mid, "hname": hname, "slots": slots,
+            "busy": busy, "queue_len": queue_len, "tier": tier, "rank": rank,
+            "too_small": too_small, "est": est, "bw": bw, "pref": pref,
+            "saturated": busy >= slots,
+            "cooling": host_cooling(hname),
+            "reserved": host_reserved(hname),
+        })
+
+    # A free box can still be the wrong pick when it is disproportionately
+    # SLOWER than the fastest already-saturated one -- a cold reserve laptop
+    # is not actually a better choice than a busy-but-fast box that will
+    # finish sooner regardless. overflow_max_slowdown is the ratio threshold
+    # (0 disables the rule); see _overflow_max_slowdown(). Recorded into
+    # _overflow_demoted so _host_policy's callers (demo/agent prefer lists)
+    # see the same demotion rather than resurrecting the slow box.
+    k = _overflow_max_slowdown()
+    saturated_ests = [r["est"] for r in rows if r["saturated"]]
+    best_saturated_est = min(saturated_ests) if saturated_ests else None
+    for r in rows:
+        r["overflow"] = (
+            not r["saturated"] and best_saturated_est is not None
+            and k > 0 and r["est"] > k * best_saturated_est
+        )
+        if r["overflow"]:
+            _overflow_demoted[(r["cand"], r["mid"])] = time.time()
+
+    scored = []
+    for r in rows:
         key = (
-            1 if busy >= slots else 0,          # saturated last
-            1 if host_cooling(hname) else 0,    # just failed: last
-            too_small,                          # proven cannot fit: behind
+            # saturated (or overflow-demoted) last
+            1 if (r["saturated"] or r["overflow"]) else 0,
+            # Sub-priority WITHIN that combined bucket: a genuinely saturated
+            # box still beats one that is merely overflow-demoted. Needed
+            # because queue_len below is 0 by definition for a free (even if
+            # overflow-demoted) box -- without this bit that hollow "nobody
+            # is waiting on me" would let it win the queue_len tiebreak
+            # against a truly saturated-but-faster box and undo the very
+            # demotion this rule exists to apply. Not present pre-overflow
+            # (every row in the old bucket 1 was genuinely saturated, so this
+            # was always 0 for all of them -- a no-op there).
+            1 if (r["overflow"] and not r["saturated"]) else 0,
+            1 if r["cooling"] else 0,           # just failed: last
+            r["too_small"],                     # proven cannot fit: behind
                                                 # even the reserve boxes -- a
                                                 # personal box that CAN answer
                                                 # beats any box that cannot
-            1 if host_reserved(hname) else 0,   # personal box: only when the
+            1 if r["reserved"] else 0,          # personal box: only when the
                                                 # fleet boxes are busy/failing
-            *pref,                              # the role's own order
-            queue_len,                          # among saturated boxes only:
+            *r["pref"],                         # the role's own order
+            r["queue_len"],                     # among saturated boxes only:
                                                 # fewest jobs waiting first
-            tier, rank,                         # the owner's policy
-            round(est, 1),                      # soonest answer first
-            -bw,                                # spec-sheet tiebreak
-            0 if cand == "" else 1,             # local tiebreak
+            r["tier"], r["rank"],               # the owner's policy
+            round(r["est"], 1),                 # soonest answer first
+            -r["bw"],                           # spec-sheet tiebreak
+            0 if r["cand"] == "" else 1,        # local tiebreak
         )
-        scored.append((key, cand, mid))
+        scored.append((key, r["cand"], r["mid"]))
     scored.sort(key=lambda t: t[0])
     return [(cand, mid) for _, cand, mid in scored]
 
@@ -6855,6 +7178,17 @@ async def openai_proxy(path: str, request: Request):
                 gen_tokens=gen_est, need_ctx=prompt_est + gen_est)
         except Exception:  # noqa: BLE001 -- routing is best-effort
             targets = []
+        if agent and len(targets) > 1:
+            # Order matters: this runs BEFORE the ctx_limit resort below, not
+            # after. Both are stable sorts, so the LAST one applied dominates
+            # (ctx-fit), and this step only decides ties within each ctx-fit
+            # band -- the same saturation-first-preference-second relationship
+            # demo_host_policy already has with the scorer's own order. Do not
+            # move this after the ctx_limit block: that would let host
+            # preference override ctx-fit correctness instead of tiebreak it.
+            prefer, exclude = _agent_host_policy_lists(agent)
+            if prefer or exclude:
+                targets = agent_host_policy(targets, prefer, exclude)
         if ctx_limit and len(targets) > 1:
             # A box that can hold the whole window this key was issued for
             # beats one that would force a disclosed reduction, and it beats it
@@ -6894,6 +7228,7 @@ async def openai_proxy(path: str, request: Request):
         + (" · " + str(key.get("name")) if key.get("name") else ""),
         origin=origin,
         stop=asyncio.Event(),
+        key_id=int(key["id"]),
     )
     resp = None
     peer_client: httpx.AsyncClient | None = None
@@ -7002,9 +7337,20 @@ async def openai_proxy(path: str, request: Request):
             untrack = _track(hname)
             # How long to wait for the first byte before asking the next box
             # instead. Only when there IS a next box: with nobody else to
-            # ask, waiting is still the best the caller can get.
+            # ask, waiting is still the best the caller can get. A
+            # non-streamed request's first byte is its whole answer, so its
+            # deadline covers generation at this box's measured decode rate
+            # (see _answer_deadline).
             resident = fleet_id in _routes_cache.get("running", {}).get(hname, set())
-            deadline = _ttfb_deadline(prompt_est, resident) if more else None
+            deadline = None
+            if more:
+                tps_here = None
+                if not stream:
+                    try:
+                        tps_here = (await asyncio.to_thread(measured_tps, fleet_id)).get(hname)
+                    except Exception:  # noqa: BLE001 -- no history is a valid answer
+                        tps_here = None
+                deadline = _answer_deadline(prompt_est, gen_est, resident, stream, tps_here)
             try:
                 # Raced, because the wait for the first byte is itself a place
                 # a request gets stuck: llama-swap loading a large model
@@ -7017,9 +7363,10 @@ async def openai_proxy(path: str, request: Request):
             except asyncio.TimeoutError:
                 tried.append((hname, " (no answer in %ds)" % int(deadline or 0)))
                 upstream_failed = True
-                _mark_host_down(hname, COOLDOWN_STALL,
+                _mark_host_down(hname, _stall_cooldown(hname),
                                 "no first byte for " + fleet_id + " within "
-                                + str(int(deadline or 0)) + "s")
+                                + str(int(deadline or 0)) + "s (stall #"
+                                + str(stall_streak(hname)) + ")")
                 await _quiet_close(peer_client)
                 peer_client = None
                 continue
@@ -7275,6 +7622,7 @@ async def openai_proxy(path: str, request: Request):
             # broken) -- clearing that here on the same response would make
             # the cooldown a no-op the instant it was set.
             _mark_host_ok(served_by)
+            _clear_stall(served_by)
         # A caller that gave up before the answer arrived never received it,
         # and every OpenAI SDK retries by default (max_retries=2) -- so a slow
         # first call would quietly spend two of a demo key's five daily
@@ -7366,6 +7714,7 @@ async def openai_proxy(path: str, request: Request):
                     ttft = int((time.time() - started) * 1000)
                     if status_out < 500 and status_out not in (429, 503):
                         _mark_host_ok(served_by)
+                        _clear_stall(served_by)
                 if usage is None:
                     scan = usage_tail + chunk
                     if b"\n" in scan:
@@ -7424,6 +7773,37 @@ def _ttfb_deadline(prompt_tokens: int, resident: bool) -> float:
     catch a load that will never finish, not a slow one."""
     d = TTFB_BASE + max(0, prompt_tokens) / 150.0 + (0.0 if resident else 90.0)
     return min(600.0, d)
+
+
+# The decode rate a non-streamed request's deadline assumes for a box with no
+# measured history. Pessimistic on purpose, and matching the pre-existing
+# `gen_est / 3.0` the fleet_chat and batch paths already used.
+GEN_RATE_FLOOR = 3.0
+ANSWER_DEADLINE_MAX = 900.0
+
+
+def _answer_deadline(prompt_tokens: int, gen_tokens: int, resident: bool,
+                     stream: bool, tps: float | None = None) -> float:
+    """The failover deadline for one attempt at one box.
+
+    For a STREAMED request that is the first byte: the box has read the
+    prompt and started generating, and from there the mid-stream guards take
+    over. For a NON-streamed request the first byte IS the whole answer --
+    llama-server sends nothing, not even headers, until generation is done --
+    so the wait has to cover generation too: at half the box's measured
+    decode rate for this model, or GEN_RATE_FLOOR tok/s when it has none.
+
+    Before this the /v1 proxy judged a non-streamed call by the first-byte
+    deadline alone. A hub call (5-10k prompt, up to 1100 tokens back,
+    stream off) takes apu-tablet-1 about 135 s at its honest resident speed;
+    the deadline came to ~130 s, so the box was cut off with the answer
+    seconds away, metered 499 and cooled -- sixteen times on 2026-09-15,
+    every one of them work the box had done that nobody received."""
+    d = _ttfb_deadline(prompt_tokens, resident)
+    if not stream:
+        rate = max(GEN_RATE_FLOOR, float(tps or 0.0) * 0.5)
+        d += max(0, gen_tokens) / rate
+    return min(ANSWER_DEADLINE_MAX, d)
 
 
 # Vocabulary a llama.cpp server (>= b4700) or an older one's plain-text 4xx
@@ -7997,9 +8377,10 @@ async def fleet_chat(key: dict, body: dict, endpoint: str,
         except httpx.TimeoutException:
             untrack()
             upstream_failed = True
-            _mark_host_down(hname, COOLDOWN_STALL,
+            _mark_host_down(hname, _stall_cooldown(hname),
                             "no answer for " + fleet_id + " within "
-                            + str(int(deadline or 0)) + "s")
+                            + str(int(deadline or 0)) + "s (stall #"
+                            + str(stall_streak(hname)) + ")")
             continue
         except httpx.HTTPError as exc:
             untrack()
@@ -8076,6 +8457,7 @@ async def fleet_chat(key: dict, body: dict, endpoint: str,
                 "HTTP " + str(r.status_code) + " (no other host)")
         else:
             _mark_host_ok(hname)
+            _clear_stall(hname)
         try:
             out = r.json()
         except ValueError:
@@ -8352,9 +8734,10 @@ async def _batch_run(bid: int, models: list[str], key: dict,
                 # No complete answer within the deadline -- a stall, handled
                 # like a connect failure: hand the item back and retire this
                 # worker rather than looping on a box making no progress.
-                _mark_host_down(hname, COOLDOWN_STALL,
+                _mark_host_down(hname, _stall_cooldown(hname),
                                 "no answer for " + tgt["model"] + " within "
-                                + str(int(deadline)) + "s")
+                                + str(int(deadline)) + "s (stall #"
+                                + str(stall_streak(hname)) + ")")
                 untrack()
                 await queue.put((idx, req))
                 return
@@ -8424,6 +8807,10 @@ async def _batch_run(bid: int, models: list[str], key: dict,
                     await queue.put((idx, req))
                     continue
             ok = status < 400
+            if status < 500 and status not in (429, 503):
+                # The box answered (a 4xx is still an answer): its stall
+                # streak resets here like it does on every other path.
+                _clear_stall(hname)
             record_usage(key, tgt["model"], "/v1/batches", False, status,
                          (rbody or {}).get("usage") if isinstance(rbody, dict)
                          else None, None, ms, host=hname)
@@ -9200,7 +9587,7 @@ async def _http_error_handler(request: Request, exc: HTTPException) -> JSONRespo
 
 # ---- seeded catalogue -------------------------------------------------
 
-# The 15-row catalogue baked into the binary. Used only when
+# The catalogue baked into the binary. Used only when
 # gateway/public_seed.json (or LLMSTACK_PUBLIC_SEED) is missing or empty --
 # the orchestrator supplies that file, but a fresh checkout without it still
 # boots with a usable Fleet Pass.
@@ -9282,7 +9669,7 @@ PUBLIC_MODELS_SEED: list[dict] = [
      "description": "NVIDIA's 120B-A12B hybrid Mamba/transformer, built for throughput on long agent runs rather than for benchmark wins. The fleet's largest model: a cold load takes minutes, so expect a fallback when it is not resident."},
     {"public_id": "nemotron3.5-lightning-30b", "family": "Nemotron", "name": "Nemotron 3.5 Lightning 30B-A3B", "vendor": "NVIDIA",
      "arch": "moe", "params_b": 30, "active_b": 3,
-     "fleet_ids": ["nemotron3.5-lightning-30b"], "allow_primary": 1, "allow_worker": 1,
+     "fleet_ids": ["nemotron3.5-lightning-30b", "hf.co/unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF:UD-Q4_K_XL"], "allow_primary": 1, "allow_worker": 1,
      "ctx_max": 131072, "ctx_default": 16384, "sort": 100,
      "description": "August 2026 Nemotron: 30B stored, 3B active, with a thinking phase. Fast, and a good writer."},
     {"public_id": "nemotron-3-nano-4b", "family": "Nemotron", "name": "Nemotron 3 Nano 4B", "vendor": "NVIDIA",
@@ -9332,6 +9719,12 @@ PUBLIC_MODELS_SEED: list[dict] = [
     # the geometry settles it -- 40 blocks, matching Qwen 3.6 35B-A3B, where
     # Ornith has 41. Trained window and attention shape are Qwen 3.6's too,
     # which is why this row and qwen3.6-35b-a3b carry the same ctx_max.
+    {"public_id": "ornith-1.5-9b", "family": "Ornith", "name": "Ornith 1.5 9B",
+     "vendor": "ornith-ai", "arch": "dense", "params_b": 9, "active_b": 9,
+     "fleet_ids": ["ornith-1.5-9b", "hf.co/ornith-ai/Ornith-1.5-9B-GGUF:Q4_K_M"],
+     "allow_primary": 0, "allow_worker": 1,
+     "ctx_max": 262144, "ctx_default": 16384, "sort": 165,
+     "description": "The small sibling of Ornith 1.5 35B-A3B: a dense 9B on the Qwen 3.5 architecture, trained for the same 262k window. It answers at a pace a bigger model cannot and holds its shape on tool calls, which is why the fleet's own assistant runs its tool loop on it."},
     {"public_id": "tiel-coder-35b-a3b", "family": "Tiel", "name": "Tiel Coder 35B-A3B",
      "vendor": "community (peculiar-ragdoll, Qwen 3.6 fine-tune)", "arch": "moe",
      "params_b": 35, "active_b": 3,
@@ -9471,6 +9864,10 @@ _PRE_HARDWARE_CTX_MAX: dict[str, int] = {
     # migrates properly if that number is ever raised.
     "ornith-1.5-35b-a3b": 262144,
     "tiel-coder-35b-a3b": 262144,
+    # Joined 2026-09-07 on the same terms: 262144 is what the GGUF header
+    # reports (qwen35.context_length), not a number anyone chose. The boxes
+    # that serve it run a smaller window; this is the ceiling, not the plan.
+    "ornith-1.5-9b": 262144,
 }
 
 
@@ -9783,6 +10180,29 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
     # up, but the request after that can. Contrast COOLDOWN_UPSTREAM_5XX
     # (45s), which is for a box that actually failed.
     "busy_cooldown_seconds": 5,
+    # How much slower a FREE box may be than the fastest SATURATED one before
+    # the scorer demotes it behind that saturated box anyway -- a free but
+    # wildly slow box (a cold reserve laptop) is not actually the better
+    # choice over a busy-but-fast one that will finish sooner regardless.
+    # Unlike busy_cooldown_seconds, a stored 0 here is a real "off" (matching
+    # ctx_ceiling's own "0 = no policy" idiom in this file), not a fallback
+    # to the default -- see _overflow_max_slowdown().
+    "overflow_max_slowdown": 2.0,
+    # ---- pressure-warm: when a model's best box is saturated for a while ----
+    # A sustained run of "everyone who wants this model finds only a busy
+    # box" is demand the preload loop should react to, not just tolerate.
+    "pressure_warm_enabled": True,
+    # Lets pressure-warm use a host_reserved box (e.g. a personal box the
+    # normal preload loop always leaves alone) once every non-reserve
+    # candidate is saturated under sustained pressure.
+    "pressure_warm_reserve": True,
+    # How long a model's best box must have been continuously saturated
+    # (within the fixed 2-minute demand window) before it counts as
+    # sustained pressure rather than a passing blip.
+    "pressure_warm_after_s": 45,
+    # Minimum spacing between pressure-triggered (re-)touches of the same
+    # resident host -- the pressure-warm equivalent of PRELOAD_REFRESH.
+    "pressure_warm_cooldown_s": 600,
     "fallback_notice": True,
     "fallback_notice_text": (
         "[Fleet notice: {requested} was not available, so this reply came "
@@ -9917,7 +10337,20 @@ DEFAULT_PUBLIC_SETTINGS: dict[str, Any] = {
     # of these settings that could drift from the tab.
     "auto_issue_enabled": True,
     "auto_issue_model": "qwen3.8-27b",
-    "auto_issue_ctx": 16384,
+    # As large as the model will be served with, not a cautious middle. These
+    # keys go to recruiters who plug them into a coding agent and point it at
+    # a repository, and 16384 -- what this shipped with until 2026-09-11 --
+    # ran out inside one file-reading turn, which is a poor advertisement for
+    # a fleet whose whole pitch is that it holds a big window. 262144 is the
+    # pinned qwen3.8-27b's full trained window -- the largest number this ask
+    # can ever mean (hosts/mac-laptop-1/README.md "Why those context windows" records
+    # loading it whole). Nothing is over-promised by naming it: the mint clamps
+    # every ask down to catalogue_ctx()'s `best` for the model actually chosen
+    # -- the per-conversation window the boxes REPORT serving today, which can
+    # be smaller than the trained one -- so a smaller model, a lowered ctx_max,
+    # a `ctx_ceiling` policy or a box's own slot arithmetic each bind ahead of
+    # this figure, and the key carries what was granted, not what was asked.
+    "auto_issue_ctx": 262144,
     "auto_issue_daily_cap": 20,
     "auto_issue_setup_text": (
         "Base URL: {base_url}\n"
@@ -9946,6 +10379,9 @@ _PUBLIC_SETTING_BOUNDS: dict[str, tuple[float, float]] = {
     "demo_max_context_chars": (0, 60000),
     "auto_issue_ctx": (1024, 1048576), "auto_issue_daily_cap": (1, 1000),
     "busy_cooldown_seconds": (1, 300),
+    "overflow_max_slowdown": (0.0, 10.0),
+    "pressure_warm_after_s": (5, 600),
+    "pressure_warm_cooldown_s": (60, 3600),
 }
 
 
@@ -9995,6 +10431,8 @@ def get_public_settings() -> dict:
         fams if isinstance(fams, list) else DEFAULT_PUBLIC_SETTINGS["model_family_order"])
     out["featured_model"] = str(out.get("featured_model") or "").strip()
     out["preload_featured"] = bool(out.get("preload_featured", True))
+    out["pressure_warm_enabled"] = bool(out.get("pressure_warm_enabled", True))
+    out["pressure_warm_reserve"] = bool(out.get("pressure_warm_reserve", True))
     out["demo_enabled"] = bool(out.get("demo_enabled", True))
     out["demo_model"] = str(out.get("demo_model") or "").strip()
     out["demo_system_prompt"] = str(out.get("demo_system_prompt") or "")
@@ -10043,6 +10481,209 @@ def sync_public_key_limits(settings: dict) -> int:
     if moved:
         log.info("synced request limits onto %d live Fleet Pass key(s)", moved)
     return moved
+
+
+def _public_row_ctx_ceiling(row: dict) -> int:
+    """The largest window this key's own model(s) can actually be served
+    with -- the same catalogue_ctx() `best` the mint clamps to -- so nothing
+    that resizes a key can promise it more than its model holds. A team is
+    bound by the SMALLEST of the crew's ceilings, matching _validate_public_ctx.
+
+    0 means "do not touch this row": the catalogue no longer knows one of the
+    ids on it (a model retired since the key was minted), and a sweep must
+    leave a key it cannot size alone rather than guess a number for it."""
+    try:
+        models = json.loads(row.get("models") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return 0
+    if row.get("kind") == "team":
+        ids = [str(models.get("primary") or "")] + [
+            str(w) for w in (models.get("workers") or [])]
+    else:
+        ids = [str(models.get("model") or "")]
+    ids = [i for i in ids if i]
+    if not ids:
+        return 0
+    cat = public_catalogue()["by_public"]
+    caps = [int(catalogue_ctx(cat[i])["best"]) for i in ids if i in cat]
+    if len(caps) != len(ids):
+        return 0
+    return min(caps)
+
+
+def sync_public_key_ctx(target: int = 0, scope: str = "auto",
+                        dry_run: bool = False) -> dict:
+    """Raise the context window on Fleet Pass keys that are ALREADY out
+    there, and answer which ones moved.
+
+    The same reasoning as sync_public_key_limits() directly above, for the
+    one number that function does not carry. A key is minted with the tab's
+    ctx stamped on its own row, and everything downstream reads that row --
+    agents.ctx_limit, which apply_ctx_limit() holds every request to, and the
+    `context_length` the /v1/models listing reports, which is the only field
+    a coding agent can learn the window from. So raising the tab's figure
+    used to reach the NEXT recruiter only: everyone already holding a key
+    stayed on the old window for the rest of its week, with nothing anywhere
+    telling them it had moved.
+
+    Two numbers per key, and they move TOGETHER or not at all. public_keys.ctx
+    is what the client is told; the profile's ctx_limit (agents, or teams for
+    a crew) is what the request is actually held to. Each key's pair is
+    written in one transaction on one connection -- db_update() commits per
+    call, which is exactly the shape that could leave the advertised number
+    raised and the enforced one not.
+
+    Which profile enforces a key is decided the way the request path decides
+    it -- a live teams row wins, else the agents row -- never from the frozen
+    public_keys.kind, which nothing keeps in step with the profile tables.
+    "Live" is get_agent()/get_team()'s own predicate, enabled=1 AND
+    archived_at IS NULL, and not a looser one: a profile the Agents tab has
+    DISABLED is as invisible to a request as an archived one. A key with no
+    live profile enforces no window at all (DELETE /admin/api/agents/{key_id}
+    and the tab's enabled switch are ordinary admin actions, and get_agent()
+    then returns nothing), so widening its advertised number would be
+    advertising a window nothing holds: it is reported under `unsynced` and
+    left exactly as it was. So is a key with BOTH profiles live, a state this
+    sweep cannot size honestly. Liveness is re-checked INSIDE the lock, on
+    every key, before any write: the archive routes write through
+    db_update(), which takes the same lock, so nothing can archive a profile
+    between that check and the writes. Each side is raise-only on its own, so
+    a pair that somehow disagrees (a hand-edited profile, an older sweep)
+    converges upward rather than one side being cut to meet the other.
+
+    Raise-only, and clamped per key to that key's own model ceiling. Lowering
+    is deliberately not offered here: the number went out in writing inside a
+    cover letter, a client may be mid-conversation against it, and a key an
+    admin minted deliberately small must not be re-cut by a sweep aimed at
+    somebody else's. Narrowing a key is what revoke and re-issue are for.
+
+    `scope` is "auto" (keys minted by a connected service, source auto:<svc>)
+    or "all", which also reaches the keys people requested for themselves on
+    the public form. "auto" is the default because a requester picked their
+    own window on that form, and widening it unasked is a different act from
+    fixing a figure this gateway chose on their behalf."""
+    settings = get_public_settings()
+    want = int(target or settings.get("auto_issue_ctx") or 0)
+    if want <= 0:
+        # Unreachable through the endpoint (bounds-validated, and the settings
+        # reader clamps to >= 1024) -- but the shape must still match the one
+        # every caller destructures, or a guard becomes a TypeError.
+        return {"target": 0, "scope": scope, "dry_run": bool(dry_run),
+                "scanned": 0, "updated": 0, "skipped": 0, "keys": [], "unsynced": []}
+    source_clause = "" if scope == "all" else " AND pk.source LIKE 'auto:%'"
+    # The one definition of "live" every other check in this file uses: a
+    # date-only expiry means the end of that day, so a key expiring tonight
+    # is still a key somebody is using this afternoon.
+    rows = db_query(
+        "SELECT pk.* " + _LIVE_PUBLIC_KEYS_SQL + source_clause + " ORDER BY pk.id DESC",
+        (now(),),
+    )
+    moved, skipped, report, unsynced = 0, 0, [], []
+    for row in rows:
+        row_id, key_id = int(row["id"]), int(row["key_id"])
+        ref = str(row.get("note") or "")[:120]
+        kind = str(row.get("kind") or "")
+        ceiling = _public_row_ctx_ceiling(row)
+        current = int(row.get("ctx") or 0)
+        new = min(want, ceiling) if ceiling > 0 else 0
+        new -= new % 1024
+        live_team = db_query(
+            "SELECT ctx_limit FROM teams WHERE key_id=? AND enabled=1 AND archived_at IS NULL",
+            (key_id,))
+        live_agent = db_query(
+            "SELECT ctx_limit, param_overrides FROM agents "
+            "WHERE key_id=? AND enabled=1 AND archived_at IS NULL",
+            (key_id,))
+        if live_team and live_agent:
+            unsynced.append({"id": row_id, "ref": ref, "kind": kind, "ctx": current,
+                             "reason": "dual_profile"})
+            continue
+        if not live_team and not live_agent:
+            unsynced.append({"id": row_id, "ref": ref, "kind": kind, "ctx": current,
+                             "reason": "no_live_profile"})
+            continue
+        table = "teams" if live_team else "agents"
+        prof = (live_team or live_agent)[0]
+        enforced = int(prof.get("ctx_limit") or 0)
+        pub_to = max(current, new)
+        # A profile with no ctx_limit enforces no window at all (_norm_limit);
+        # stamping one onto it would be a narrowing, so it is left alone and
+        # only the advertised number moves.
+        enf_to = enforced if enforced <= 0 else max(enforced, new)
+        if pub_to == current and enf_to == enforced:
+            skipped += 1
+            continue
+        entry = {"id": row_id, "source": str(row.get("source") or ""), "ref": ref, "kind": kind,
+                 "profile": table, "from": current, "to": pub_to,
+                 "enforced_from": enforced, "enforced_to": enf_to, "ceiling": ceiling}
+        if dry_run:
+            report.append(entry)
+            moved += 1
+            continue
+        # One transaction per key: every write shares the connection and they
+        # land together or roll back together. Raw conn.execute throughout --
+        # db_update() would try to take _db_lock a second time.
+        with _db_lock, closing(db()) as conn:
+            try:
+                # Unconditional, and under the lock: the read above happened
+                # before the lock, and an archive can land in that gap.
+                alive = conn.execute(
+                    "SELECT 1 FROM " + table + " WHERE key_id=? AND enabled=1 AND archived_at IS NULL",
+                    (key_id,)).fetchone()
+                if not alive:
+                    unsynced.append({"id": row_id, "ref": ref, "kind": kind, "ctx": current,
+                                     "reason": "no_live_profile"})
+                    continue
+                if enf_to != enforced:
+                    cur = conn.execute(
+                        "UPDATE " + table + " SET ctx_limit=?, updated_at=? "
+                        "WHERE key_id=? AND enabled=1 AND archived_at IS NULL",
+                        (enf_to, now(), key_id))
+                    if cur.rowcount != 1:
+                        conn.rollback()
+                        unsynced.append({"id": row_id, "ref": ref, "kind": kind, "ctx": current,
+                                         "reason": "no_live_profile"})
+                        continue
+                if pub_to != current:
+                    conn.execute("UPDATE public_keys SET ctx=? WHERE id=?", (pub_to, row_id))
+                if table == "agents" and enf_to > 0:
+                    # max_tokens was derived from the window at mint time
+                    # (min(4096, ctx // 2)), so a key minted with a small ctx
+                    # also carries a small completion cap. Raise that with it
+                    # -- only upwards, and leaving every other override the
+                    # admin may have set on the profile exactly where it is.
+                    try:
+                        ov = json.loads(prof.get("param_overrides") or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        ov = None
+                    if isinstance(ov, dict):
+                        floor = min(4096, enf_to // 2)
+                        try:
+                            have = int(ov.get("max_tokens") or 0)
+                        except (TypeError, ValueError):
+                            have = 0
+                        if have < floor:
+                            ov["max_tokens"] = floor
+                            entry["max_tokens"] = floor
+                            conn.execute(
+                                "UPDATE agents SET param_overrides=?, updated_at=? "
+                                "WHERE key_id=? AND enabled=1 AND archived_at IS NULL",
+                                (json.dumps(ov), now(), key_id))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        report.append(entry)
+        moved += 1
+    if moved and not dry_run:
+        log.info("raised the context window on %d live Fleet Pass key(s) to %d",
+                 moved, want)
+    if unsynced:
+        log.warning("%d live Fleet Pass key(s) were left alone (no live profile, or two): %s",
+                    len(unsynced), ", ".join(str(u["id"]) for u in unsynced[:20]))
+    return {"target": want, "scope": scope, "dry_run": bool(dry_run),
+            "scanned": len(rows), "updated": moved, "skipped": skipped,
+            "keys": report, "unsynced": unsynced}
 
 
 def set_public_settings(updates: dict) -> dict:
@@ -10291,13 +10932,19 @@ async def resolve_targets(model: str, role: str = "primary", prompt_tokens: int 
         for fid in fids:
             for cand in _routes_cache["cands"].get(fid, []):
                 pairs.append((cand, fid))
-        return await _score_host_model_pairs(pairs, **kw)
-    # A fleet role is a policy, not a name any box serves: each box's best
-    # model for it, ranked like any other candidates. See FLEET_ROLES.
-    if model in FLEET_ROLES:
-        return await _score_host_model_pairs(role_pairs(model), fleet_role=model, **kw)
-    hosts = await model_hosts(model, **kw)
-    return [(h, model) for h in hosts]
+        ranked = await _score_host_model_pairs(pairs, **kw)
+    elif model in FLEET_ROLES:
+        # A fleet role is a policy, not a name any box serves: each box's
+        # best model for it, ranked like any other candidates. See FLEET_ROLES.
+        ranked = await _score_host_model_pairs(role_pairs(model), fleet_role=model, **kw)
+    else:
+        hosts = await model_hosts(model, **kw)
+        ranked = [(h, model) for h in hosts]
+    # One choke point for demand bookkeeping: every caller of resolve_targets
+    # (the real /v1 dispatch, and the admin resolve preview) records the same
+    # signal the same way -- see _note_pressure() and pressure_warm_plan().
+    _note_pressure(ranked)
+    return ranked
 
 
 def _catalogue_row_online(fids: list[str]) -> bool:
@@ -11463,6 +12110,7 @@ async def _warm_load(item: dict, key_row: dict) -> None:
                         "warm-up answered HTTP " + str(status))
         raise RuntimeError("the machine answered HTTP " + str(status))
     _mark_host_ok(host)
+    _clear_stall(host)
     _routes_cache["t"] = 0.0
     item.update(phase="ready", detail="ready on " + item["box"], progress=1.0)
 
@@ -11645,6 +12293,27 @@ PRELOAD_IDLE_GRACE = 300.0    # leave a box alone this long after it served
 PRELOAD_RETRY = 900.0         # back off this long after a box refuses
 PRELOAD_LOAD_TIMEOUT = 900.0  # a cold dense-27B load, with room to spare
 
+# Pressure-warm: how long a run of "the best candidate was saturated"
+# observations stays in the demand window, and the defaults for how long
+# that has to persist / how often a still-pressured host gets re-touched --
+# see pressure_warm_plan() and the pressure_warm_* public settings.
+#
+# Must comfortably exceed the top of pressure_warm_after_s's own bounds
+# (_PUBLIC_SETTING_BOUNDS, (5, 600)) -- a fixed 120s window used to mean
+# _record_pressure()/_pressured_models() pruned away exactly the events a
+# threshold configured above 120s needed to ever find, so any admin value
+# in the upper 121-600s portion of that same admin-configurable,
+# UI-exposed range silently and permanently disabled pressure-warm. A
+# window merely EQUAL to the top of the range would only fix that for an
+# instant -- an event's age would have to land exactly on both the
+# threshold and the prune cutoff at once -- so this keeps a real buffer
+# (5 minutes) above the maximum configurable pressure_warm_after_s, the
+# same way PRELOAD_REFRESH gives a resident model room before its own ttl
+# bites.
+PRESSURE_WINDOW = _PUBLIC_SETTING_BOUNDS["pressure_warm_after_s"][1] + 300.0
+PRESSURE_WARM_AFTER_DEFAULT = 45.0
+PRESSURE_WARM_COOLDOWN_DEFAULT = 600.0
+
 # host -> what the loop last did there and why, for the Public tab. Purely a
 # report; nothing routes off it.
 _preload_state: dict[str, dict] = {}
@@ -11796,10 +12465,135 @@ def preload_plan() -> list[dict]:
     return plan
 
 
+def _pressure_warm_after_s() -> float:
+    try:
+        v = float(get_public_settings().get("pressure_warm_after_s")
+                  or PRESSURE_WARM_AFTER_DEFAULT)
+    except (TypeError, ValueError):
+        return PRESSURE_WARM_AFTER_DEFAULT
+    return v if v > 0 else PRESSURE_WARM_AFTER_DEFAULT
+
+
+def _pressure_warm_cooldown_s() -> float:
+    try:
+        v = float(get_public_settings().get("pressure_warm_cooldown_s")
+                  or PRESSURE_WARM_COOLDOWN_DEFAULT)
+    except (TypeError, ValueError):
+        return PRESSURE_WARM_COOLDOWN_DEFAULT
+    return v if v > 0 else PRESSURE_WARM_COOLDOWN_DEFAULT
+
+
+def _pressured_models(after_s: float) -> list[tuple[str, int, float]]:
+    """Fleet ids under SUSTAINED pressure right now, most/longest-pressured
+    first -- (fleet_id, count-in-window, earliest-timestamp-in-window).
+
+    PRESSURE_WINDOW (the prune cutoff, shared with _record_pressure()'s
+    write-side prune) is sized with headroom above the top of
+    pressure_warm_after_s's own admin-configurable bounds, so `now -
+    earliest` can actually reach any `after_s` this function is asked
+    about instead of being capped below it by pruning -- see
+    PRESSURE_WINDOW's own comment for the bug this closes and why the
+    headroom (not just parity with the bound) matters.
+
+    Self-cleaning on read, the same idiom silent_answer_cooling() uses: a
+    fid whose window has gone fully empty is evicted from _pressure_events
+    here rather than waiting for its next _record_pressure() write, so a
+    model that was briefly pressured and then quiet does not linger forever
+    as an empty list."""
+    now = time.time()
+    cutoff = now - PRESSURE_WINDOW
+    out: list[tuple[str, int, float]] = []
+    for fid in list(_pressure_events.keys()):
+        evs = [t for t in _pressure_events[fid] if t >= cutoff]
+        if not evs:
+            _pressure_events.pop(fid, None)
+            continue
+        _pressure_events[fid] = evs
+        earliest = evs[0]
+        if now - earliest < after_s:
+            continue  # a lone/blip observation -- not sustained yet
+        out.append((fid, len(evs), earliest))
+    out.sort(key=lambda t: (-t[1], t[2]))
+    return out
+
+
+def pressure_warm_plan() -> dict | None:
+    """The one pressure-triggered preload entry to fold into this tick's
+    plan, if any -- see preload_pass(). Walks the same cascade
+    preload_plan() already applies to the featured model (reachable/dark,
+    preload_capable, the dedicated-box "own" check, busy, idle-grace,
+    cooling, retry backoff), reusing every one of those checks against the
+    live state they already read, with exactly one deliberate difference:
+    preload_plan() always skips a host_reserved box outright, while this
+    walk skips it only when pressure_warm_reserve is off -- the setting
+    that lets sustained pressure spill onto a personal reserve box (e.g.
+    apu-tablet-1) once every non-reserve candidate has failed the cascade,
+    rather than piling up on a saturated shared one forever.
+
+    Freshness is judged against pressure_warm_cooldown_s, not
+    PRELOAD_REFRESH -- an already pressure-warmed, still-resident host is
+    cheaply skipped until that cooldown elapses, then offered again for a
+    re-touch, so a persistently pressured model keeps getting refreshed
+    without the operator having to hand-tune ttl 0 anywhere.
+
+    Returns at most one entry, for the first fid (most/longest pressured)
+    and first host (in cands_map order) that survives the cascade -- never
+    more than one pressure-triggered touch per tick, fleet-wide."""
+    settings = get_public_settings()
+    if not settings.get("pressure_warm_enabled", True):
+        return None
+    allow_reserve = bool(settings.get("pressure_warm_reserve", True))
+    candidates = _pressured_models(_pressure_warm_after_s())
+    if not candidates:
+        return None
+    cands_map = _routes_cache.get("cands", {})
+    running = _routes_cache.get("running", {})
+    reachable = _routes_cache.get("reachable") or set()
+    dark = eclipsed_hosts()
+    tnow = time.time()
+    cooldown = _pressure_warm_cooldown_s()
+    for fid, _count, _earliest in candidates:
+        for cand in cands_map.get(fid, []):
+            host = cand or HOST_NAME
+            if host not in reachable or host in dark:
+                continue
+            if not preload_capable(cand, fid):
+                continue
+            if host_reserved(host) and not allow_reserve:
+                continue
+            own = _routes_cache.get("warm", {}).get(host) or set()
+            if own and fid not in own:
+                continue
+            if _inflight.get(host, 0):
+                continue
+            if tnow - _host_last_used.get(host, 0.0) < PRELOAD_IDLE_GRACE:
+                continue
+            if host_cooling(host):
+                continue
+            st = _preload_state.get(host) or {}
+            if tnow < float(st.get("retry_at") or 0.0):
+                continue
+            resident = fid in running.get(host, set())
+            if resident and tnow - float(st.get("touched") or 0.0) < cooldown:
+                continue
+            return {"host": host, "cand": cand, "fleet_id": fid,
+                    "public_id": fid, "resident": resident, "reason": "pressure"}
+    return None
+
+
 async def _preload_touch(item: dict) -> None:
-    """Ask one box for a single token of the pinned model. Loads it when it is
-    missing and restarts the ttl clock when it is not -- llama-swap counts
-    that clock from the last request, not from the load."""
+    """Ask one box to hold the pinned model. Loads it when it is missing and
+    restarts the ttl clock when it is not -- llama-swap counts that clock
+    from the last request, not from the load.
+
+    On a llama.cpp box this is a metadata request (touch_upstream), NOT a
+    completion. It used to ask for one token, which did keep the model warm
+    and also took the box's single inference slot: measured on mac-laptop-1
+    2026-09-07, that probe was the only thing in a controlled run that
+    evicted a ~1 GiB prompt-cache entry and dropped the next real request
+    from a 2-second cache hit to a 70-second full prompt re-read. An Ollama
+    box has no llama-swap and keeps its own clock, so it still gets the
+    keep_alive generate -- the only way /v1 can express one there."""
     cand, host, fid = item["cand"], item["host"], item["fleet_id"]
     engine = _routes_cache.get("engine", {}).get(host, "")
     if engine == "ollama" and cand:
@@ -11809,12 +12603,12 @@ async def _preload_touch(item: dict) -> None:
                                {"model": fid, "keep_alive": "30m"},
                                timeout=PRELOAD_LOAD_TIMEOUT)
         status = r.status_code
+    elif not cand:
+        ok, detail = await touch_upstream(fid)
+        status = 200 if ok else 502
     else:
-        payload = json.dumps({"model": fid, "max_tokens": 1, "stream": False,
-                              "messages": [{"role": "user", "content": "Reply with OK."}]
-                              }).encode()
-        r = await _post_chat(cand, payload, PRELOAD_LOAD_TIMEOUT)
-        status = r.status_code
+        status, _body = await _peer_admin(cand, "POST", "models/touch",
+                                          {"model": fid}, timeout=PRELOAD_LOAD_TIMEOUT)
     if status >= 400:
         _mark_host_down(host, COOLDOWN_UPSTREAM_5XX if status >= 500 else 5.0,
                         "preload answered HTTP " + str(status))
@@ -11834,6 +12628,13 @@ async def preload_pass(force: bool = False) -> list[dict]:
         return []
     await model_routes()
     plan = preload_plan()
+    # Sustained demand for a saturated model gets its own, separate entry --
+    # folded in here (not inside preload_plan(), which is the featured/demo
+    # policy loop) so it still fires on a tick where the featured model has
+    # nothing to do, the common steady state.
+    pw = pressure_warm_plan()
+    if pw:
+        plan = plan + [pw]
     if not plan:
         return []
 
@@ -11865,6 +12666,12 @@ def preload_report() -> dict:
         "orchestrator": preload_orchestrator(),
         "hosts": sorted((dict(v) for v in _preload_state.values()),
                         key=lambda h: str(h.get("box") or h.get("host") or "")),
+        # Raw demand, visible even before any warm attempt has fired -- a
+        # fid can be under sustained pressure for a whole pressure_warm_after_s
+        # window with nothing yet in "hosts" if every candidate for it is
+        # currently busy/cooling/dedicated elsewhere.
+        "pressured": [{"fleet_id": fid, "count": c, "age_s": int(time.time() - e)}
+                      for fid, c, e in _pressured_models(_pressure_warm_after_s())],
     }
 
 
@@ -11882,6 +12689,288 @@ async def _preload_loop() -> None:
         except Exception:  # noqa: BLE001 -- convergence never takes the app down
             log.exception("preload pass failed")
         await asyncio.sleep(PRELOAD_TICK)
+
+
+# ---- residency warm-up after a load ----------------------------------------
+#
+# A model llama-swap reports "ready" is not necessarily a model that can
+# answer. On a Windows box the weights a preload just uploaded can be paged
+# out again before the first request arrives -- apu-tablet-1 after the
+# 2026-09-15 Windows Update reboot: Flash-Next "ready" with a 14 MB working
+# set, 84 GB in the page file and 0.6 GB of the 55.7 GB the GPU had committed
+# actually resident. Every real request then faulted the weights back in from
+# disk at 6 tok/s of prompt reading, and the hub's deadline cancelled each one
+# before it finished, so the box never got there on its own: sixteen 499s in
+# a day and not one answer.
+#
+# So: a model that turns up ready while the box is idle gets one streamed,
+# one-token warm request with a varied ~1.5k-token prompt -- enough tokens to
+# route through most of an MoE's experts, so the fault-in touches the whole
+# model rather than the handful of experts a short prompt picks -- with no
+# deadline, on nobody's key and never metered. Once per arrival (the boot
+# preload, a dashboard load, a swap-in), and only while nothing is in flight
+# and nothing just was: a load a real request triggered is being faulted in
+# by that request already, and a probe queued behind it would evict its
+# prompt cache (the mac-laptop-1 lesson in touch_upstream's docstring).
+#
+# And once is not always enough: the same box let the weights a completed
+# request had pulled in (51 GB resident on the GPU at 00:20Z) drift back out
+# to the page file within two idle hours. So on a box where this is on, a
+# resident model that has served nothing -- real or warm -- for
+# WARM_ON_LOAD_REFRESH_S is warmed again: when the weights are still resident
+# that costs ~15 s of one slot every ten minutes, and when they are not it is
+# the fault-in the next caller would otherwise have paid inside a deadline.
+#
+# On by default on Windows, where the paging happens. LLMSTACK_WARM_ON_LOAD=1
+# turns it on elsewhere, =0 off anywhere; LLMSTACK_WARM_ON_LOAD_REFRESH_S=0
+# keeps the arrival warm-up but turns the idle refresh off.
+WARM_ON_LOAD_TICK = 15.0
+WARM_ON_LOAD_IDLE = 60.0
+WARM_ON_LOAD_TIMEOUT = 1800.0
+WARM_ON_LOAD_REFRESH_S = float(os.environ.get("LLMSTACK_WARM_ON_LOAD_REFRESH_S", "600") or 0)
+_warm_on_load_ready: set[str] = set()      # what /running said last tick
+_warm_on_load_pending: set[str] = set()    # arrived, not yet warmed
+_warm_on_load_state: dict[str, dict] = {}  # id -> the last attempt
+_warm_on_load_done: dict[str, float] = {}  # id -> when its last warm-up finished
+_warm_on_load_runs: dict[str, int] = {}     # id -> warm-ups sent so far (the prompt salt)
+
+
+def warm_on_load_enabled(system: str | None = None, env: str | None = None) -> bool:
+    system = platform.system() if system is None else system
+    env = os.environ.get("LLMSTACK_WARM_ON_LOAD") if env is None else env
+    if env is not None and env.strip():
+        return env.strip() == "1"
+    return system == "Windows"
+
+
+_WARM_FRAGMENTS = (
+    "the fleet gateway routes each request to the box that already holds the model warm",
+    "it measures how long the answer took and plans the next one from that",
+    "quarterly revenue rose 14.2 percent to 3.8 billion while margins narrowed",
+    "def parse(rows): return [int(r.split(',')[2]) for r in rows if r.strip()]",
+    "the mitochondrion is the site of oxidative phosphorylation in eukaryotes",
+    "SELECT host, SUM(ms) FROM usage WHERE status < 400 GROUP BY host ORDER BY 2",
+    "la biblioteca abre a las nueve y cierra a las seis salvo los domingos",
+    "der Zug nach Hamburg fährt um halb acht von Gleis drei ab, bitte einsteigen",
+    "le vent se leva vers minuit et la mer devint grise puis noire",
+    "東京の朝は静かで電車はいつも時間通りに来る",
+    "sum_{i=1}^{n} i^2 = n(n+1)(2n+1)/6 holds for every positive integer n",
+    "for (let i = 0; i < 64; i++) { acc ^= (acc << 5) + buf[i]; }",
+    "the defendant moved to dismiss under rule 12(b)(6) for failure to state a claim",
+    "preheat the oven to 220 C and roast the vegetables for twenty-five minutes",
+    "HTTP/1.1 429 Too Many Requests Retry-After: 30 Content-Type: application/json",
+    "the sonnet turns at line nine where the argument reverses its direction",
+    "a 12-lead ECG showed ST elevation in leads II, III and aVF",
+    "git rebase -i HEAD~4, squash the fixups, then force-push with lease",
+    "tensor parallel 4, pipeline stages 2, micro-batch 8, gradient accumulation 16",
+    "the treaty of 1648 ended thirty years of war and redrew the map of Europe",
+)
+
+
+def warm_prompt(target_chars: int = 6000, salt: int = 0) -> str:
+    """Deterministic, varied text -- prose, numbers, code, SQL, several
+    languages -- so successive tokens route to different experts. A fixed
+    linear-congruential walk over the fragments, never random at runtime.
+
+    `salt` is the warm-up's run number for that model: it seeds a different
+    walk each time, so two consecutive warm-ups never send the same text.
+    Measured on apu-tablet-1 2026-09-16: the first warm-up read 1750 tokens at
+    13.6 tok/s (paging the weights back in); every 10-minute refresh after
+    it reported "prompt 4 tok" -- llama-server's prompt cache matched the
+    identical text and evaluated only the chat-template tail, touching
+    nothing, and the weights drifted back to the page file within the hour.
+    """
+    out: list[str] = []
+    n = 0
+    x = (12345 + 7919 * int(salt)) & 0x7FFFFFFF
+    while n < target_chars:
+        x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+        f = _WARM_FRAGMENTS[x % len(_WARM_FRAGMENTS)]
+        out.append(f)
+        n += len(f) + 1
+    return ("Read the following (part " + str(int(salt)) + ") and answer "
+            "with one word.\n\n" + " ".join(out))
+
+
+async def _ready_model_ids() -> set[str] | None:
+    """Ids llama-swap reports as READY right now -- a model still starting is
+    not one (it will be, on a later tick). An empty set means the engine
+    answered and nothing is resident; None means it could not be asked
+    (unreachable, restarting, an Ollama box's 404, an unparsable body) --
+    the tick must not read that as "everything went away", or one flaky
+    poll would forget every warm-up and redo them all on the next tick."""
+    if client is None:
+        return None
+    try:
+        r = await client.get("/running", timeout=5.0)
+    except Exception:  # noqa: BLE001 -- the engine may be restarting
+        return None
+    if r.status_code != 200:
+        return None
+    out: set[str] = set()
+    try:
+        data = r.json()
+    except Exception:  # noqa: BLE001
+        return None
+    for m in (data.get("running") if isinstance(data, dict) else data) or []:
+        if not isinstance(m, dict):
+            continue
+        mid = m.get("model") or m.get("id")
+        if mid and str(m.get("state") or "ready") == "ready":
+            out.add(str(mid))
+    return out
+
+
+def _timings_note(timings: Any) -> str:
+    if not isinstance(timings, dict):
+        return ""
+    try:
+        pn, pms = float(timings.get("prompt_n") or 0), float(timings.get("prompt_ms") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if pn and pms:
+        return "prompt %d tok at %.1f tok/s" % (int(pn), pn / (pms / 1000.0))
+    return ""
+
+
+WARM_PROMPT_MIN_TOKENS = 256
+
+
+def _warm_prompt_short(timings: dict) -> bool:
+    """True when the engine reports having read far fewer prompt tokens than
+    warm_prompt() sends -- a prompt-cache hit, not a warm-up."""
+    try:
+        n = int(timings.get("prompt_n") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < n < WARM_PROMPT_MIN_TOKENS
+
+
+async def _warm_on_load_run(mid: str) -> bool:
+    """One streamed, one-token completion through llama-swap -- the request
+    that actually pulls the weights in. Not metered, not on any key."""
+    assert client is not None
+    started = time.time()
+    note = {"model": mid, "at": now(), "status": "running", "ms": None, "detail": ""}
+    _warm_on_load_state[mid] = note
+    run = _warm_on_load_runs.get(mid, 0) + 1
+    _warm_on_load_runs[mid] = run
+    # cache_prompt False: llama-server must evaluate every token, or a refresh
+    # that resends familiar text is answered from its prompt cache and touches
+    # none of the weights it exists to touch (see warm_prompt's docstring).
+    body = {"model": mid, "stream": True, "max_tokens": 1, "temperature": 0,
+            "cache_prompt": False,
+            "messages": [{"role": "user", "content": warm_prompt(salt=run)}]}
+    untrack = _track(HOST_NAME)
+    ok = False
+    try:
+        async with client.stream(
+            "POST", "/v1/chat/completions", json=body,
+            timeout=httpx.Timeout(connect=10.0, read=WARM_ON_LOAD_TIMEOUT,
+                                  write=30.0, pool=None),
+        ) as r:
+            timings = None
+            async for line in r.aiter_lines():
+                if line.startswith("data: {"):
+                    try:
+                        obj = json.loads(line[6:])
+                    except ValueError:
+                        continue
+                    if isinstance(obj, dict) and isinstance(obj.get("timings"), dict):
+                        timings = obj["timings"]
+            ok = r.status_code < 400
+            detail = _timings_note(timings) if ok else "HTTP " + str(r.status_code)
+            if ok and isinstance(timings, dict) and _warm_prompt_short(timings):
+                # A short read means the engine reused a cached prefix and the
+                # weights were not walked -- the exact regression this guards.
+                detail += " -- SHORT: prompt cache reused, weights not touched"
+                ok = False
+    except Exception as exc:  # noqa: BLE001 -- a failed warm-up is a note, never a crash
+        detail = (type(exc).__name__ + ": " + str(exc))[:160]
+    finally:
+        untrack()
+    ms = int((time.time() - started) * 1000)
+    note.update(status="ok" if ok else "failed", ms=ms, detail=detail)
+    _warm_on_load_done[mid] = time.time()
+    (log.info if ok else log.warning)(
+        "warm-on-load: %s %s after %.0fs %s", mid,
+        "resident" if ok else "failed", ms / 1000.0, detail)
+    return ok
+
+
+def _box_idle_for() -> float:
+    """Seconds since this box last served anything (a request or a warm-up);
+    infinite while nothing has ever run."""
+    last = _host_last_used.get(HOST_NAME, 0.0)
+    return (time.time() - last) if last else float("inf")
+
+
+async def _warm_on_load_tick() -> list[str]:
+    """Notice models that became ready since the last look and warm the ones
+    the box is idle enough to warm. A model skipped for being busy stays
+    pending for the next tick; one that went away is forgotten. Then the
+    idle refresh: a resident, already-warmed model on a box that has served
+    nothing for WARM_ON_LOAD_REFRESH_S is warmed again."""
+    ready = await _ready_model_ids()
+    if ready is None:
+        return []   # could not ask: keep what we knew, look again next tick
+    fresh = ready - _warm_on_load_ready
+    _warm_on_load_ready.clear()
+    _warm_on_load_ready.update(ready)
+    _warm_on_load_pending.update(fresh)
+    _warm_on_load_pending.intersection_update(ready)
+    for mid in list(_warm_on_load_done):
+        if mid not in ready:
+            _warm_on_load_done.pop(mid, None)
+    warmed: list[str] = []
+    for mid in sorted(_warm_on_load_pending):
+        busy = _inflight.get(HOST_NAME, 0) > 0
+        recent = _box_idle_for() < WARM_ON_LOAD_IDLE
+        if busy or recent:
+            _warm_on_load_state[mid] = {
+                "model": mid, "at": now(), "status": "waiting", "ms": None,
+                "detail": "a request is on the box" if busy else "a request just used the box"}
+            continue
+        _warm_on_load_pending.discard(mid)
+        await _warm_on_load_run(mid)
+        warmed.append(mid)
+    if WARM_ON_LOAD_REFRESH_S > 0:
+        for mid in sorted(ready):
+            if mid in _warm_on_load_pending or mid in warmed:
+                continue
+            done = _warm_on_load_done.get(mid)
+            if not done:
+                continue
+            # Re-checked per model, not once per tick: a warm-up above (or
+            # a real request that arrived meanwhile) changes both answers.
+            if _inflight.get(HOST_NAME, 0):
+                break
+            if (_box_idle_for() >= WARM_ON_LOAD_REFRESH_S
+                    and time.time() - done >= WARM_ON_LOAD_REFRESH_S):
+                await _warm_on_load_run(mid)
+                warmed.append(mid)
+    return warmed
+
+
+def warm_on_load_report() -> dict:
+    return {"enabled": warm_on_load_enabled(),
+            "refresh_s": WARM_ON_LOAD_REFRESH_S if warm_on_load_enabled() else 0,
+            "models": sorted((dict(v) for v in _warm_on_load_state.values()),
+                             key=lambda n: str(n.get("model") or ""))}
+
+
+async def _warm_on_load_loop() -> None:
+    if not warm_on_load_enabled():
+        return
+    await asyncio.sleep(10)  # let llama-swap's own start-up preload begin
+    while True:
+        try:
+            await _warm_on_load_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- a warm-up never takes the app down
+            log.exception("warm-on-load tick failed")
+        await asyncio.sleep(WARM_ON_LOAD_TICK)
 
 
 # ---- public routes ----------------------------------------------------
@@ -12100,6 +13189,70 @@ async def public_overview() -> dict:
     data = await public_overview_payload()
     _public_overview_cache.update(t=time.time(), data=data)
     return data
+
+
+def _declared_vram_gb(host: dict) -> float:
+    """A box's declared accelerator memory, from its spec rather than from a
+    live reading: the number has to exist for an offline box too, and the
+    fleet page's README badge already sums this same field. A host with no
+    spec (the hub, a routing-only box) contributes nothing rather than
+    breaking the sum."""
+    try:
+        return float((host.get("specs") or {}).get("vram_gb") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_proof_card(overview: dict) -> dict:
+    """Fold a public overview into the handful of numbers worth quoting.
+
+    Every value is derived from the already-sanitized overview, so this
+    inherits its guarantees rather than re-deriving them: no host names, no
+    addresses, no OS, no engine versions. Adding a field here can only ever
+    expose something /public/api/overview already publishes.
+    """
+    hosts = overview.get("hosts") or []
+    models = overview.get("models") or []
+    online = [h for h in hosts if h.get("online")]
+    families = sorted({str(m.get("family") or "").strip()
+                       for m in models if str(m.get("family") or "").strip()})
+    return {
+        "generated_at": overview.get("generated_at"),
+        "boxes": {"registered": len(hosts), "online": len(online)},
+        # Rounded to whole gigabytes: a share card and a post sentence want
+        # "414 GB", and the spare precision only invites a reader to check
+        # arithmetic that moves whenever a laptop wakes up.
+        "accelerator_memory_gb": {
+            "registered": int(round(sum(_declared_vram_gb(h) for h in hosts))),
+            "online": int(round(sum(_declared_vram_gb(h) for h in online))),
+        },
+        "models": {
+            "count": len(models),
+            "families": len(families),
+            "family_names": families,
+            "resident": sum(1 for m in models if m.get("availability") == "resident"),
+        },
+        "context_max_tokens": max([int(m.get("ctx_max") or 0) for m in models] or [0]),
+    }
+
+
+@app.get("/public/api/proof")
+async def public_proof() -> dict:
+    """The numbers a post or a profile card may quote about this fleet.
+
+    It exists so those numbers are read rather than typed. A machine count
+    written by hand into a README, a site page and a slide goes stale in
+    three places independently and disagrees with itself; this repo has
+    already done that once. Everything here is computed from the same cached
+    overview the public fleet page renders, so the page and whatever quotes
+    it cannot drift apart.
+
+    Keyless and cacheable on purpose: a drafting script, a static site build
+    and a curious visitor all want the same answer, and none of them should
+    need a key to count machines. It carries strictly less than
+    /public/api/overview, which is already public.
+    """
+    return build_proof_card(await public_overview())
 
 
 @app.get("/public/api/models")
@@ -12459,6 +13612,28 @@ def demo_ip_used(ip: str) -> int:
     )[0]["c"])
 
 
+def _host_policy(targets: list[tuple[str, str]], prefer: list[str] | None,
+                  exclude: list[str] | None) -> list[tuple[str, str]]:
+    """Shared core: drop excluded hosts, then stable-sort the rest by
+    (saturated, preference-band). demo_host_policy and agent_host_policy
+    are the two callers -- public-demo settings and a per-agent profile --
+    sharing one rule so they can never silently diverge.
+
+    Uses _effectively_saturated(), not the bare _host_saturated(), so a
+    free-but-overflow-demoted box (see _score_host_model_pairs) cannot be
+    pulled back ahead of a saturated-but-fast one just because this caller
+    happens to prefer it."""
+    excl = set(exclude or [])
+    pref = list(prefer or [])
+    kept = [t for t in targets if (t[0] or HOST_NAME).lower() not in excl]
+
+    def band(t: tuple[str, str]) -> int:
+        n = (t[0] or HOST_NAME).lower()
+        return pref.index(n) if n in pref else len(pref)
+
+    return sorted(kept, key=lambda t: (_effectively_saturated(t[0], t[1]), band(t)))
+
+
 def demo_host_policy(targets: list[tuple[str, str]], settings: dict) -> list[tuple[str, str]]:
     """Apply the demo's host policy to a scored candidate list: drop every
     excluded host, then move the preferred hosts to the front in the order
@@ -12467,15 +13642,20 @@ def demo_host_policy(targets: list[tuple[str, str]], settings: dict) -> list[tup
     breaks a tie among boxes that are equally free (or equally saturated);
     a stable sort, so within each band the fleet scorer's own order
     (resident, idle, fast) still decides."""
-    exclude = set(settings.get("demo_exclude_hosts") or [])
-    prefer = list(settings.get("demo_prefer_hosts") or [])
-    kept = [t for t in targets if (t[0] or HOST_NAME).lower() not in exclude]
+    return _host_policy(targets, settings.get("demo_prefer_hosts"),
+                        settings.get("demo_exclude_hosts"))
 
-    def band(t: tuple[str, str]) -> int:
-        n = (t[0] or HOST_NAME).lower()
-        return prefer.index(n) if n in prefer else len(prefer)
 
-    return sorted(kept, key=lambda t: (_host_saturated(t[0], t[1]), band(t)))
+def agent_host_policy(targets: list[tuple[str, str]], prefer: list[str],
+                       exclude: list[str]) -> list[tuple[str, str]]:
+    """Apply one agent profile's own prefer_hosts/exclude_hosts to a scored
+    candidate list -- the same exclude-then-prefer, saturation-first rule
+    as demo_host_policy, scoped to a key's agent instead of the public
+    demo's settings. A no-op (returns targets unchanged) when both lists
+    are empty."""
+    if not prefer and not exclude:
+        return targets
+    return _host_policy(targets, prefer, exclude)
 
 
 async def demo_candidates(settings: dict, prompt_tokens: int = 0, gen_tokens: int = 256,
@@ -12772,8 +13952,9 @@ async def demo_stream(request: Request, msgs: list[dict], settings: dict, ip: st
                 resp, cut = await _race_abort(work, job)
             except asyncio.TimeoutError:
                 tried.append(c["box"] + " (no answer in %ds)" % int(deadline))
-                _mark_host_down(hname, COOLDOWN_STALL,
-                                "demo: no first byte for " + fid + " within " + str(int(deadline)) + "s")
+                _mark_host_down(hname, _stall_cooldown(hname),
+                                "demo: no first byte for " + fid + " within " + str(int(deadline))
+                                + "s (stall #" + str(stall_streak(hname)) + ")")
                 await _quiet_close(peer_client)
                 peer_client = None
                 continue
@@ -12826,6 +14007,7 @@ async def demo_stream(request: Request, msgs: list[dict], settings: dict, ip: st
             served = c
             status_out = 200
             _mark_host_ok(hname)
+            _clear_stall(hname)
             yield _sse({"type": "meta", "box": c["box"], "model": card.get("name") or public_id,
                         "public_id": public_id, "ctx": int(c["ctx"]), "resident": bool(c["resident"])})
             strip = _ThinkStripper()
@@ -13552,6 +14734,40 @@ async def admin_public_auto_status(admin: dict = Depends(require_admin)) -> dict
     }
 
 
+@app.post("/admin/api/public/keys/resize-ctx")
+async def admin_public_keys_resize_ctx(
+    request: Request, admin: dict = Depends(require_admin)
+) -> dict:
+    """Push a context window onto the Fleet Pass keys already issued.
+
+    The retrofit half of the Public tab's `auto-issue ctx`: changing that
+    number decides what the NEXT key gets, and this decides what the keys
+    already in somebody's cover letter get. Raise-only and clamped per key --
+    see sync_public_key_ctx(). Body (all optional): `ctx` to name a window
+    other than the tab's, `scope` "auto" (default) or "all", `dry_run` to be
+    told what would move without moving it."""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 -- a body is optional here
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        ctx = int(payload.get("ctx") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "ctx must be a number of tokens")
+    lo, hi = _PUBLIC_SETTING_BOUNDS["auto_issue_ctx"]
+    if ctx and not (lo <= ctx <= hi):
+        raise HTTPException(400, "ctx must be between " + str(int(lo)) + " and " + str(int(hi)))
+    scope = "all" if str(payload.get("scope") or "").strip() == "all" else "auto"
+    out = sync_public_key_ctx(ctx, scope=scope, dry_run=bool(payload.get("dry_run")))
+    if out["updated"] and not out["dry_run"]:
+        log_public_event(
+            "ctx_resized", email=_admin_email(admin),
+            detail=scope + ":" + str(out["target"]) + ":" + str(out["updated"]) + " key(s)")
+    return out
+
+
 @app.post("/admin/api/public/keys/auto")
 async def admin_public_key_auto_issue(
     request: Request, admin: dict = Depends(require_admin)
@@ -14097,6 +15313,7 @@ async def api_status(admin: dict = Depends(require_admin)) -> dict:
             for r in load_models() if r.get("enabled", True)
         ],
         "manual_load": dict(_manual_load),
+        "warm_on_load": warm_on_load_report(),
     }
 
 
@@ -14332,7 +15549,11 @@ async def _try_load(mid: str, want_ctx: int, job: dict) -> tuple[bool, str]:
     props = await upstream_props(mid)
     got = props.get("n_ctx")
     if want_ctx and isinstance(got, int) and got > 0 and got < want_ctx:
-        return False, ("loaded with only " + str(got) + " tokens of context, "
+        # `want_ctx` is per SLOT, which is what /props reports -- see the
+        # division at the call site.
+        slots = props.get("slots")
+        per = " per slot" if isinstance(slots, int) and slots > 1 else ""
+        return False, ("loaded with only " + str(got) + " tokens of context" + per + ", "
                        + "not the " + str(want_ctx) + " configured")
     return True, ""
 
@@ -14389,7 +15610,14 @@ async def _verify_apply(queue: list[dict], before: dict[str, dict]) -> None:
     for rec in queue:
         mid = str(rec.get("id"))
         pinned = int(rec.get("ctx", 0) or 0) > 0
-        want = resolve_ctx(rec)[0] if pinned else 0
+        # `ctx` is the TOTAL llama.cpp is given (-c), and llama.cpp divides it
+        # among the slots `parallel` asks for, so a two-slot record asking for
+        # 131072 comes up correctly reporting 65536 -- which is also all
+        # /props can report, since it answers per slot. Comparing the total
+        # against that failed every multi-slot record and rolled it back
+        # (mac-laptop-1, 2026-09-07, moving the work model to 2 slots).
+        slots = max(1, int(rec.get("parallel", 1) or 1))
+        want = resolve_ctx(rec)[0] // slots if pinned else 0
         ok, why, tail = await attempt(
             mid, want, "loading the new config (evicts whatever is resident)")
         if ok:
@@ -14795,6 +16023,64 @@ async def api_model_load(request: Request,
     _manual_load.update(model=mid, status="loading", why="", at=now())
     asyncio.create_task(_manual_load_task(mid))
     return {"started": mid, "load": dict(_manual_load)}
+
+
+async def touch_upstream(mid: str, timeout: float = PRELOAD_LOAD_TIMEOUT) -> tuple[bool, str]:
+    """Ask llama-swap for a model WITHOUT asking a model to generate.
+
+    `GET /upstream/<id>/health` is the same lever _try_load() and the warm-up
+    button pull: llama-swap starts the model when it is not resident (and
+    blocks until it is up), and any /upstream request refreshes the ttl clock
+    it counts from -- but the request never reaches llama-server's slot/KV
+    pipeline, so it cannot disturb what is cached there.
+
+    That distinction is the whole reason this exists. The keep-warm loop used
+    to send a one-token completion, and on mac-laptop-1 (2026-09-07) that was the
+    only operation in a measured run that evicted a ~1 GiB prompt-cache entry
+    and pushed the next real request off the cache-hit path -- turning a
+    2-second turn into a 70-second one, because a box with `--parallel 1` has
+    exactly one slot and the probe takes it. Returns (ok, detail)."""
+    assert client is not None
+    try:
+        r = await client.get("/upstream/" + quote(mid, safe="") + "/health",
+                             timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 -- the caller decides what a failure means
+        return False, f"{type(exc).__name__}: {exc}"[:160]
+    if r.status_code >= 400:
+        return False, "HTTP " + str(r.status_code)
+    return True, "ok"
+
+
+@app.post("/admin/api/models/touch")
+async def api_model_touch(request: Request,
+                          admin: dict = Depends(require_admin)) -> dict:
+    """Keep one model loaded ({"model": id}) without occupying a slot.
+
+    What the fleet's keep-warm loop calls on a llama.cpp box. Unlike
+    /admin/api/models/load this is synchronous and returns only when the
+    model is up (or the attempt failed), because the caller is a convergence
+    loop that wants the verdict, not a dashboard that wants a job to watch."""
+    if UPSTREAM_MODELS:
+        raise HTTPException(
+            501, "an Ollama box has no llama-swap to touch -- a keep_alive "
+            "generate is what holds a model there")
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 -- not JSON is a caller error, not a 500
+        raise HTTPException(400, "expected {model: id}")
+    mid = str((payload or {}).get("model") or "").strip() \
+        if isinstance(payload, dict) else ""
+    if not mid:
+        raise HTTPException(400, "expected {model: id}")
+    known = {str(r.get("id")) for r in load_models() if r.get("enabled", True)}
+    if mid not in known:
+        raise HTTPException(404, "not a model this box serves: " + mid[:64])
+    started = time.time()
+    ok, detail = await touch_upstream(mid)
+    if not ok:
+        raise HTTPException(502, "touch failed: " + detail)
+    _running_cache["t"] = 0.0
+    return {"model": mid, "ms": int((time.time() - started) * 1000), "detail": detail}
 
 
 @app.put("/admin/api/models/warm")
@@ -15240,7 +16526,8 @@ async def api_agents(
                 "profile": {k: r[k] for k in
                             ("id", "key_id", "enabled", "name", "system_prompt",
                              "rules", "allowed_models", "force_model",
-                             "param_overrides", "updated_at", "archived_at")},
+                             "param_overrides", "prefer_hosts", "exclude_hosts",
+                             "updated_at", "archived_at")},
             }
             for r in rows
         ]
@@ -15270,6 +16557,43 @@ async def api_agents(
     ]
     return {"items": items, "total": int(total), "limit": limit,
             "offset": offset}
+
+
+@app.get("/admin/api/agents/{key_id}")
+async def api_agents_get(
+    key_id: int, admin: dict = Depends(require_admin)
+) -> dict:
+    """One live profile by its key id -- the read half of PUT .../{key_id},
+    and the one route a rotation's carry-forward needs: the downstream app's
+    doRotateHubKey reads a predecessor key's agent profile here before
+    minting a replacement, so it can carry prefer_hosts/exclude_hosts onto
+    the new key instead of silently dropping them (the plural GET above
+    returns every profile, but a rotation only ever wants the one it is
+    retiring, and paging through the list to find it would race a busy
+    Agents tab).
+
+    Every other reader of prefer_hosts/exclude_hosts on this file -- the PUT
+    response, the plural listing, gateway/static/index.html's editAgent() --
+    gets them back as the raw JSON-TEXT column, `json.loads()`d by the
+    caller. This route is the one exception: its sole consumer checks
+    `Array.isArray(prevBody?.prefer_hosts)` and would treat the TEXT string
+    as absent, silently reproducing the very rotation-wipe bug the
+    carry-forward exists to prevent. So this parses them to real arrays
+    before returning, rather than pushing a defensive JSON.parse() onto that
+    one caller.
+    """
+    rows = db_query(
+        "SELECT * FROM agents WHERE key_id=? AND archived_at IS NULL", (key_id,)
+    )
+    if not rows:
+        raise HTTPException(404, "no such live profile")
+    out = dict(rows[0])
+    for col in ("prefer_hosts", "exclude_hosts"):
+        try:
+            out[col] = json.loads(out.get(col) or "[]")
+        except json.JSONDecodeError:
+            out[col] = []
+    return out
 
 
 @app.put("/admin/api/agents/{key_id}")
@@ -15314,14 +16638,39 @@ async def api_agents_put(
         if "ctx_limit" in p:
             db_exec("UPDATE agents SET ctx_limit=? WHERE key_id=?",
                     (_norm_limit(p.get("ctx_limit")), key_id))
+        # prefer_hosts/exclude_hosts follow the exact same rule as ctx_limit
+        # above, for the exact same reason: the downstream app's doRotateHubKey PUTs a
+        # fixed body with neither field on every lane-key rotation, and an
+        # unconditional UPDATE here would silently wipe an admin's manual
+        # routing policy every time a key rotates.
+        if "prefer_hosts" in p:
+            db_exec("UPDATE agents SET prefer_hosts=? WHERE key_id=?",
+                    (json.dumps(clean_host_list(p.get("prefer_hosts"))), key_id))
+        if "exclude_hosts" in p:
+            db_exec("UPDATE agents SET exclude_hosts=? WHERE key_id=?",
+                    (json.dumps(clean_host_list(p.get("exclude_hosts"))), key_id))
     else:
         db_exec(
             "INSERT INTO agents(enabled,name,system_prompt,rules,allowed_models,"
-            "force_model,param_overrides,updated_at,key_id,ctx_limit) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (*row, _norm_limit(p.get("ctx_limit"))),
+            "force_model,param_overrides,updated_at,key_id,ctx_limit,"
+            "prefer_hosts,exclude_hosts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (*row, _norm_limit(p.get("ctx_limit")),
+             json.dumps(clean_host_list(p.get("prefer_hosts"))),
+             json.dumps(clean_host_list(p.get("exclude_hosts")))),
         )
-    return db_query("SELECT * FROM agents WHERE key_id=?", (key_id,))[0]
+    out = dict(db_query("SELECT * FROM agents WHERE key_id=?", (key_id,))[0])
+    # Unknown host names are accepted (a box can be legitimately offline when
+    # the list is edited) but reported, so a typo doesn't fail silently at
+    # routing time with no signal anywhere.
+    known = {(h or HOST_NAME).lower() for h, _fid in _routes_cache.get("meta", {})}
+    try:
+        want = set(json.loads(out.get("prefer_hosts") or "[]")) | set(
+            json.loads(out.get("exclude_hosts") or "[]"))
+    except json.JSONDecodeError:
+        want = set()
+    out["unknown_hosts"] = sorted(want - known)
+    return out
 
 
 @app.delete("/admin/api/agents/{key_id}")
@@ -15722,6 +17071,36 @@ async def api_maintenance_run(
     raise HTTPException(400, "verb must be roll|purge")
 
 
+# On a Windows box there is no journal: bin\run-llama-swap.cmd and
+# bin\run-gateway.cmd append each service's stdout/stderr to these files
+# under LLMSTACK_STATE, and that is where the dashboard's Logs button has to
+# read from. apu-tablet-1's answered "could not read logs: [WinError 2]" (no
+# journalctl) for as long as it has been in the fleet.
+_WINDOWS_LOG_FILES = {"llama-swap": "llama-swap.log", "llm-gateway": "gateway.log"}
+
+
+def _tail_file(path: Path, lines: int, block: int = 65536) -> str:
+    """The last `lines` lines of a file that may be many MB (llama-swap's
+    health polls fill its log at a line every few seconds) without reading
+    it whole: walk backwards in blocks until enough newlines have passed."""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        end = fh.tell()
+        chunks: list[bytes] = []
+        seen = 0
+        pos = end
+        while pos > 0 and seen <= lines:
+            step = min(block, pos)
+            pos -= step
+            fh.seek(pos)
+            buf = fh.read(step)
+            chunks.append(buf)
+            seen += buf.count(b"\n")
+    data = b"".join(reversed(chunks))
+    tail = data.splitlines()[-lines:]
+    return b"\n".join(tail).decode("utf-8", "replace")
+
+
 @app.get("/admin/api/logs", response_class=PlainTextResponse)
 async def api_logs(
     unit: str = "llama-swap", lines: int = 300, admin: dict = Depends(require_admin)
@@ -15729,6 +17108,17 @@ async def api_logs(
     if unit not in ("llama-swap", "llm-gateway", "cloudflared", "tailscaled"):
         raise HTTPException(400, "unit not managed here")
     lines = max(10, min(lines, 2000))
+    if platform.system() == "Windows":
+        name = _WINDOWS_LOG_FILES.get(unit)
+        if not name:
+            raise HTTPException(501, unit + " keeps no log file on a Windows box")
+        path = STATE / name
+        if not path.exists():
+            return "no log yet at " + str(path)
+        try:
+            return await asyncio.to_thread(_tail_file, path, lines)
+        except Exception as exc:  # noqa: BLE001
+            return "could not read logs: " + str(exc)
     try:
         p = subprocess.run(
             ["journalctl", "-u", unit + ".service", "-n", str(lines), "--no-pager"],
@@ -15925,13 +17315,25 @@ async def fleet_summary(admin: dict = Depends(require_admin)) -> dict:
 #   tg_tps / pp_tps   decode and prompt-read tokens/sec to assume before any
 #                usage history exists (class defaults otherwise)
 DEFAULT_SPECS: dict[str, dict] = {
-    "apu-box-1":     {"ram_gb": 128, "vram_gb": 96, "mem_bw_gbs": 210, "gpu_tflops": 30,
+    # 64 GB carved since 2026-09-11 (96 before: the host side OOM-killed
+    # llama-server under Flash-Next's host-only tensor -- hosts/apu-box-1/
+    # README.md "Known hardware notes"). The two models larger than the carve
+    # spill into a 40 GiB GTT window; that spill is not VRAM and is
+    # deliberately not counted here.
+    "apu-box-1":     {"ram_gb": 128, "vram_gb": 64, "mem_bw_gbs": 210, "gpu_tflops": 30,
                    "cpu": "Ryzen AI Max+ 395", "gpu": "Radeon 8060S (Vulkan)",
                    "klass": "big", "rank": 1},
-    # 128 GB fitted; the BIOS carve leaves ~32 GB visible to Windows as DRAM.
-    "apu-tablet-1": {"ram_gb": 32, "vram_gb": 96, "mem_bw_gbs": 200, "gpu_tflops": 25,
-                   "cpu": "Ryzen AI Max+ 395", "gpu": "Radeon 8060S (tablet thermals)",
-                   "klass": "big", "rank": 2, "reserve": True},
+    # Fedora 44 since 2026-09-16 (hosts/apu-tablet-1/README.md): 128 GB fitted,
+    # a 64 GB carve like apu-box-1's, the rest system RAM. The old figures here
+    # (32 GB visible as DRAM, a 96 GB carve) described the retired Windows
+    # install, where the carve was what Windows would not page out from.
+    "apu-tablet-1": {"ram_gb": 128, "vram_gb": 64, "mem_bw_gbs": 200, "gpu_tflops": 25,
+                   "cpu": "Ryzen AI Max+ 395", "gpu": "Radeon 8060S (Vulkan, tablet thermals)",
+                   # Not reserved since 2026-09-16: on Fedora it is a fleet box
+                   # like apu-box-1, not a machine someone sits at, and the hub's
+                   # sort key (reserved before queue length) otherwise sends
+                   # both of apu-box-1's slots busy before this box gets a call.
+                   "klass": "big", "rank": 2, "reserve": False},
     # Same Z13 silicon as apu-tablet-1, 64 GB fitted, firmware carve of 32 GB.
     # `ram_gb` is what Windows sees, as it is for apu-tablet-1. `vram_gb` is the
     # pool a model may actually occupy: WDDM lends the GPU half the DRAM on top
@@ -16401,13 +17803,34 @@ async def api_served_models(admin: dict = Depends(require_admin)) -> dict:
 @app.get("/admin/api/routes")
 async def api_routes(admin: dict = Depends(require_admin)) -> dict:
     """Which host answers each model id, as the /v1 proxy would decide,
-    plus any name the fleet disagrees about (see alias_conflicts())."""
+    plus any name the fleet disagrees about (see alias_conflicts()).
+
+    "As the proxy would decide" means the SCORER's pick (model_hosts(), the
+    same ranking resolve_targets() gives a request), not the routing map
+    itself: model_routes() fills that map with `routes.setdefault(m, peer)`
+    in poll order -- this box first, then peers in peers.json order -- so
+    it records who SERVES a name, never who would be chosen. Until
+    2026-09-09 this table reported the map, and for a whole evening it said
+    qwen3.8-27b lived on server-1 (polled first, a CPU box at 4 tok/s)
+    while mac-laptop-1 sat awake at tier 0 holding the model resident; two
+    sessions read that as the fleet's decision and one built a fallback on
+    it. `serving` lists every box that could answer, so a reader can see
+    the alternatives the scorer ranked."""
     routes = await model_routes(force=True)
     peer_can = _routes_cache.get("alias", {})
     local_can = await served_canonical_map()
+    cands = _routes_cache.get("cands", {})
 
     def canon(m: str, h: str) -> str:
         return (peer_can.get((h, m)) if h else local_can.get(m)) or m
+
+    chosen: dict[str, str] = {}
+    for m, first_seen in routes.items():
+        try:
+            hosts = await model_hosts(m)
+        except Exception:  # noqa: BLE001 -- a scorer hiccup must not blank the table
+            hosts = []
+        chosen[m] = hosts[0] if hosts else first_seen
 
     return {
         "self": HOST_NAME,
@@ -16417,8 +17840,9 @@ async def api_routes(admin: dict = Depends(require_admin)) -> dict:
         "models": sorted(
             (
                 {"model": m, "host": h or HOST_NAME, "canonical": canon(m, h),
-                 "alias": canon(m, h) != m}
-                for m, h in routes.items()
+                 "alias": canon(m, h) != m,
+                 "serving": sorted((c or HOST_NAME) for c in cands.get(m, []))}
+                for m, h in chosen.items()
             ),
             key=lambda r: (r["host"], r["model"]),
         ),
@@ -16431,6 +17855,83 @@ async def api_routes(admin: dict = Depends(require_admin)) -> dict:
         # are never each other's alternatives.
         "split_models": split_models(),
     }
+
+
+@app.get("/admin/api/resolve")
+async def api_resolve(model: str, prompt_tokens: int = 0, gen_tokens: int = 256,
+                      role: str = "primary", agent: int | None = None,
+                      admin: dict = Depends(require_admin)) -> dict:
+    """Where a request for `model` would go right now, best first, with the
+    inputs behind each rank -- the answer the /v1 proxy computes for a real
+    request (resolve_targets), shaped by the request's own size.
+
+    This is the surface for anything that has to know where a turn will
+    LAND before sending it (the hub's work-lane fallback), and for the
+    next "why did the fleet pick that box" question: every term of the
+    scorer's key is here by name, so a wrong answer can be read off rather
+    than reproduced. `served` is false when no box answers to the name.
+
+    agent, when given, is a key_id -- the same host policy the /v1 proxy
+    would apply for that key's profile is applied here too, so the preview
+    never disagrees with live routing.
+
+    Each target also carries `loaded_est_s` (est_s scaled by how loaded the
+    box already is -- the exact `est_s * (1 + inflight/slots)` term
+    _score_host_model_pairs applies before ranking) and `demoted`: true for
+    a free box the scorer would push behind the fastest saturated one under
+    the overflow_max_slowdown rule, so a reader can see why a technically-
+    free box still sorted last without reproducing the scorer's own math."""
+    prompt_tokens = max(0, int(prompt_tokens))
+    gen_tokens = max(0, int(gen_tokens))
+    role = role if role in ("primary", "worker") else "primary"
+    ranked = await resolve_targets(model, role=role, prompt_tokens=prompt_tokens,
+                                   gen_tokens=gen_tokens, need_ctx=prompt_tokens + gen_tokens)
+    agent_row = get_agent(int(agent)) if agent else None
+    if agent_row and len(ranked) > 1:
+        prefer, exclude = _agent_host_policy_lists(agent_row)
+        if prefer or exclude:
+            ranked = agent_host_policy(ranked, prefer, exclude)
+    running = _routes_cache.get("running", {})
+    cap = _routes_cache.get("cap", {})
+    meta_all = _routes_cache.get("meta", {})
+    targets = []
+    for cand, fid in ranked:
+        hname = cand or HOST_NAME
+        resident = fid in running.get(hname, set())
+        tier, rank = host_tier(cand, fid, role)
+        tps = await asyncio.to_thread(measured_tps, fid)
+        pp = await asyncio.to_thread(measured_pp, fid)
+        meta = meta_all.get((cand, fid)) or {}
+        targets.append({
+            "host": hname, "fleet_id": fid, "resident": resident,
+            "saturated": _host_saturated(cand, fid), "cooling": host_cooling(hname),
+            "reserved": host_reserved(hname), "tier": tier, "rank": rank,
+            "ctx": host_model_ctx(cand, fid), "fit": str(meta.get("fit") or ""),
+            "inflight": int(_inflight.get(hname, 0)),
+            "slots": max(1, int(cap.get((cand, fid), 1))),
+            "est_s": round(_est_wall(cand, fid, resident, tps, pp, prompt_tokens, gen_tokens), 1),
+            # Consecutive first-byte stalls this box is sitting out for (0 =
+            # answering). Each doubles its cooldown -- see _stall_cooldown.
+            "stalls": stall_streak(hname),
+        })
+
+    # Recompute each target's LOADED estimate (the exact term the scorer
+    # applies at ranking time) from fields already on the dict above, rather
+    # than threading a new return channel through resolve_targets()'s
+    # (host, model) tuple type -- that return shape is shared by callers
+    # (_host_policy, the FLEET_ROLES paths) which must not be disturbed.
+    k = _overflow_max_slowdown()
+    loaded = [t["est_s"] * (1.0 + t["inflight"] / t["slots"]) for t in targets]
+    best_sat = min((le for t, le in zip(targets, loaded) if t["saturated"]),
+                   default=None)
+    for t, le in zip(targets, loaded):
+        t["loaded_est_s"] = round(le, 1)
+        t["demoted"] = (not t["saturated"] and best_sat is not None
+                        and k > 0 and le > k * best_sat)
+
+    return {"model": model, "role": role, "prompt_tokens": prompt_tokens,
+            "gen_tokens": gen_tokens, "served": bool(targets), "targets": targets,
+            "generated_at": now()}
 
 
 @app.get("/admin/api/roles")
