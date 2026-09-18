@@ -32,9 +32,11 @@ CHAT_OK_BODY = {
 @pytest.fixture(autouse=True)
 def _isolate_state():
     gw._host_cooldown.clear()
+    gw._stall_streak.clear()
     gw._inflight.clear()
     yield
     gw._host_cooldown.clear()
+    gw._stall_streak.clear()
     gw._inflight.clear()
 
 
@@ -530,6 +532,9 @@ class TestOpenAIProxyFailover:
         assert gw.host_cooling("p1") is False
 
     def test_ttfb_deadline_triggers_failover(self, client, monkeypatch):
+        # A STREAMED request: its first byte is the first token, and that is
+        # what the first-byte deadline judges. (A non-streamed request's
+        # deadline covers generation too -- test_stall_backoff.py.)
         monkeypatch.setattr(gw, "_ttfb_deadline", lambda prompt_tokens, resident: 0.05)
         _wire_targets(monkeypatch, [("p1", "m"), ("p2", "m")])
 
@@ -543,7 +548,8 @@ class TestOpenAIProxyFailover:
         started = time.time()
         r = client.post(
             "/v1/chat/completions", headers={"Authorization": "Bearer " + raw},
-            json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "m", "stream": True,
+                  "messages": [{"role": "user", "content": "hi"}]},
         )
         assert r.status_code == 200, r.text
         assert time.time() - started < 0.9, "p2 should have answered long before p1's 1s sleep"

@@ -33,9 +33,13 @@ def _isolate_routes_cache():
 def _isolate_cooldown_and_inflight():
     gw._host_cooldown.clear()
     gw._inflight.clear()
+    gw._overflow_demoted.clear()
+    gw._pressure_events.clear()
     yield
     gw._host_cooldown.clear()
     gw._inflight.clear()
+    gw._overflow_demoted.clear()
+    gw._pressure_events.clear()
 
 
 @pytest.fixture
@@ -237,15 +241,44 @@ class TestSaturationAndCooldown:
 
     def test_host_saturated_matches_scorer_first_key(self):
         # _host_saturated() is the predicate factored out of
-        # _score_host_model_pairs's own first sort key (step 1) -- this pins
-        # the two to agree, so demo_host_policy and pick_fallback's busy
-        # trigger can never drift from what the scorer calls "occupied".
+        # _score_host_model_pairs's own first sort key (step 1) -- but since
+        # the overflow-slowdown rule (see TestOverflowSlowdown below) this is
+        # now ONE-DIRECTIONAL: _host_saturated()==True still always implies
+        # bit[0]==1 (pinned here), but bit[0]==1 no longer implies
+        # _host_saturated()==True -- a free, disproportionately slow box can
+        # set the bit too (see the next test). demo_host_policy and
+        # pick_fallback's busy trigger read _host_saturated()/
+        # _effectively_saturated() directly, not the scorer's key, so they
+        # are unaffected by this widening.
         gw._routes_cache["cap"] = {("hostA", "m"): 1, ("hostB", "m"): 1}
         gw._routes_cache["running"] = {}
         gw._routes_cache["meta"] = {}
         gw._inflight["hostA"] = 1
         assert gw._host_saturated("hostA", "m") is True
         assert gw._host_saturated("hostB", "m") is False
+
+    async def test_saturated_bit_can_be_set_for_a_free_overflow_demoted_box(self, monkeypatch):
+        # The semantic change from the overflow-slowdown rule, documented
+        # above: _host_saturated() alone no longer decides the scorer's
+        # first sort-key bit. server-1 is free (not saturated) but 10x
+        # slower than mac-laptop-1's own loaded estimate while mac-laptop-1 is
+        # saturated -- server-1's bit[0] is 1 even though
+        # _host_saturated("server-1", "m") is False.
+        gw._routes_cache["cap"] = {("mac-laptop-1", "m"): 2, ("server-1", "m"): 1}
+        gw._routes_cache["running"] = {}
+        gw._routes_cache["meta"] = {}
+        gw._inflight["mac-laptop-1"] = 3  # busy(3) >= slots(2): saturated
+        monkeypatch.setattr(
+            gw, "_est_wall",
+            lambda cand, fid, resident, tps, pp, pt, gt: {"mac-laptop-1": 1.0, "server-1": 10.0}[cand])
+        assert gw._host_saturated("mac-laptop-1", "m") is True
+        assert gw._host_saturated("server-1", "m") is False
+        out = await gw._score_host_model_pairs(
+            [("mac-laptop-1", "m"), ("server-1", "m")], role="primary")
+        # mac-laptop-1's loaded estimate is 1.0 * (1 + 3/2) = 2.5s; server-1's is
+        # 10.0s (free, so unmultiplied) -- 4x over the default 2.0x
+        # threshold, so server-1 (free) still sorts BEHIND mac-laptop-1 (saturated).
+        assert out == [("mac-laptop-1", "m"), ("server-1", "m")]
 
     async def test_all_saturated_orders_by_queue_depth_then_tier(self):
         # Both boxes are saturated (busy >= slots): mac-laptop-1 is the
@@ -272,6 +305,84 @@ class TestSaturationAndCooldown:
         out2 = await gw._score_host_model_pairs(
             [("mac-laptop-1", "m"), ("apu-box-1", "m")], role="primary")
         assert out2 == [("mac-laptop-1", "m"), ("apu-box-1", "m")]
+
+
+# ---------------------------------------------------------------------------
+# overflow_max_slowdown: a FREE box disproportionately slower than the
+# fastest SATURATED one is pushed behind it too -- see B4/correction(6) in
+# _score_host_model_pairs and _overflow_max_slowdown().
+# ---------------------------------------------------------------------------
+
+class TestOverflowSlowdown:
+    def _fixed_est(self, monkeypatch, ests: dict[str, float]):
+        """Bypass _est_wall's own class/residency/bytes arithmetic entirely
+        so a test can assert on exact, hand-picked ratios instead of
+        reverse-engineering them from the class speed tables."""
+        monkeypatch.setattr(
+            gw, "_est_wall",
+            lambda cand, fid, resident, tps, pp, pt, gt: ests[cand or gw.HOST_NAME])
+
+    async def test_disproportionately_slow_free_box_sorts_behind_a_saturated_fast_one(
+            self, monkeypatch):
+        # mac-laptop-1: 2 slots, 3 inflight -> saturated; loaded est = 1.0 * (1 +
+        # 3/2) = 2.5s. server-1: free, unloaded est = 7.0s -- 2.8x mac-laptop-1's
+        # loaded est, over the default 2.0x threshold.
+        gw._routes_cache["cap"] = {("mac-laptop-1", "m"): 2, ("server-1", "m"): 1}
+        gw._routes_cache["running"] = {}
+        gw._routes_cache["meta"] = {}
+        gw._inflight["mac-laptop-1"] = 3
+        self._fixed_est(monkeypatch, {"mac-laptop-1": 1.0, "server-1": 7.0})
+        out = await gw._score_host_model_pairs(
+            [("mac-laptop-1", "m"), ("server-1", "m")], role="primary")
+        assert out == [("mac-laptop-1", "m"), ("server-1", "m")]
+
+    async def test_boundary_is_strictly_greater_than(self, monkeypatch):
+        # Same saturated mac-laptop-1 (loaded est 2.5s) both times. A free box at
+        # exactly 1.9x stays ahead (ratio strictly under threshold); one at
+        # 2.1x is demoted -- pins the strict '>' semantic (a box AT the
+        # threshold is not penalized).
+        gw._routes_cache["cap"] = {("mac-laptop-1", "m"): 2, ("freebox", "m"): 1}
+        gw._routes_cache["running"] = {}
+        gw._routes_cache["meta"] = {}
+        gw._inflight["mac-laptop-1"] = 3
+
+        self._fixed_est(monkeypatch, {"mac-laptop-1": 1.0, "freebox": 1.9 * 2.5})
+        out = await gw._score_host_model_pairs(
+            [("mac-laptop-1", "m"), ("freebox", "m")], role="primary")
+        assert out == [("freebox", "m"), ("mac-laptop-1", "m")]
+
+        gw._overflow_demoted.clear()
+        self._fixed_est(monkeypatch, {"mac-laptop-1": 1.0, "freebox": 2.1 * 2.5})
+        out2 = await gw._score_host_model_pairs(
+            [("mac-laptop-1", "m"), ("freebox", "m")], role="primary")
+        assert out2 == [("mac-laptop-1", "m"), ("freebox", "m")]
+
+    async def test_no_saturated_candidate_leaves_ranking_unchanged(self, monkeypatch):
+        # best_saturated_est is None when nothing is saturated -- the rule
+        # never engages, however low overflow_max_slowdown is set.
+        gw.set_public_settings({"overflow_max_slowdown": 0.001})
+        gw._routes_cache["cap"] = {("hostA", "m"): 1, ("hostB", "m"): 1}
+        gw._routes_cache["running"] = {}
+        gw._routes_cache["meta"] = {}
+        self._fixed_est(monkeypatch, {"hostA": 1.0, "hostB": 100.0})
+        out = await gw._score_host_model_pairs(
+            [("hostB", "m"), ("hostA", "m")], role="primary")
+        assert out == [("hostA", "m"), ("hostB", "m")]
+
+    async def test_zero_disables_the_rule_matching_pre_overflow_behavior(self, monkeypatch):
+        # A literal regression check against test_saturated_host_sorts_last's
+        # own fixture: with overflow_max_slowdown=0 a free box sorts ahead of
+        # a saturated one no matter how disproportionately slow it is --
+        # today's unconditional "saturated sorts last" rule, unchanged.
+        gw.set_public_settings({"overflow_max_slowdown": 0})
+        gw._routes_cache["cap"] = {("hostA", "m"): 1, ("hostB", "m"): 1}
+        gw._routes_cache["running"] = {}
+        gw._routes_cache["meta"] = {}
+        gw._inflight["hostA"] = 1
+        self._fixed_est(monkeypatch, {"hostA": 1.0, "hostB": 1000.0})
+        out = await gw._score_host_model_pairs(
+            [("hostA", "m"), ("hostB", "m")], role="primary")
+        assert out == [("hostB", "m"), ("hostA", "m")]
 
 
 # ---------------------------------------------------------------------------

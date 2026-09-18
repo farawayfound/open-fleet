@@ -60,7 +60,9 @@ def test_jsarg_is_actually_used_at_former_vulnerable_sites():
     # its dynamic argument through jsArg(...) rather than a bare esc('...').
     for needle in (
         "unloadOne(${jsArg(m.id)})",
-        "deletePubModel(${jsArg(m.public_id)})",
+        # deletePubModel() left with the Public tab (2026-09-17) -- the
+        # catalogue row it deleted is rendered by the CareerOps admin's own
+        # Public page now, which escapes through React rather than by hand.
         "delLocal(${jsArg(l.path)})",
         "cfgDetail(${jsArg(name)})",
     ):

@@ -530,3 +530,68 @@ class TestCtxOverflowRejectDetail:
         detail = gw._ctx_overflow_reject_detail(b"not even json")
         assert detail["error"]["type"] == "context_limit"
         assert detail["error"]["message"]
+
+
+def _ready_client(ctx: int) -> "RetryOnceClient":
+    """RetryOnceClient with its first-call 503 already spent: a pinned ctx is
+    never retried, so these tests need an engine that is up on the first ask."""
+    c = RetryOnceClient(success_ctx=ctx)
+    c.health_calls = 1
+    return c
+
+
+class TestMultiSlotContextIsCheckedPerSlot:
+    """llama.cpp divides -c among the slots `parallel` asks for, and /props
+    can only report the per-slot window. Comparing the record's TOTAL against
+    that number failed every multi-slot record and rolled it back -- found
+    2026-09-07 moving the fleet's work model to two slots so a keep-warm
+    touch could not displace the conversation cached in the first."""
+
+    @pytest.mark.asyncio
+    async def test_two_slots_reporting_half_the_total_verifies(
+            self, monkeypatch, registry, nosleep):
+        rec = dict(REC, ctx=131072, parallel=2)
+        gw.save_models([rec])
+        monkeypatch.setattr(gw, "resolve_ctx", lambda r: (131072, {}))
+        monkeypatch.setattr(gw, "VERIFY_TIMEOUT", 5.0)
+        monkeypatch.setattr(gw, "service_control", lambda a, u: (0, "ok"))
+        monkeypatch.setattr(gw, "client", _ready_client(65536))
+
+        await gw._verify_apply([rec], {"m1": rec})
+
+        state = gw.get_apply_state()
+        assert state["status"] == "ok", state
+        assert state["verified"] == ["m1"]
+        assert gw.load_models()[0]["ctx"] == 131072      # not halved, not reverted
+
+    @pytest.mark.asyncio
+    async def test_two_slots_short_of_half_still_fails(
+            self, monkeypatch, registry, nosleep):
+        """The check still catches a real shortfall -- it moved, it did not
+        stop being a check."""
+        rec = dict(REC, ctx=131072, parallel=2)
+        gw.save_models([rec])
+        monkeypatch.setattr(gw, "resolve_ctx", lambda r: (131072, {}))
+        monkeypatch.setattr(gw, "VERIFY_TIMEOUT", 5.0)
+        monkeypatch.setattr(gw, "service_control", lambda a, u: (0, "ok"))
+        monkeypatch.setattr(gw, "client", _ready_client(32768))
+
+        await gw._verify_apply([rec], {"m1": rec})
+
+        state = gw.get_apply_state()
+        assert state["status"] == "failed", state
+        why = state["failures"][0]["why"]
+        assert "32768" in why and "65536" in why
+
+    @pytest.mark.asyncio
+    async def test_one_slot_is_unchanged(self, monkeypatch, registry, nosleep):
+        rec = dict(REC, ctx=65536, parallel=1)
+        gw.save_models([rec])
+        monkeypatch.setattr(gw, "resolve_ctx", lambda r: (65536, {}))
+        monkeypatch.setattr(gw, "VERIFY_TIMEOUT", 5.0)
+        monkeypatch.setattr(gw, "service_control", lambda a, u: (0, "ok"))
+        monkeypatch.setattr(gw, "client", _ready_client(65536))
+
+        await gw._verify_apply([rec], {"m1": rec})
+
+        assert gw.get_apply_state()["status"] == "ok"

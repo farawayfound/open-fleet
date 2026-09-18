@@ -160,6 +160,30 @@ class TestBatchWorkerFailureHandling:
         assert "no reachable host" in out[0]["body"]["error"]["message"]
         assert gw.host_cooling("h1") is True
 
+    async def test_an_answer_resets_the_stall_streak_a_batch_stall_raised(
+            self, monkeypatch):
+        # The stall above counts toward the host-keyed streak (each
+        # consecutive stall doubles the sit-out); a batch answer from the
+        # same box resets it, like every other path's answer does.
+        _wire_routes(monkeypatch, {"m": ["h1"]}, {("h1", "m"): 1}, {"h1": {"m"}})
+        gw._stall_streak.clear()
+        gw._stall_cooldown("h1")
+        gw._stall_cooldown("h1")
+        assert gw.stall_streak("h1") == 2
+        gw._host_cooldown.clear()
+
+        async def fake_post_chat(cand, payload, read_timeout=None):
+            return httpx.Response(200, request=httpx.Request("POST", "http://x"),
+                                  json=OK_BODY)
+
+        monkeypatch.setattr(gw, "_post_chat", fake_post_chat)
+        bid, _in, out_path = _new_batch(
+            [{"messages": [{"role": "user", "content": "hi"}]}])
+        await gw._batch_run(bid, ["m"], {"id": 1, "name": "k"})
+        out = _read_output(out_path)
+        assert out and out[0]["ok"] is True
+        assert gw.stall_streak("h1") == 0
+
     async def test_a_connect_error_marks_the_host_down(self, monkeypatch):
         _wire_routes(monkeypatch, {"m": ["h1"]}, {("h1", "m"): 1}, {"h1": {"m"}})
 
