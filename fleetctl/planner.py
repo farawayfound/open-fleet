@@ -101,6 +101,19 @@ SCHEMA: dict[str, dict[str, tuple[type | tuple, bool]]] = {
         "metal_gib": (int, False),
         "gtt_gib": (int, False),
     },
+    # A boot-time CPU/GPU ceiling, Linux only. Each key is independent and
+    # unset means "do not touch this knob" -- a box with no `power:` section
+    # at all is untouched, exactly as if the step did not exist. Unlike
+    # sizing.gtt_gib, none of these are a kernel cmdline token: they are live
+    # sysfs writes that are either active immediately or the write failed,
+    # and they are LOST on every reboot -- see steps/system.py:PowerCap and
+    # gateway/bin/llmstack-powercap for the boot-time unit that reapplies
+    # them.
+    "power": {
+        "gpu_sclk_max_mhz": (int, False),
+        "cpu_boost": (bool, False),
+        "cpu_max_mhz": (int, False),
+    },
     "access": {
         "cf_team_domain": (str, False),
         "cf_aud": (str, False),
@@ -573,6 +586,25 @@ COMMENTS: dict[str, str] = {
         "pool, so how much of it a model may hold is a policy number rather\n"
         "than a measurement -- and the rest of it is what keeps the machine\n"
         "usable by the person sitting at it."),
+    "power.gpu_sclk_max_mhz": (
+        "Caps the GPU's peak graphics clock, in MHz, via\n"
+        "power_dpm_force_performance_level=manual + pp_od_clk_voltage. Applied\n"
+        "at boot by a systemd oneshot before llama-swap starts serving, since\n"
+        "the sysfs write itself does not survive a reboot. Validated against\n"
+        "the card's own OD_RANGE when applied -- a value outside it fails\n"
+        "loudly rather than being silently clamped."),
+    "power.cpu_boost": (
+        "false disables CPU frequency boost (cpufreq/boost=0). Independent of\n"
+        "gpu_sclk_max_mhz -- on a box whose CPU workers busy-poll while the\n"
+        "GPU does the real work, this is usually the lever with the most\n"
+        "thermal headroom for the least throughput lost."),
+    "power.cpu_max_mhz": (
+        "A hard ceiling on every cpufreq policy's scaling_max_freq, in MHz.\n"
+        "Validated per policy against that policy's own cpuinfo_min_freq /\n"
+        "cpuinfo_max_freq, so a fleet with mixed CPUs never gets one box's\n"
+        "range written into another's. Not free on a model that round-trips\n"
+        "to the CPU every token: Flash-Next on apu-box-1 lost ~10% decode per\n"
+        "GHz taken off -- benchmark before lowering it."),
     "availability.file": (
         "Set this and an outside watchdog owns the answer to 'may the fleet\n"
         "use this machine right now'. The gateway stops advertising its\n"

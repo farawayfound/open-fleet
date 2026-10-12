@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# llmstack-powercap -- root helper, re-run at every boot by
+# llmstack-powercap.service, that reapplies a CPU/GPU power cap sysfs writes
+# do not survive a reboot.
+#
+# WHY THIS EXISTS, and why it is not another verb on llmstack-gpuconf: gpuconf
+# STAGES a kernel cmdline token for the NEXT boot and reports whether a reboot
+# is still needed. power_dpm_force_performance_level, pp_od_clk_voltage and
+# cpufreq/boost are not cmdline tokens -- they are live sysfs writes, either
+# active immediately or the write failed. There is no "staged, pending
+# reboot" state for them, and bolting that shape onto gpuconf's status would
+# describe something that cannot happen.
+#
+# THE THREE KNOBS, each independent, each a no-op when its config value is
+# blank:
+#   GPU_SCLK_MAX_MHZ  power_dpm_force_performance_level=manual, then
+#                     `s 1 <MHz>` + `c` into pp_od_clk_voltage, validated
+#                     against the card's own OD_RANGE.
+#   CPU_BOOST         0 or 1 into cpufreq/boost (amd-pstate-epp's global
+#                     file here; falls back to a per-policy boost file if
+#                     the global one is absent).
+#   CPU_MAX_MHZ       scaling_max_freq on EVERY cpufreq policy, validated
+#                     per policy against that policy's own cpuinfo_min_freq
+#                     / cpuinfo_max_freq.
+#
+# A knob whose sysfs file this box does not have, or whose value this box's
+# hardware rejects, is loud (stderr + a nonzero exit, so `systemctl status`
+# shows a failure) but never fatal to the OTHER knobs, and the systemd unit
+# only ever ORDERS itself before llama-swap (Before=, never Requires=) -- a
+# cap this box cannot fully apply must not be a reason llama-swap fails to
+# start.
+#
+# CLI contract (depended on by fleetctl/steps/system.py:PowerCap -- do not
+# change shapes):
+#   llmstack-powercap apply     read the config file, apply every knob it
+#                                sets, then print the same status line
+#                                `status` would. Idempotent. Exit 0 only if
+#                                every requested knob actually applied.
+#   llmstack-powercap status    read-only: the box's OWN current sysfs
+#                                values next to the configured targets, one
+#                                JSON line, no writes, no root needed.
+#
+# Testing hooks (production always leaves these unset):
+#   LLMSTACK_POWERCAP_ROOT       prefixes every absolute path this script
+#                                touches, so it can run against a fake sysfs
+#                                tree as an ordinary user -- the same trick
+#                                LLMSTACK_GPUCONF_ROOT plays in gpuconf.
+#   LLMSTACK_POWERCAP_CONF       overrides the config file path outright.
+#   LLMSTACK_POWERCAP_WAIT_SECS  overrides the bounded wait for the GPU to
+#                                appear (default 30s) -- tests set this low
+#                                rather than waiting out the real default.
+# ---------------------------------------------------------------------------
+set -u   # deliberately not -e: one knob's failure must not skip the rest.
+
+ROOT="${LLMSTACK_POWERCAP_ROOT:-}"
+CONF="${LLMSTACK_POWERCAP_CONF:-$ROOT/etc/llmstack/powercap.conf}"
+DRM="$ROOT/sys/class/drm"
+CPUFREQ="$ROOT/sys/devices/system/cpu/cpufreq"
+WAIT_SECS="${LLMSTACK_POWERCAP_WAIT_SECS:-30}"
+
+# Defaults: blank means "not managed here", overridden by the config file
+# fleetctl writes.
+GPU_SCLK_MAX_MHZ=
+CPU_BOOST=
+CPU_MAX_MHZ=
+# The path is a variable on purpose (tests point it at a sandbox); the
+# directive only counts on its own line, directly above the statement.
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+warnings=()
+warn() { warnings+=("$1"); printf 'llmstack-powercap: warning: %s\n' "$1" >&2; }
+fail_rc=0
+fail() { fail_rc=1; printf 'llmstack-powercap: error: %s\n' "$1" >&2; }
+
+require_root() {
+  [ -n "$ROOT" ] && return 0   # sandboxed test tree -- no real root needed
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "llmstack-powercap must run as root" >&2
+    exit 3
+  fi
+}
+
+usage() { echo "usage: llmstack-powercap <apply|status>" >&2; exit 2; }
+
+# --- tiny JSON helpers (production output is fully under our own control,
+# so this never has to be a general JSON writer) ----------------------------
+json_num_or_null() { [ -z "${1:-}" ] && printf 'null' || printf '%s' "$1"; }
+json_str_or_null() { [ -z "${1:-}" ] && printf 'null' || printf '"%s"' "$1"; }
+json_array() {
+  local out="[" first=1 a
+  for a in "$@"; do
+    if [ "$first" -eq 1 ]; then first=0; else out+=","; fi
+    out+="\"${a//\"/\\\"}\""
+  done
+  out+="]"
+  printf '%s' "$out"
+}
+
+# --- GPU card selection ------------------------------------------------
+# Explicit, not "card0 by luck": the AMD (vendor 0x1002) DRM card that also
+# exposes pp_od_clk_voltage. A display-only bridge node has neither. But
+# "the first one found" is only safe when there is exactly one -- an AMD
+# iGPU sitting beside an AMD dGPU (gpu-laptop-1's shape: Ryzen 6900HS + RX 6700S)
+# can leave BOTH exposing the file, and there is no PCI-address/DRM-index
+# pinning anywhere in this config yet to say which one is the compute card.
+# Silently capping whichever sorts first would cap the wrong one -- the idle
+# iGPU, say -- while `status` still reports the configured target as active,
+# so `fleetctl check` shows green while the box that is actually overheating
+# stays uncapped. Refuse to guess: this is loud (fail(), so cmd_apply exits
+# nonzero), never a silent pick.
+# Exit codes: 0 found exactly one, 1 found none (yet -- may still attach),
+# 2 found more than one (a permanent condition worth failing fast on, not
+# retrying every second for the rest of the boot-time wait).
+find_amd_card() {
+  local c dev vendor found=""
+  for c in "$DRM"/card[0-9]*; do
+    [ -d "$c" ] || continue
+    dev="$c/device"
+    [ -f "$dev/vendor" ] || continue
+    vendor="$(cat "$dev/vendor" 2>/dev/null)"
+    [ "$vendor" = "0x1002" ] || continue
+    [ -f "$dev/pp_od_clk_voltage" ] || continue
+    if [ -n "$found" ]; then
+      fail "more than one AMD card exposes pp_od_clk_voltage ($found and $dev) -- refusing to guess which one to cap"
+      return 2
+    fi
+    found="$dev"
+  done
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+  return 0
+}
+
+# Bounded: amdgpu can still be attaching when this unit's turn comes at boot,
+# but a card that never appears must not hang the boot forever. An ambiguous
+# result (two cards, exit 2) is not a "not yet" -- it will not resolve
+# itself by waiting, so this returns immediately instead of repeating the
+# same fail() every second until WAIT_SECS runs out.
+wait_for_card() {
+  local waited=0 card rc
+  while true; do
+    card="$(find_amd_card)"; rc=$?
+    [ "$rc" -eq 0 ] && { printf '%s' "$card"; return 0; }
+    [ "$rc" -eq 2 ] && return 1
+    [ "$waited" -ge "$WAIT_SECS" ] && return 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# OD_RANGE's SCLK line: "SCLK:     600Mhz       2900Mhz" (never indented,
+# unlike the OD_SCLK/OD_MCLK point lists above it).
+od_range_mhz() {
+  local card="$1"
+  [ -f "$card/pp_od_clk_voltage" ] || return 1
+  awk '
+    { sub(/^[ \t]+/, "") }
+    /^OD_RANGE:/ { r = 1; next }
+    r && /^SCLK:/ { gsub(/[Mm][Hh][Zz]/, ""); print $2, $3; exit }
+  ' "$card/pp_od_clk_voltage" 2>/dev/null
+}
+
+# OD_SCLK's second point (index 1) is exactly what `s 1 <MHz>` sets -- read
+# back to confirm it, and stable, unlike pp_dpm_sclk's currently-active
+# level, which moves with load.
+current_sclk_cap_mhz() {
+  local card="$1"
+  [ -f "$card/pp_od_clk_voltage" ] || return 1
+  awk '
+    { sub(/^[ \t]+/, "") }
+    /^OD_SCLK:/ { s = 1; next }
+    /^OD_(MCLK|RANGE|VDDC)/ { s = 0 }
+    s && /^1:/ {
+      gsub(/[Mm][Hh][Zz]/, "")
+      gsub(/^1:[ \t]*/, "")
+      print $1
+      exit
+    }
+  ' "$card/pp_od_clk_voltage" 2>/dev/null
+}
+
+apply_gpu_cap() {
+  local target="$1"
+  [ -n "$target" ] || return 0
+  local card
+  if ! card="$(wait_for_card)"; then
+    fail "no AMD GPU with pp_od_clk_voltage appeared within ${WAIT_SECS}s -- gpu_sclk_max_mhz not applied"
+    return 0
+  fi
+  local range lo hi
+  range="$(od_range_mhz "$card")"
+  read -r lo hi <<<"$range"
+  if [ -z "$lo" ] || [ -z "$hi" ]; then
+    fail "could not read $card/pp_od_clk_voltage's OD_RANGE"
+    return 0
+  fi
+  if [ "$target" -lt "$lo" ] || [ "$target" -gt "$hi" ]; then
+    fail "gpu_sclk_max_mhz=$target is outside $card's OD_RANGE (${lo}-${hi} MHz)"
+    return 0
+  fi
+  if ! echo manual > "$card/power_dpm_force_performance_level" 2>/dev/null; then
+    fail "could not write manual to $card/power_dpm_force_performance_level"
+    return 0
+  fi
+  # Two discrete commands, as the driver expects -- not one write with an
+  # embedded newline. >> rather than >: sysfs attributes are not backed by a
+  # seekable file, so O_APPEND vs O_TRUNC makes no difference to the driver,
+  # and appending is what lets a test tree observe both commands landing.
+  if ! echo "s 1 $target" >> "$card/pp_od_clk_voltage" 2>/dev/null; then
+    fail "could not write the sclk cap to $card/pp_od_clk_voltage"
+    return 0
+  fi
+  if ! echo c >> "$card/pp_od_clk_voltage" 2>/dev/null; then
+    fail "could not commit the sclk cap on $card/pp_od_clk_voltage"
+    return 0
+  fi
+  echo "llmstack-powercap: gpu sclk max -> ${target}MHz ($card)"
+}
+
+apply_cpu_boost() {
+  local want="$1"
+  [ -n "$want" ] || return 0
+  local wrote=0
+  if [ -f "$CPUFREQ/boost" ]; then
+    if echo "$want" > "$CPUFREQ/boost" 2>/dev/null; then
+      wrote=1
+    else
+      fail "could not write $want to $CPUFREQ/boost"
+    fi
+  fi
+  if [ "$wrote" -eq 0 ]; then
+    # Per-policy fallback -- not every driver exposes the global file.
+    local p any=0
+    for p in "$CPUFREQ"/policy*/boost; do
+      [ -f "$p" ] || continue
+      any=1
+      if echo "$want" > "$p" 2>/dev/null; then
+        wrote=1
+      else
+        fail "could not write $want to $p"
+      fi
+    done
+    if [ "$any" -eq 0 ]; then
+      fail "no cpufreq boost file (global or per-policy) -- cpu_boost not applied"
+      return 0
+    fi
+  fi
+  [ "$wrote" -eq 1 ] && echo "llmstack-powercap: cpu boost -> $want"
+}
+
+apply_cpu_max() {
+  local mhz="$1"
+  [ -n "$mhz" ] || return 0
+  local khz=$((mhz * 1000))
+  local p any=0 applied=0 minf maxf
+  for p in "$CPUFREQ"/policy*; do
+    [ -d "$p" ] || continue
+    any=1
+    minf="$(cat "$p/cpuinfo_min_freq" 2>/dev/null)"
+    maxf="$(cat "$p/cpuinfo_max_freq" 2>/dev/null)"
+    if [ -z "$minf" ] || [ -z "$maxf" ]; then
+      warn "$(basename "$p") has no cpuinfo_min_freq/cpuinfo_max_freq -- skipped"
+      continue
+    fi
+    if [ "$khz" -lt "$minf" ] || [ "$khz" -gt "$maxf" ]; then
+      fail "cpu_max_mhz=$mhz (${khz} kHz) is outside $(basename "$p")'s range (${minf}-${maxf} kHz)"
+      continue
+    fi
+    if echo "$khz" > "$p/scaling_max_freq" 2>/dev/null; then
+      applied=$((applied + 1))
+    else
+      fail "could not write $khz to $p/scaling_max_freq"
+    fi
+  done
+  if [ "$any" -eq 0 ]; then
+    fail "no cpufreq policy directories -- cpu_max_mhz not applied"
+    return 0
+  fi
+  [ "$applied" -gt 0 ] && echo "llmstack-powercap: cpu max -> ${mhz}MHz on ${applied} polic$([ "$applied" = 1 ] && echo y || echo ies)"
+}
+
+# --- read-only status --------------------------------------------------
+gather_active() {
+  ACTIVE_SCLK=""; PERF_LEVEL=""; BOOST_ACTIVE=""; CPU_MAX_ACTIVE_KHZ=""
+  local card
+  if card="$(find_amd_card)"; then
+    ACTIVE_SCLK="$(current_sclk_cap_mhz "$card")"
+    [ -f "$card/power_dpm_force_performance_level" ] \
+      && PERF_LEVEL="$(cat "$card/power_dpm_force_performance_level" 2>/dev/null)"
+  elif [ -n "$GPU_SCLK_MAX_MHZ" ]; then
+    warn "no AMD GPU with pp_od_clk_voltage found"
+  fi
+  if [ -f "$CPUFREQ/boost" ]; then
+    BOOST_ACTIVE="$(cat "$CPUFREQ/boost" 2>/dev/null)"
+  else
+    local p
+    for p in "$CPUFREQ"/policy*/boost; do
+      [ -f "$p" ] || continue
+      BOOST_ACTIVE="$(cat "$p" 2>/dev/null)"
+      break
+    done
+  fi
+  # The MAXIMUM scaling_max_freq across policies, not the minimum: if even
+  # one core was not capped, the max shows it, where the min would hide it.
+  local p khz
+  for p in "$CPUFREQ"/policy*/scaling_max_freq; do
+    [ -f "$p" ] || continue
+    khz="$(cat "$p" 2>/dev/null)" || continue
+    [ -z "$khz" ] && continue
+    if [ -z "$CPU_MAX_ACTIVE_KHZ" ] || [ "$khz" -gt "$CPU_MAX_ACTIVE_KHZ" ]; then
+      CPU_MAX_ACTIVE_KHZ="$khz"
+    fi
+  done
+}
+
+emit_json() {
+  gather_active
+  local cpu_max_active_mhz=""
+  [ -n "$CPU_MAX_ACTIVE_KHZ" ] && cpu_max_active_mhz=$((CPU_MAX_ACTIVE_KHZ / 1000))
+  printf '{'
+  printf '"gpu_sclk_max_mhz":%s,' "$(json_num_or_null "$GPU_SCLK_MAX_MHZ")"
+  printf '"gpu_sclk_active_mhz":%s,' "$(json_num_or_null "$ACTIVE_SCLK")"
+  printf '"gpu_perf_level":%s,' "$(json_str_or_null "$PERF_LEVEL")"
+  printf '"cpu_boost":%s,' "$(json_num_or_null "$CPU_BOOST")"
+  printf '"cpu_boost_active":%s,' "$(json_num_or_null "$BOOST_ACTIVE")"
+  printf '"cpu_max_mhz":%s,' "$(json_num_or_null "$CPU_MAX_MHZ")"
+  printf '"cpu_max_active_mhz":%s,' "$(json_num_or_null "$cpu_max_active_mhz")"
+  printf '"warnings":%s' "$(json_array "${warnings[@]+"${warnings[@]}"}")"
+  printf '}\n'
+}
+
+cmd_status() { emit_json; }
+
+cmd_apply() {
+  require_root
+  apply_gpu_cap "$GPU_SCLK_MAX_MHZ"
+  apply_cpu_boost "$CPU_BOOST"
+  apply_cpu_max "$CPU_MAX_MHZ"
+  emit_json
+  exit "$fail_rc"
+}
+
+main() {
+  local cmd="${1:-}"
+  [ -n "$cmd" ] || usage
+  case "$cmd" in
+    apply)  cmd_apply ;;
+    status) cmd_status ;;
+    *)      usage ;;
+  esac
+}
+
+main "$@"

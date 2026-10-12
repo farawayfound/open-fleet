@@ -438,24 +438,37 @@ class TestPreloadPlan:
 
 class TestPreloadPass:
     def _capture(self, monkeypatch, status=200):
+        """A llama.cpp peer is touched through its admin API, not asked for a
+        completion -- see _preload_touch. Also fails the test loudly if
+        anything reaches _post_chat, which is what this loop used to do."""
         seen = []
 
-        async def _post(cand, payload, read_timeout=None):
-            seen.append((cand, payload))
-            return type("R", (), {"status_code": status, "json": lambda self: {}})()
+        async def _admin(cand, method, subpath, body=None, timeout=30.0):
+            seen.append((cand, method, subpath, body))
+            return status, {}
 
+        async def _post(cand, payload, read_timeout=None):
+            raise AssertionError("the keep-warm loop must not send a completion "
+                                 "to a llama.cpp box -- it takes the box's slot")
+
+        monkeypatch.setattr(gw, "_peer_admin", _admin)
         monkeypatch.setattr(gw, "_post_chat", _post)
         return seen
 
-    async def test_it_asks_each_capable_box_for_one_token(self, monkeypatch):
+    async def test_it_touches_each_capable_box_without_asking_for_a_token(self, monkeypatch):
+        """The touch is a metadata request. It loads a missing model and
+        refreshes llama-swap's ttl clock exactly as the old one-token
+        completion did, but it never reaches llama-server's slot, so it
+        cannot evict the prompt cache a real turn is about to reuse
+        (measured on mac-laptop-1, 2026-09-07: that eviction cost a work turn 70
+        seconds of re-reading a prompt it had already seen)."""
         fleet(monkeypatch)
         seen = self._capture(monkeypatch)
         touched = await gw.preload_pass()
         assert {t["host"] for t in touched} == {"gpu-laptop-1", "mac-laptop-1"}
-        assert {c for c, _ in seen} == {"gpu-laptop-1", "mac-laptop-1"}
-        import json as _json
-        body = _json.loads(seen[0][1])
-        assert body["model"] == FID and body["max_tokens"] == 1
+        assert {c for c, _m, _p, _b in seen} == {"gpu-laptop-1", "mac-laptop-1"}
+        assert {(m, sp) for _c, m, sp, _b in seen} == {("POST", "models/touch")}
+        assert all(b == {"model": FID} for _c, _m, _p, b in seen)
         assert gw._preload_state["mac-laptop-1"]["phase"] == "resident"
 
     async def test_it_is_never_metered_against_anybody(self, monkeypatch):

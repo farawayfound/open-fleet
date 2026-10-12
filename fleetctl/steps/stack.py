@@ -161,6 +161,13 @@ class GatewayFiles(Step):
             if ctx.copy(helper, shapes.join(ctx.family, ctx.plan["paths"]["bin"],
                                             "llmstack-gpuconf"), mode=0o755):
                 n += 1
+        # powercap is Linux-only: it reads amdgpu/cpufreq sysfs, neither of
+        # which exists on darwin or windows.
+        powercap = ctx.repo / "gateway" / "bin" / "llmstack-powercap"
+        if powercap.is_file() and ctx.family == "linux":
+            if ctx.copy(powercap, shapes.join(ctx.family, ctx.plan["paths"]["bin"],
+                                              "llmstack-powercap"), mode=0o755):
+                n += 1
         ctx.did(f"installed {n} file(s)")
 
 
