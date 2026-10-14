@@ -3,8 +3,8 @@
 This is the finding `fleetctl peers` was written for: on 2026-08-27 the hub
 was addressing seven of its thirteen peers by something that was not a
 tailnet address -- six by bare name (`http://apu-box-1:8080`, `http://gpu-desktop-1:8080`,
-`http://mini-pc-1:8080`, ...) and `gpu-laptop-1` by a DHCP lease,
-`http://192.168.1.144:8080`.
+`http://mini-pc-1:8080`, ...) and `gpu-laptop-1` by a DHCP lease on the
+192.168.0.x LAN.
 
 They all worked, which is the problem. The hub shares a LAN with those boxes,
 so the names resolved and the lease was current. The 2026-08-26 power cut had
@@ -25,11 +25,13 @@ import pytest
 from fleetctl import cli, hostfile, peers
 
 # The live list as it stood, names and all -- so the classification is tested
-# against what was actually there rather than against invented examples.
+# against what was actually there rather than against invented examples. The
+# one exception is gpu-laptop-1's lease: the address it really held was reused by a
+# printer after the 2026-10-09 outage, so a stand-in on the same LAN is used.
 LIVE = [
     {"name": "apu-box-1", "url": "http://apu-box-1:8080",
      "api_url": "https://max.example.com/v1", "has_token": True},
-    {"name": "gpu-laptop-1", "url": "http://192.168.1.144:8080",
+    {"name": "gpu-laptop-1", "url": "http://192.168.1.50:8080",
      "api_url": "https://gpu-laptop-1.example.com/v1", "has_token": True},
     {"name": "server-1", "url": "http://server-1:8080",
      "api_url": "http://server-1:8080/v1", "has_token": True},
@@ -58,7 +60,7 @@ class TestHowAnAddressWillAge:
         # ordinary public space and would be somebody else's machine.
         ("http://100.63.255.255:8080", "public"),
         ("http://100.128.0.1:8080", "public"),
-        ("http://192.168.1.144:8080", "lan"),
+        ("http://192.168.1.50:8080", "lan"),
         ("http://10.0.0.5:8080", "lan"),
         ("http://172.16.4.1:8080", "lan"),
         ("http://172.32.4.1:8080", "public"),
@@ -96,7 +98,7 @@ class TestWhatTheRepoSays:
     def test_every_box_has_a_tailnet_address(self, repo):
         want, problems = peers.desired(repo)
         assert problems == []
-        assert len(want) == 16
+        assert len(want) == 19
 
     def test_and_every_one_of_them_is_durable(self, repo):
         want, _ = peers.desired(repo)

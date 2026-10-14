@@ -8,12 +8,15 @@ on.
 """
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from fleetctl import planner
 from fleetctl import steps as steps_mod
 from fleetctl.runner import Ctx
-from fleetctl.steps import NEEDS_WORK, SKIPPED
+from fleetctl.steps import DRIFT, MISSING, OK, NEEDS_WORK, SKIPPED
 
 
 def ctx_for(facts, repo, tmp_path, **kw):
@@ -42,6 +45,10 @@ class TestCatalogue:
         assert ids.index("services") < ids.index("health")
         assert ids.index("venv") < ids.index("services")
         assert ids.index("python-runtime") < ids.index("venv")
+        # The power cap's boot unit is ordered ahead of llama-swap by its own
+        # systemd unit text (Before=llama-swap.service); at PROVISION time it
+        # only has to exist before the step that first enables llama-swap.
+        assert ids.index("power-cap") < ids.index("services")
 
     def test_health_is_last(self):
         assert steps_mod.ORDER[-1] == "health"
@@ -50,7 +57,7 @@ class TestCatalogue:
         marked = {s.id for s in steps_mod.catalogue() if s.system}
         # These are the ones that reach outside the plan's own paths.
         assert marked == {"packages", "service-account", "grants", "power",
-                          "firewall", "gpu-cap", "services"}
+                          "firewall", "gpu-cap", "power-cap", "services"}
 
 
 class TestSelection:
@@ -101,6 +108,38 @@ class TestWantedness:
         assert not by_id["gpu-cap"].wanted(ctx)
         ctx.plan["sizing"]["metal_gib"] = 42
         assert by_id["gpu-cap"].wanted(ctx)
+
+    def test_the_power_cap_step_is_linux_only_and_needs_a_knob_set(
+            self, linux_facts, darwin_facts, windows_facts, empty_repo, tmp_path):
+        by_id = {s.id: s for s in steps_mod.catalogue()}
+        step = by_id["power-cap"]
+        # A box with no power: section at all is untouched -- every plan
+        # starts with all three keys None.
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        assert ctx.plan["power"] == {"gpu_sclk_max_mhz": None, "cpu_boost": None,
+                                     "cpu_max_mhz": None}
+        assert not step.wanted(ctx)
+        # Any ONE of the three is enough -- they are independent knobs.
+        ctx.plan["power"]["cpu_boost"] = False
+        assert step.wanted(ctx)
+        # Linux-only: the sysfs paths involved do not exist elsewhere, even
+        # if a host.yml somehow set the values on the wrong platform.
+        dctx = ctx_for(darwin_facts, empty_repo, tmp_path)
+        dctx.plan["power"]["gpu_sclk_max_mhz"] = 2500
+        assert not step.wanted(dctx)
+        wctx = ctx_for(windows_facts, empty_repo, tmp_path)
+        wctx.plan["power"]["cpu_max_mhz"] = 2000
+        assert not step.wanted(wctx)
+
+    def test_cpu_boost_false_is_a_real_value_not_treated_as_unset(
+            self, linux_facts, empty_repo, tmp_path):
+        """cpu_boost: false is a request to turn boost OFF -- `is not None`,
+        never a truthiness check, or the one setting that matters most
+        (disable boost) would be indistinguishable from not asking at all."""
+        by_id = {s.id: s for s in steps_mod.catalogue()}
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        ctx.plan["power"]["cpu_boost"] = False
+        assert by_id["power-cap"].wanted(ctx)
 
 
 class TestCheckIsReadOnly:
@@ -391,3 +430,225 @@ class TestWindowsWrappers:
             raw = ctx.path(path).read_bytes()
             assert b"\r\n" in raw
             assert not raw.startswith(b"\xef\xbb\xbf")
+
+
+class TestPowerCap:
+    """check()/apply() for the CPU/GPU power cap step, against a fake
+    helper answering through ctx.probe -- no real box, no real sysfs."""
+
+    def _step_ctx(self, linux_facts, empty_repo, tmp_path, **power):
+        from fleetctl.steps.system import PowerCap
+
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        ctx.plan["power"].update(power)
+        return PowerCap(), ctx
+
+    def _status(self, **fields) -> str:
+        base = {"gpu_sclk_max_mhz": None, "gpu_sclk_active_mhz": None,
+                "gpu_perf_level": None, "cpu_boost": None,
+                "cpu_boost_active": None, "cpu_max_mhz": None,
+                "cpu_max_active_mhz": None, "warnings": []}
+        base.update(fields)
+        return json.dumps(base)
+
+    def test_unset_means_not_wanted_and_the_helper_is_never_probed(
+            self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path)
+        assert not step.wanted(ctx)
+
+    def test_unset_with_nothing_ever_installed_is_SKIPPED(
+            self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path)
+        c = step.check(ctx)
+        assert c.state == SKIPPED
+
+    # -- the revert path: host.yml's power: keys removed after a previous
+    # apply already installed and enabled the unit ----------------------
+
+    def test_unset_stays_wanted_when_a_previous_apply_left_the_unit_behind(
+            self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path)
+        ctx.write(step.UNIT_PATH, step._unit_text(ctx))
+        # Naively reading "nothing configured" as "nothing to do" would let
+        # the runner skip check()/apply() outright and leave this enabled
+        # forever, reapplying a stale cap at every future boot.
+        assert step.wanted(ctx)
+
+    def test_unset_with_a_leftover_unit_is_DRIFT_not_silence(
+            self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path)
+        ctx.write(step.UNIT_PATH, step._unit_text(ctx))
+        c = step.check(ctx)
+        assert c.state == DRIFT
+        assert step.UNIT_NAME in c.detail
+        assert any("disable" in line for line in c.plan)
+
+    def test_unset_apply_disables_and_removes_the_unit_and_conf(
+            self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path)
+        ctx.write(step.UNIT_PATH, step._unit_text(ctx))
+        ctx.write(step._conf_path(ctx), step._conf_text(ctx))
+        issued = []
+        ctx.sudo = lambda argv, **kw: issued.append([str(a) for a in argv])
+        step.apply(ctx)
+        assert any("disable" in a and "--now" in a for a in issued)
+        assert any(step.UNIT_PATH in a for a in issued if "rm" in a)
+        assert any(step._conf_path(ctx) in a for a in issued if "rm" in a)
+        assert any("daemon-reload" in a for a in issued)
+        # A reboot is what actually restores the sysfs defaults -- same
+        # staged/pending-reboot honesty as GpuCap's GTT window -- so the
+        # operator needs to be told, not left assuming apply() undid it live.
+        assert ctx.notes
+
+    def test_helper_missing_is_MISSING(self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   cpu_boost=False)
+        c = step.check(ctx)
+        assert c.state == MISSING
+        assert any("install" in line for line in c.plan)
+
+    def _install_helper(self, ctx) -> None:
+        # check()/apply() only look at whether the path exists.
+        p = ctx.path(ctx.plan["paths"]["bin"] + "/llmstack-powercap")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+
+    def test_helper_present_but_config_and_unit_missing_is_DRIFT(
+            self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   gpu_sclk_max_mhz=2500)
+        self._install_helper(ctx)
+        ctx.probe = lambda argv, **kw: (
+            SimpleNamespace(returncode=1, stdout="", stderr="")
+            if argv[0] == "systemctl" else
+            SimpleNamespace(returncode=0, stdout=self._status(gpu_sclk_max_mhz=2500,
+                                                              gpu_sclk_active_mhz=2500)))
+        c = step.check(ctx)
+        assert c.state == DRIFT
+        assert any("powercap.conf" in line for line in c.plan)
+        assert any(step.UNIT_NAME in line or "systemd" in line for line in c.plan)
+
+    def test_matching_config_and_active_state_is_OK(self, linux_facts, empty_repo,
+                                                     tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   gpu_sclk_max_mhz=2500, cpu_boost=False,
+                                   cpu_max_mhz=2000)
+        self._install_helper(ctx)
+        ctx.write(step._conf_path(ctx), step._conf_text(ctx))
+        ctx.write(step.UNIT_PATH, step._unit_text(ctx))
+        ctx.probe = lambda argv, **kw: (
+            SimpleNamespace(returncode=0, stdout="", stderr="")
+            if argv[0] == "systemctl" else
+            SimpleNamespace(returncode=0, stdout=self._status(
+                gpu_sclk_max_mhz=2500, gpu_sclk_active_mhz=2500,
+                cpu_boost=0, cpu_boost_active=0,
+                cpu_max_mhz=2000, cpu_max_active_mhz=2000)))
+        c = step.check(ctx)
+        assert c.state == OK, c
+
+    def test_an_active_value_that_disagrees_with_the_config_is_DRIFT(
+            self, linux_facts, empty_repo, tmp_path):
+        """The GTT-style 'wanted vs active' read-back -- except here a
+        mismatch is never 'staged, pending reboot': the write already ran
+        and either took or it did not."""
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   gpu_sclk_max_mhz=2500)
+        self._install_helper(ctx)
+        ctx.write(step._conf_path(ctx), step._conf_text(ctx))
+        ctx.write(step.UNIT_PATH, step._unit_text(ctx))
+        ctx.probe = lambda argv, **kw: (
+            SimpleNamespace(returncode=0, stdout="", stderr="")
+            if argv[0] == "systemctl" else
+            SimpleNamespace(returncode=0, stdout=self._status(
+                gpu_sclk_max_mhz=2500, gpu_sclk_active_mhz=2900)))
+        c = step.check(ctx)
+        assert c.state == DRIFT
+        assert "2500" in c.detail and "2900" in c.detail
+
+    def test_unparsable_status_is_DRIFT_not_a_crash(self, linux_facts, empty_repo,
+                                                     tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   cpu_boost=True)
+        self._install_helper(ctx)
+        ctx.write(step._conf_path(ctx), step._conf_text(ctx))
+        ctx.write(step.UNIT_PATH, step._unit_text(ctx))
+        ctx.probe = lambda argv, **kw: (
+            SimpleNamespace(returncode=0, stdout="", stderr="")
+            if argv[0] == "systemctl" else
+            SimpleNamespace(returncode=0, stdout="not json at all"))
+        c = step.check(ctx)
+        assert c.state == DRIFT
+
+    def test_apply_writes_conf_and_unit_and_restarts_the_service(
+            self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   gpu_sclk_max_mhz=2500, cpu_boost=False,
+                                   cpu_max_mhz=2000)
+        issued = []
+        ctx.sudo = lambda argv, **kw: issued.append([str(a) for a in argv])
+        step.apply(ctx)
+        conf = ctx.read(step._conf_path(ctx))
+        assert "GPU_SCLK_MAX_MHZ=2500" in conf
+        assert "CPU_BOOST=0" in conf
+        assert "CPU_MAX_MHZ=2000" in conf
+        unit = ctx.read(step.UNIT_PATH)
+        assert "Before=llama-swap.service" in unit
+        assert "ExecStart=" in unit and "llmstack-powercap apply" in unit
+        # Ordering-only, never Requires=/BindsTo= -- a knob this box's
+        # hardware cannot honour must not stop llama-swap from starting.
+        assert "Requires=" not in unit and "BindsTo=" not in unit
+        assert any("daemon-reload" in " ".join(a) for a in issued)
+        assert any("restart" in a and step.UNIT_NAME in a for a in issued)
+
+    def test_apply_is_idempotent_the_second_time_round(self, linux_facts,
+                                                        empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   cpu_boost=True)
+        ctx.sudo = lambda argv, **kw: None
+        step.apply(ctx)
+        issued = []
+        ctx.sudo = lambda argv, **kw: issued.append([str(a) for a in argv])
+        step.apply(ctx)
+        # No daemon-reload the second time: neither file's content changed.
+        assert not any("daemon-reload" in " ".join(a) for a in issued)
+        # It still restarts the unit every apply -- the config could have
+        # changed underneath an already-running RemainAfterExit unit.
+        assert any("restart" in a for a in issued)
+
+    def test_apply_passes_check_false_to_the_restart(
+            self, linux_facts, empty_repo, tmp_path):
+        # A knob this box's hardware cannot honour (out-of-range MHz, no
+        # boost file, ...) is exactly what makes `llmstack-powercap apply`
+        # exit nonzero -- see gateway/tests/test_powercap.py -- and that
+        # must surface through check()'s own DRIFT reading of `status`, not
+        # as a crashed `systemctl restart` that raises StepFailed and aborts
+        # the whole per-host apply run before `services`/`health` ever get a
+        # turn. Mirrors the sibling Power step's own
+        # `systemctl restart systemd-logind` call.
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   gpu_sclk_max_mhz=2500)
+        calls = []
+        ctx.sudo = lambda argv, **kw: calls.append(([str(a) for a in argv], kw))
+        step.apply(ctx)
+        restart = next(c for c in calls if "restart" in c[0])
+        assert restart[1].get("check") is False
+
+    def test_conf_value_formatting(self):
+        from fleetctl.steps.system import PowerCap
+
+        assert PowerCap._conf_value(None) == ""
+        assert PowerCap._conf_value(True) == "1"
+        assert PowerCap._conf_value(False) == "0"
+        assert PowerCap._conf_value(2500) == "2500"
+
+    def test_check_never_writes_and_a_dry_run_apply_writes_nothing(
+            self, linux_facts, empty_repo, tmp_path):
+        step, ctx = self._step_ctx(linux_facts, empty_repo, tmp_path,
+                                   gpu_sclk_max_mhz=2500)
+        ctx.probe = lambda argv, **kw: None
+        step.check(ctx)
+        assert not ctx.path(ctx.plan["paths"]["etc"]).exists()
+        ctx.dry_run = True
+        step.run(ctx)
+        assert not ctx.path(step.UNIT_PATH).exists()

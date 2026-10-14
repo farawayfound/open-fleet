@@ -1,0 +1,2235 @@
+{
+ "_note": "Real HuggingFace /api/models/<repo>/tree/main?recursive=true listings and the gguf block of /api/models/<repo>, captured 2026-09-20 for the Library's per-quant grouping tests. Sizes in bytes.",
+ "repos": {
+  "0bserverx/RVN-Qwen3.8-Flash-Next-Abliterated-Uncensored-GGUF": {
+   "info": {
+    "gguf": {
+     "total": 176943899520,
+     "architecture": "qwen4exp",
+     "context_length": 262144
+    },
+    "pipeline_tag": "text-generation",
+    "downloads": 10213,
+    "likes": 20,
+    "lastModified": "2026-09-01T02:57:19.000Z",
+    "tags": [
+     "gguf",
+     "llama.cpp",
+     "qwen3.8",
+     "qwen4",
+     "qwen4-exp",
+     "flash-next",
+     "mixture-of-experts",
+     "abliterated",
+     "uncensored",
+     "rvn",
+     "text-generation",
+     "endpoints_compatible",
+     "imatrix",
+     "conversational"
+    ]
+   },
+   "tree": [
+    {
+     "type": "file",
+     "path": ".gitattributes",
+     "size": 13791
+    },
+    {
+     "type": "file",
+     "path": "README.md",
+     "size": 8472
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_M-00001-of-00008.gguf",
+     "size": 2758411968
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_M-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_M-00003-of-00008.gguf",
+     "size": 10709964672
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_M-00004-of-00008.gguf",
+     "size": 10723958368
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_M-00005-of-00008.gguf",
+     "size": 10615857184
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_M-00006-of-00008.gguf",
+     "size": 10713065312
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_M-00007-of-00008.gguf",
+     "size": 10310887488
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_M-00008-of-00008.gguf",
+     "size": 4908535776
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_S-00001-of-00008.gguf",
+     "size": 2548056768
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_S-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_S-00003-of-00008.gguf",
+     "size": 10283156352
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_S-00004-of-00008.gguf",
+     "size": 10719780448
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_S-00005-of-00008.gguf",
+     "size": 10611679264
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_S-00006-of-00008.gguf",
+     "size": 10708887392
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_S-00007-of-00008.gguf",
+     "size": 10304620608
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_S-00008-of-00008.gguf",
+     "size": 4906446816
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_XS-00001-of-00008.gguf",
+     "size": 2548056768
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_XS-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_XS-00003-of-00008.gguf",
+     "size": 10004372352
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_XS-00004-of-00008.gguf",
+     "size": 10046858848
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_XS-00005-of-00008.gguf",
+     "size": 9899436064
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_XS-00006-of-00008.gguf",
+     "size": 10036119392
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_XS-00007-of-00008.gguf",
+     "size": 9787756608
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ3_XS-00008-of-00008.gguf",
+     "size": 4904910816
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_NL-00001-of-00008.gguf",
+     "size": 2872475008
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_NL-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_NL-00003-of-00008.gguf",
+     "size": 12258092352
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_NL-00004-of-00008.gguf",
+     "size": 12683312288
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_NL-00005-of-00008.gguf",
+     "size": 12687062944
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_NL-00006-of-00008.gguf",
+     "size": 12671543392
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_NL-00007-of-00008.gguf",
+     "size": 12282685248
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_NL-00008-of-00008.gguf",
+     "size": 5824141216
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_XS-00001-of-00008.gguf",
+     "size": 2797683328
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_XS-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_XS-00003-of-00008.gguf",
+     "size": 11798875712
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_XS-00004-of-00008.gguf",
+     "size": 12226007968
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_XS-00005-of-00008.gguf",
+     "size": 12203440544
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_XS-00006-of-00008.gguf",
+     "size": 12214445152
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_XS-00007-of-00008.gguf",
+     "size": 11822771008
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-IQ4_XS-00008-of-00008.gguf",
+     "size": 5609793696
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q2_K-00001-of-00008.gguf",
+     "size": 2305316320
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q2_K-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q2_K-00003-of-00008.gguf",
+     "size": 8796559552
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q2_K-00004-of-00008.gguf",
+     "size": 9239731488
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q2_K-00005-of-00008.gguf",
+     "size": 9046096544
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q2_K-00006-of-00008.gguf",
+     "size": 9229175392
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q2_K-00007-of-00008.gguf",
+     "size": 8817686848
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q2_K-00008-of-00008.gguf",
+     "size": 4212746016
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_L-00001-of-00008.gguf",
+     "size": 2870334880
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_L-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_L-00003-of-00008.gguf",
+     "size": 11582038912
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_L-00004-of-00008.gguf",
+     "size": 12173824608
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_L-00005-of-00008.gguf",
+     "size": 11908437024
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_L-00006-of-00008.gguf",
+     "size": 12161779552
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_L-00007-of-00008.gguf",
+     "size": 11608874048
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_L-00008-of-00008.gguf",
+     "size": 5550972896
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_M-00001-of-00008.gguf",
+     "size": 2870334880
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_M-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_M-00003-of-00008.gguf",
+     "size": 11184767872
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_M-00004-of-00008.gguf",
+     "size": 11673436768
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_M-00005-of-00008.gguf",
+     "size": 11460477984
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_M-00006-of-00008.gguf",
+     "size": 11661903712
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_M-00007-of-00008.gguf",
+     "size": 11155508288
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_M-00008-of-00008.gguf",
+     "size": 5330526176
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_S-00001-of-00008.gguf",
+     "size": 2541093280
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_S-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_S-00003-of-00008.gguf",
+     "size": 10258436992
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_S-00004-of-00008.gguf",
+     "size": 10698542688
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_S-00005-of-00008.gguf",
+     "size": 10590441504
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_S-00006-of-00008.gguf",
+     "size": 10687649632
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_S-00007-of-00008.gguf",
+     "size": 10279727168
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q3_K_S-00008-of-00008.gguf",
+     "size": 4899309536
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_0-00001-of-00008.gguf",
+     "size": 2865921120
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_0-00002-of-00008.gguf",
+     "size": 28800138432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_0-00003-of-00008.gguf",
+     "size": 12234827072
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_0-00004-of-00008.gguf",
+     "size": 12663323808
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_0-00005-of-00008.gguf",
+     "size": 12667074464
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_0-00006-of-00008.gguf",
+     "size": 12651554912
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_0-00007-of-00008.gguf",
+     "size": 12259256128
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_0-00008-of-00008.gguf",
+     "size": 5817423776
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_1-00001-of-00008.gguf",
+     "size": 3124560480
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_1-00002-of-00008.gguf",
+     "size": 32000153792
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_1-00003-of-00008.gguf",
+     "size": 13588624192
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_1-00004-of-00008.gguf",
+     "size": 14064189088
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_1-00005-of-00008.gguf",
+     "size": 14068351904
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_1-00006-of-00008.gguf",
+     "size": 14051700832
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_1-00007-of-00008.gguf",
+     "size": 13614837568
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_1-00008-of-00008.gguf",
+     "size": 6461035936
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_M-00001-of-00008.gguf",
+     "size": 3721601120
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_M-00002-of-00008.gguf",
+     "size": 35200169152
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_M-00003-of-00008.gguf",
+     "size": 14691280192
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_M-00004-of-00008.gguf",
+     "size": 14577799328
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_M-00005-of-00008.gguf",
+     "size": 14477101984
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_M-00006-of-00008.gguf",
+     "size": 14563618912
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_M-00007-of-00008.gguf",
+     "size": 14400629568
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_M-00008-of-00008.gguf",
+     "size": 7518523296
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_S-00001-of-00008.gguf",
+     "size": 3189402720
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_S-00002-of-00008.gguf",
+     "size": 35200169152
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_S-00003-of-00008.gguf",
+     "size": 13298005312
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_S-00004-of-00008.gguf",
+     "size": 13615848608
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_S-00005-of-00008.gguf",
+     "size": 13515151264
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_S-00006-of-00008.gguf",
+     "size": 13603465312
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_S-00007-of-00008.gguf",
+     "size": 13107332928
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q4_K_S-00008-of-00008.gguf",
+     "size": 6240540576
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_0-00001-of-00008.gguf",
+     "size": 3383199840
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_0-00002-of-00008.gguf",
+     "size": 35200169152
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_0-00003-of-00008.gguf",
+     "size": 14942421312
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_0-00004-of-00008.gguf",
+     "size": 15465054368
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_0-00005-of-00008.gguf",
+     "size": 15469629344
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_0-00006-of-00008.gguf",
+     "size": 15451846752
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_0-00007-of-00008.gguf",
+     "size": 14970419008
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_0-00008-of-00008.gguf",
+     "size": 7104648096
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_1-00001-of-00008.gguf",
+     "size": 3641839200
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_1-00002-of-00008.gguf",
+     "size": 38400184512
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_1-00003-of-00008.gguf",
+     "size": 16296218432
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_1-00004-of-00008.gguf",
+     "size": 16865919648
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_1-00005-of-00008.gguf",
+     "size": 16870906784
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_1-00006-of-00008.gguf",
+     "size": 16851992672
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_1-00007-of-00008.gguf",
+     "size": 16326000448
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_1-00008-of-00008.gguf",
+     "size": 7748260256
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_M-00001-of-00008.gguf",
+     "size": 4021177440
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_M-00002-of-00008.gguf",
+     "size": 38400184512
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_M-00003-of-00008.gguf",
+     "size": 16696656192
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_M-00004-of-00008.gguf",
+     "size": 16737727648
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_M-00005-of-00008.gguf",
+     "size": 16690078624
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_M-00006-of-00008.gguf",
+     "size": 16723091552
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_M-00007-of-00008.gguf",
+     "size": 16462043968
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_M-00008-of-00008.gguf",
+     "size": 8375708576
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_S-00001-of-00008.gguf",
+     "size": 3488979040
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_S-00002-of-00008.gguf",
+     "size": 38400184512
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_S-00003-of-00008.gguf",
+     "size": 15366152512
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_S-00004-of-00008.gguf",
+     "size": 15941316768
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_S-00005-of-00008.gguf",
+     "size": 15893667744
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_S-00006-of-00008.gguf",
+     "size": 15927801952
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_S-00007-of-00008.gguf",
+     "size": 15394457408
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q5_K_S-00008-of-00008.gguf",
+     "size": 7316206496
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q6_K-00001-of-00008.gguf",
+     "size": 4342702880
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q6_K-00002-of-00008.gguf",
+     "size": 54400261312
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q6_K-00003-of-00008.gguf",
+     "size": 19461198592
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q6_K-00004-of-00008.gguf",
+     "size": 20287409888
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q6_K-00005-of-00008.gguf",
+     "size": 20090492704
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q6_K-00006-of-00008.gguf",
+     "size": 20271483232
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q6_K-00007-of-00008.gguf",
+     "size": 19494178368
+    },
+    {
+     "type": "file",
+     "path": "RVN-Qwen3.8-Flash-Next-Q6_K-00008-of-00008.gguf",
+     "size": 9292112736
+    }
+   ]
+  },
+  "unsloth/Qwen3.8-27B-GGUF": {
+   "info": {
+    "gguf": {
+     "total": 27320697856,
+     "architecture": "qwen35",
+     "context_length": 262144
+    },
+    "pipeline_tag": null,
+    "downloads": 6941478,
+    "likes": 4437,
+    "lastModified": "2026-08-20T12:04:25.000Z",
+    "tags": [
+     "gguf",
+     "qwen3_5",
+     "unsloth",
+     "endpoints_compatible",
+     "imatrix",
+     "conversational"
+    ]
+   },
+   "tree": [
+    {
+     "type": "directory",
+     "path": "BF16",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "MTP",
+     "size": 0
+    },
+    {
+     "type": "file",
+     "path": ".gitattributes",
+     "size": 4175
+    },
+    {
+     "type": "file",
+     "path": "BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf",
+     "size": 49986159616
+    },
+    {
+     "type": "file",
+     "path": "BF16/Qwen3.8-27B-BF16-00002-of-00002.gguf",
+     "size": 4671576000
+    },
+    {
+     "type": "file",
+     "path": "MTP/mtp-Qwen3.8-27B-Q4_0.gguf",
+     "size": 1369590656
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-Q4_0.gguf",
+     "size": 16056478688
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-Q4_1.gguf",
+     "size": 17540705248
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-Q8_0.gguf",
+     "size": 29047086048
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-IQ1_M.gguf",
+     "size": 6729166848
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-IQ1_S.gguf",
+     "size": 6192222208
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-IQ2_S.gguf",
+     "size": 8371970048
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-IQ2_XXS.gguf",
+     "size": 7266070528
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-IQ3_S.gguf",
+     "size": 12040883104
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-IQ3_XXS.gguf",
+     "size": 10934860704
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-IQ4_XS.gguf",
+     "size": 14252845984
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q2_K_XL.gguf",
+     "size": 9828981664
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q3_K_XL.gguf",
+     "size": 13146393504
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q4_K_M.gguf",
+     "size": 16464440224
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q4_K_S.gguf",
+     "size": 15358213024
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+     "size": 17559178144
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q5_K_M.gguf",
+     "size": 19771509664
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q5_K_S.gguf",
+     "size": 18665753504
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q5_K_XL.gguf",
+     "size": 20876938144
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q6_K.gguf",
+     "size": 21983677344
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q6_K_L.gguf",
+     "size": 24193919904
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q6_K_M.gguf",
+     "size": 23088409504
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q6_K_XL.gguf",
+     "size": 25299061664
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q8_K_L.gguf",
+     "size": 28045695904
+    },
+    {
+     "type": "file",
+     "path": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+     "size": 31457991680
+    },
+    {
+     "type": "file",
+     "path": "README.md",
+     "size": 7455
+    },
+    {
+     "type": "file",
+     "path": "config.json",
+     "size": 3760
+    },
+    {
+     "type": "file",
+     "path": "imatrix_unsloth.gguf",
+     "size": 13642656
+    },
+    {
+     "type": "file",
+     "path": "mmproj-BF16.gguf",
+     "size": 931146432
+    },
+    {
+     "type": "file",
+     "path": "mmproj-F16.gguf",
+     "size": 927607488
+    }
+   ]
+  },
+  "unsloth/DeepSeek-V3-0324-GGUF": {
+   "info": {
+    "gguf": {
+     "total": 671026419200,
+     "architecture": "deepseek2",
+     "context_length": 163840
+    },
+    "pipeline_tag": "text-generation",
+    "downloads": 3264,
+    "likes": 200,
+    "lastModified": "2025-05-22T23:59:44.000Z",
+    "tags": [
+     "transformers",
+     "gguf",
+     "deepseek_v3",
+     "text-generation",
+     "deepseek",
+     "unsloth",
+     "custom_code",
+     "en",
+     "arxiv:2412.19437",
+     "endpoints_compatible",
+     "fp8",
+     "conversational"
+    ]
+   },
+   "tree": [
+    {
+     "type": "directory",
+     "path": "BF16",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q2_K",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q3_K_M",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q4_K_M",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q5_K_M",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q6_K",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q8_0",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-IQ1_M",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-IQ1_S",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-IQ2_XXS",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-Q2_K_XL",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-Q3_K_XL",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-Q4_K_XL",
+     "size": 0
+    },
+    {
+     "type": "file",
+     "path": ".gitattributes",
+     "size": 13348
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00001-of-00030.gguf",
+     "size": 43879928448
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00002-of-00030.gguf",
+     "size": 46036553952
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00003-of-00030.gguf",
+     "size": 46036553952
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00004-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00005-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00006-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00007-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00008-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00009-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00010-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00011-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00012-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00013-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00014-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00015-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00016-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00017-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00018-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00019-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00020-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00021-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00022-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00023-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00024-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00025-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00026-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00027-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00028-of-00030.gguf",
+     "size": 46036553984
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00029-of-00030.gguf",
+     "size": 47889912128
+    },
+    {
+     "type": "file",
+     "path": "BF16/DeepSeek-V3-0324-BF16-00030-of-00030.gguf",
+     "size": 7516250400
+    },
+    {
+     "type": "file",
+     "path": "Q2_K/DeepSeek-V3-0324-Q2_K-00001-of-00005.gguf",
+     "size": 49369575488
+    },
+    {
+     "type": "file",
+     "path": "Q2_K/DeepSeek-V3-0324-Q2_K-00002-of-00005.gguf",
+     "size": 48511628064
+    },
+    {
+     "type": "file",
+     "path": "Q2_K/DeepSeek-V3-0324-Q2_K-00003-of-00005.gguf",
+     "size": 48821440768
+    },
+    {
+     "type": "file",
+     "path": "Q2_K/DeepSeek-V3-0324-Q2_K-00004-of-00005.gguf",
+     "size": 48887431840
+    },
+    {
+     "type": "file",
+     "path": "Q2_K/DeepSeek-V3-0324-Q2_K-00005-of-00005.gguf",
+     "size": 48438268160
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/DeepSeek-V3-0324-Q3_K_M-00001-of-00007.gguf",
+     "size": 49654170720
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/DeepSeek-V3-0324-Q3_K_M-00002-of-00007.gguf",
+     "size": 49210367200
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/DeepSeek-V3-0324-Q3_K_M-00003-of-00007.gguf",
+     "size": 49210367200
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/DeepSeek-V3-0324-Q3_K_M-00004-of-00007.gguf",
+     "size": 49210367200
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/DeepSeek-V3-0324-Q3_K_M-00005-of-00007.gguf",
+     "size": 49210367200
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/DeepSeek-V3-0324-Q3_K_M-00006-of-00007.gguf",
+     "size": 49210367200
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/DeepSeek-V3-0324-Q3_K_M-00007-of-00007.gguf",
+     "size": 23492389408
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00001-of-00009.gguf",
+     "size": 48339780320
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00002-of-00009.gguf",
+     "size": 49429396320
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00003-of-00009.gguf",
+     "size": 49527312640
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00004-of-00009.gguf",
+     "size": 48272509536
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00005-of-00009.gguf",
+     "size": 49422027488
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00006-of-00009.gguf",
+     "size": 48272509536
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00007-of-00009.gguf",
+     "size": 49429396320
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00008-of-00009.gguf",
+     "size": 46938773696
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00009-of-00009.gguf",
+     "size": 14798482144
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00001-of-00010.gguf",
+     "size": 49573632960
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00002-of-00010.gguf",
+     "size": 48506507776
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00003-of-00010.gguf",
+     "size": 48506507808
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00004-of-00010.gguf",
+     "size": 48506507808
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00005-of-00010.gguf",
+     "size": 48506507808
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00006-of-00010.gguf",
+     "size": 48506507808
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00007-of-00010.gguf",
+     "size": 48506507808
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00008-of-00010.gguf",
+     "size": 48506507808
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00009-of-00010.gguf",
+     "size": 49999602080
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/DeepSeek-V3-0324-Q5_K_M-00010-of-00010.gguf",
+     "size": 36277768864
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00001-of-00012.gguf",
+     "size": 47094115200
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00002-of-00012.gguf",
+     "size": 47227297696
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00003-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00004-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00005-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00006-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00007-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00008-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00009-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00010-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00011-of-00012.gguf",
+     "size": 47227297760
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/DeepSeek-V3-0324-Q6_K-00012-of-00012.gguf",
+     "size": 31431234528
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00001-of-00015.gguf",
+     "size": 47784555232
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00002-of-00015.gguf",
+     "size": 48927727968
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00003-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00004-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00005-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00006-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00007-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00008-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00009-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00010-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00011-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00012-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00013-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00014-of-00015.gguf",
+     "size": 48927728000
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/DeepSeek-V3-0324-Q8_0-00015-of-00015.gguf",
+     "size": 29441495520
+    },
+    {
+     "type": "file",
+     "path": "README.md",
+     "size": 17040
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ1_M/DeepSeek-V3-0324-UD-IQ1_M-00001-of-00004.gguf",
+     "size": 49478640128
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ1_M/DeepSeek-V3-0324-UD-IQ1_M-00002-of-00004.gguf",
+     "size": 49511837184
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ1_M/DeepSeek-V3-0324-UD-IQ1_M-00003-of-00004.gguf",
+     "size": 49356290240
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ1_M/DeepSeek-V3-0324-UD-IQ1_M-00004-of-00004.gguf",
+     "size": 48109316576
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ1_S/DeepSeek-V3-0324-UD-IQ1_S-00001-of-00004.gguf",
+     "size": 48618624960
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ1_S/DeepSeek-V3-0324-UD-IQ1_S-00002-of-00004.gguf",
+     "size": 48496275072
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ1_S/DeepSeek-V3-0324-UD-IQ1_S-00003-of-00004.gguf",
+     "size": 48496275072
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ1_S/DeepSeek-V3-0324-UD-IQ1_S-00004-of-00004.gguf",
+     "size": 40627584480
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ2_XXS/DeepSeek-V3-0324-UD-IQ2_XXS-00001-of-00005.gguf",
+     "size": 48432051424
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ2_XXS/DeepSeek-V3-0324-UD-IQ2_XXS-00002-of-00005.gguf",
+     "size": 49763861120
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ2_XXS/DeepSeek-V3-0324-UD-IQ2_XXS-00003-of-00005.gguf",
+     "size": 49123357440
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ2_XXS/DeepSeek-V3-0324-UD-IQ2_XXS-00004-of-00005.gguf",
+     "size": 49226663584
+    },
+    {
+     "type": "file",
+     "path": "UD-IQ2_XXS/DeepSeek-V3-0324-UD-IQ2_XXS-00005-of-00005.gguf",
+     "size": 22106407424
+    },
+    {
+     "type": "file",
+     "path": "UD-Q2_K_XL/DeepSeek-V3-0324-UD-Q2_K_XL-00001-of-00006.gguf",
+     "size": 49004772768
+    },
+    {
+     "type": "file",
+     "path": "UD-Q2_K_XL/DeepSeek-V3-0324-UD-Q2_K_XL-00002-of-00006.gguf",
+     "size": 49379854080
+    },
+    {
+     "type": "file",
+     "path": "UD-Q2_K_XL/DeepSeek-V3-0324-UD-Q2_K_XL-00003-of-00006.gguf",
+     "size": 49483160224
+    },
+    {
+     "type": "file",
+     "path": "UD-Q2_K_XL/DeepSeek-V3-0324-UD-Q2_K_XL-00004-of-00006.gguf",
+     "size": 49105062688
+    },
+    {
+     "type": "file",
+     "path": "UD-Q2_K_XL/DeepSeek-V3-0324-UD-Q2_K_XL-00005-of-00006.gguf",
+     "size": 49379854080
+    },
+    {
+     "type": "file",
+     "path": "UD-Q2_K_XL/DeepSeek-V3-0324-UD-Q2_K_XL-00006-of-00006.gguf",
+     "size": 1241383168
+    },
+    {
+     "type": "file",
+     "path": "UD-Q3_K_XL/DeepSeek-V3-0324-UD-Q3_K_XL-00001-of-00007.gguf",
+     "size": 48547650400
+    },
+    {
+     "type": "file",
+     "path": "UD-Q3_K_XL/DeepSeek-V3-0324-UD-Q3_K_XL-00002-of-00007.gguf",
+     "size": 49411303648
+    },
+    {
+     "type": "file",
+     "path": "UD-Q3_K_XL/DeepSeek-V3-0324-UD-Q3_K_XL-00003-of-00007.gguf",
+     "size": 49411303648
+    },
+    {
+     "type": "file",
+     "path": "UD-Q3_K_XL/DeepSeek-V3-0324-UD-Q3_K_XL-00004-of-00007.gguf",
+     "size": 49411303648
+    },
+    {
+     "type": "file",
+     "path": "UD-Q3_K_XL/DeepSeek-V3-0324-UD-Q3_K_XL-00005-of-00007.gguf",
+     "size": 49411303648
+    },
+    {
+     "type": "file",
+     "path": "UD-Q3_K_XL/DeepSeek-V3-0324-UD-Q3_K_XL-00006-of-00007.gguf",
+     "size": 49411303648
+    },
+    {
+     "type": "file",
+     "path": "UD-Q3_K_XL/DeepSeek-V3-0324-UD-Q3_K_XL-00007-of-00007.gguf",
+     "size": 25214077728
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00001-of-00009.gguf",
+     "size": 48401247968
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00002-of-00009.gguf",
+     "size": 49486048608
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00003-of-00009.gguf",
+     "size": 49589354752
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00004-of-00009.gguf",
+     "size": 48325377120
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00005-of-00009.gguf",
+     "size": 49482464480
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00006-of-00009.gguf",
+     "size": 48325377120
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00007-of-00009.gguf",
+     "size": 49486048608
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00008-of-00009.gguf",
+     "size": 46976502464
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/DeepSeek-V3-0324-UD-Q4_K_XL-00009-of-00009.gguf",
+     "size": 14803871968
+    },
+    {
+     "type": "file",
+     "path": "config.json",
+     "size": 1729
+    }
+   ]
+  },
+  "bartowski/Qwen_Qwen3-30B-A3B-GGUF": {
+   "info": {
+    "gguf": {
+     "total": 30532122624,
+     "architecture": "qwen3moe",
+     "context_length": 32768
+    },
+    "pipeline_tag": "text-generation",
+    "downloads": 15506,
+    "likes": 60,
+    "lastModified": "2025-04-29T06:24:05.000Z",
+    "tags": [
+     "gguf",
+     "text-generation",
+     "endpoints_compatible",
+     "imatrix",
+     "conversational"
+    ]
+   },
+   "tree": [
+    {
+     "type": "directory",
+     "path": "Qwen_Qwen3-30B-A3B-bf16",
+     "size": 0
+    },
+    {
+     "type": "file",
+     "path": ".gitattributes",
+     "size": 3522
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ2_M.gguf",
+     "size": 10430210720
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ2_S.gguf",
+     "size": 9222251168
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ2_XS.gguf",
+     "size": 9140316832
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ2_XXS.gguf",
+     "size": 8146266784
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ3_M.gguf",
+     "size": 14076541600
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ3_XS.gguf",
+     "size": 12736461472
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ3_XXS.gguf",
+     "size": 12216984224
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ4_NL.gguf",
+     "size": 17386279584
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-IQ4_XS.gguf",
+     "size": 16458003104
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q2_K.gguf",
+     "size": 10908648096
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q2_K_L.gguf",
+     "size": 11212520096
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q3_K_L.gguf",
+     "size": 14583003808
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q3_K_M.gguf",
+     "size": 14076803744
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q3_K_S.gguf",
+     "size": 13428128416
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q3_K_XL.gguf",
+     "size": 14855273120
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q4_0.gguf",
+     "size": 17631646368
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q4_1.gguf",
+     "size": 19214520992
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q4_K_L.gguf",
+     "size": 18863127200
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q4_K_M.gguf",
+     "size": 18632184480
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q4_K_S.gguf",
+     "size": 17984492192
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q5_K_L.gguf",
+     "size": 21936503456
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q5_K_M.gguf",
+     "size": 21744456352
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q5_K_S.gguf",
+     "size": 21099385504
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q6_K.gguf",
+     "size": 25104722592
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q6_K_L.gguf",
+     "size": 25255443104
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-Q8_0.gguf",
+     "size": 32483932832
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-bf16/Qwen_Qwen3-30B-A3B-bf16-00001-of-00002.gguf",
+     "size": 39719749984
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B-bf16/Qwen_Qwen3-30B-A3B-bf16-00002-of-00002.gguf",
+     "size": 21376053504
+    },
+    {
+     "type": "file",
+     "path": "Qwen_Qwen3-30B-A3B.imatrix",
+     "size": 121910657
+    },
+    {
+     "type": "file",
+     "path": "README.md",
+     "size": 14064
+    }
+   ]
+  },
+  "ggml-org/gemma-3-27b-it-GGUF": {
+   "info": {
+    "gguf": {
+     "total": 27009002240,
+     "architecture": "gemma3",
+     "context_length": 131072
+    },
+    "pipeline_tag": "image-text-to-text",
+    "downloads": 5929,
+    "likes": 24,
+    "lastModified": "2025-05-21T15:38:17.000Z",
+    "tags": [
+     "gguf",
+     "image-text-to-text",
+     "arxiv:1905.07830",
+     "arxiv:1905.10044",
+     "arxiv:1911.11641",
+     "arxiv:1904.09728",
+     "arxiv:1705.03551",
+     "arxiv:1911.01547",
+     "arxiv:1907.10641",
+     "arxiv:1903.00161",
+     "arxiv:2009.03300",
+     "arxiv:2304.06364",
+     "arxiv:2103.03874",
+     "arxiv:2110.14168",
+     "arxiv:2311.12022",
+     "arxiv:2108.07732",
+     "arxiv:2107.03374",
+     "arxiv:2210.03057",
+     "arxiv:2106.03193",
+     "arxiv:1910.11856",
+     "arxiv:2502.12404",
+     "arxiv:2502.21228",
+     "arxiv:2404.16816",
+     "arxiv:2104.12756",
+     "arxiv:2311.16502",
+     "arxiv:2203.10244",
+     "arxiv:2404.12390",
+     "arxiv:1810.12440",
+     "arxiv:1908.02660",
+     "arxiv:2312.11805",
+     "endpoints_compatible",
+     "conversational"
+    ]
+   },
+   "tree": [
+    {
+     "type": "file",
+     "path": ".gitattributes",
+     "size": 2070
+    },
+    {
+     "type": "file",
+     "path": "README.md",
+     "size": 21857
+    },
+    {
+     "type": "file",
+     "path": "gemma-3-27b-it-Q4_K_M.gguf",
+     "size": 16546404736
+    },
+    {
+     "type": "file",
+     "path": "gemma-3-27b-it-Q8_0.gguf",
+     "size": 28707604864
+    },
+    {
+     "type": "file",
+     "path": "gemma-3-27b-it-f16-00001-of-00002.gguf",
+     "size": 39987970624
+    },
+    {
+     "type": "file",
+     "path": "gemma-3-27b-it-f16-00002-of-00002.gguf",
+     "size": 14039304192
+    },
+    {
+     "type": "file",
+     "path": "mmproj-model-f16.gguf",
+     "size": 857739168
+    }
+   ]
+  },
+  "unsloth/gpt-oss-120b-GGUF": {
+   "info": {
+    "gguf": {
+     "total": 116829156672,
+     "architecture": "gpt-oss",
+     "context_length": 131072
+    },
+    "pipeline_tag": "text-generation",
+    "downloads": 89567,
+    "likes": 294,
+    "lastModified": "2025-08-25T02:27:41.000Z",
+    "tags": [
+     "transformers",
+     "gguf",
+     "gpt_oss",
+     "text-generation",
+     "openai",
+     "unsloth",
+     "endpoints_compatible",
+     "mxfp4",
+     "conversational"
+    ]
+   },
+   "tree": [
+    {
+     "type": "directory",
+     "path": "Q2_K",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q2_K_L",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q3_K_M",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q3_K_S",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q4_0",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q4_1",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q4_K_M",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q4_K_S",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q5_K_M",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q5_K_S",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q6_K",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "Q8_0",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-Q4_K_XL",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-Q6_K_XL",
+     "size": 0
+    },
+    {
+     "type": "directory",
+     "path": "UD-Q8_K_XL",
+     "size": 0
+    },
+    {
+     "type": "file",
+     "path": ".gitattributes",
+     "size": 4354
+    },
+    {
+     "type": "file",
+     "path": "Q2_K/gpt-oss-120b-Q2_K-00001-of-00002.gguf",
+     "size": 49458334592
+    },
+    {
+     "type": "file",
+     "path": "Q2_K/gpt-oss-120b-Q2_K-00002-of-00002.gguf",
+     "size": 13111922400
+    },
+    {
+     "type": "file",
+     "path": "Q2_K_L/gpt-oss-120b-Q2_K_L-00001-of-00002.gguf",
+     "size": 49747901312
+    },
+    {
+     "type": "file",
+     "path": "Q2_K_L/gpt-oss-120b-Q2_K_L-00002-of-00002.gguf",
+     "size": 13111922400
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/gpt-oss-120b-Q3_K_M-00001-of-00002.gguf",
+     "size": 49503953792
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_M/gpt-oss-120b-Q3_K_M-00002-of-00002.gguf",
+     "size": 13122889440
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_S/gpt-oss-120b-Q3_K_S-00001-of-00002.gguf",
+     "size": 49452989312
+    },
+    {
+     "type": "file",
+     "path": "Q3_K_S/gpt-oss-120b-Q3_K_S-00002-of-00002.gguf",
+     "size": 13110632160
+    },
+    {
+     "type": "file",
+     "path": "Q4_0/gpt-oss-120b-Q4_0-00001-of-00002.gguf",
+     "size": 49498424192
+    },
+    {
+     "type": "file",
+     "path": "Q4_0/gpt-oss-120b-Q4_0-00002-of-00002.gguf",
+     "size": 13121599200
+    },
+    {
+     "type": "file",
+     "path": "Q4_1/gpt-oss-120b-Q4_1-00001-of-00002.gguf",
+     "size": 49582727552
+    },
+    {
+     "type": "file",
+     "path": "Q4_1/gpt-oss-120b-Q4_1-00002-of-00002.gguf",
+     "size": 13133211360
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
+     "size": 49630904192
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_M/gpt-oss-120b-Q4_K_M-00002-of-00002.gguf",
+     "size": 13137819360
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_S/gpt-oss-120b-Q4_K_S-00001-of-00002.gguf",
+     "size": 49624637312
+    },
+    {
+     "type": "file",
+     "path": "Q4_K_S/gpt-oss-120b-Q4_K_S-00002-of-00002.gguf",
+     "size": 13134501600
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/gpt-oss-120b-Q5_K_M-00001-of-00002.gguf",
+     "size": 49735482752
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_M/gpt-oss-120b-Q5_K_M-00002-of-00002.gguf",
+     "size": 13154039520
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_S/gpt-oss-120b-Q5_K_S-00001-of-00002.gguf",
+     "size": 49729953152
+    },
+    {
+     "type": "file",
+     "path": "Q5_K_S/gpt-oss-120b-Q5_K_S-00002-of-00002.gguf",
+     "size": 13151274720
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/gpt-oss-120b-Q6_K-00001-of-00002.gguf",
+     "size": 49524505312
+    },
+    {
+     "type": "file",
+     "path": "Q6_K/gpt-oss-120b-Q6_K-00002-of-00002.gguf",
+     "size": 13759991648
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/gpt-oss-120b-Q8_0-00001-of-00002.gguf",
+     "size": 49607357152
+    },
+    {
+     "type": "file",
+     "path": "Q8_0/gpt-oss-120b-Q8_0-00002-of-00002.gguf",
+     "size": 13779990368
+    },
+    {
+     "type": "file",
+     "path": "README.md",
+     "size": 8644
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/gpt-oss-120b-UD-Q4_K_XL-00001-of-00002.gguf",
+     "size": 49866326912
+    },
+    {
+     "type": "file",
+     "path": "UD-Q4_K_XL/gpt-oss-120b-UD-Q4_K_XL-00002-of-00002.gguf",
+     "size": 13149984480
+    },
+    {
+     "type": "file",
+     "path": "UD-Q6_K_XL/gpt-oss-120b-UD-Q6_K_XL-00001-of-00002.gguf",
+     "size": 49524505312
+    },
+    {
+     "type": "file",
+     "path": "UD-Q6_K_XL/gpt-oss-120b-UD-Q6_K_XL-00002-of-00002.gguf",
+     "size": 13759991648
+    },
+    {
+     "type": "file",
+     "path": "UD-Q8_K_XL/gpt-oss-120b-UD-Q8_K_XL-00001-of-00002.gguf",
+     "size": 49532512480
+    },
+    {
+     "type": "file",
+     "path": "UD-Q8_K_XL/gpt-oss-120b-UD-Q8_K_XL-00002-of-00002.gguf",
+     "size": 14940710240
+    },
+    {
+     "type": "file",
+     "path": "config.json",
+     "size": 2114
+    },
+    {
+     "type": "file",
+     "path": "gpt-oss-120b-F16.gguf",
+     "size": 65369017728
+    },
+    {
+     "type": "file",
+     "path": "params",
+     "size": 149
+    },
+    {
+     "type": "file",
+     "path": "template",
+     "size": 7355
+    }
+   ]
+  }
+ }
+}
