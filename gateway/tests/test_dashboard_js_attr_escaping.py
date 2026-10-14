@@ -60,9 +60,23 @@ def test_jsarg_is_actually_used_at_former_vulnerable_sites():
     # its dynamic argument through jsArg(...) rather than a bare esc('...').
     for needle in (
         "unloadOne(${jsArg(m.id)})",
-        "deletePubModel(${jsArg(m.public_id)})",
-        "delLocal(${jsArg(l.path)})",
+        # deletePubModel() left with the Public tab (2026-09-17) -- the
+        # catalogue row it deleted is rendered by the CareerOps admin's own
+        # Public page now, which escapes through React rather than by hand.
+        # delLocal() gained a `shards` argument for the On-disk multi-shard
+        # delete (2026-09-20); the path is still the one HF/LM-Studio-derived
+        # string in the call, so it is still the one that must route through
+        # jsArg(...).
+        "delLocal(${jsArg(l.path)},${l.shards > 1 ? \"true\" : \"false\"})",
         "cfgDetail(${jsArg(name)})",
+        # Library per-quant package downloads (2026-09-20): repo, label and
+        # the ollama tag are all HF-repo-controlled strings that reach these
+        # onclick attributes verbatim.
+        "copyOllamaPull(${jsArg(q.ollama_tag)})",
+        "cancelPackage(${jsArg(repo)},${jsArg(q.label)})",
+        "cancelPackage(${jsArg(repo)},${jsArg(pkg)})",
+        "addQuantModel(${jsArg(q.suggested_id)},${jsArg(q.main_dest)},${jsArg(mmprojDest)})",
+        "addQuantModel(${jsArg(id)},${jsArg(mainDest)},${jsArg(mmprojDest)})",
     ):
         assert needle in html, f"expected {needle!r} in index.html"
 

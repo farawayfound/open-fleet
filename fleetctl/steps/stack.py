@@ -161,6 +161,13 @@ class GatewayFiles(Step):
             if ctx.copy(helper, shapes.join(ctx.family, ctx.plan["paths"]["bin"],
                                             "llmstack-gpuconf"), mode=0o755):
                 n += 1
+        # powercap is Linux-only: it reads amdgpu/cpufreq sysfs, neither of
+        # which exists on darwin or windows.
+        powercap = ctx.repo / "gateway" / "bin" / "llmstack-powercap"
+        if powercap.is_file() and ctx.family == "linux":
+            if ctx.copy(powercap, shapes.join(ctx.family, ctx.plan["paths"]["bin"],
+                                              "llmstack-powercap"), mode=0o755):
+                n += 1
         ctx.did(f"installed {n} file(s)")
 
 
@@ -244,6 +251,8 @@ class EnvFile(Step):
             vals["LLMSTACK_SWAP_CONFIG"] = p["swap_config"]
         if e["models_from_upstream"]:
             vals["LLMSTACK_MODELS_FROM_UPSTREAM"] = 1
+        if n["upstream_key_file"]:
+            vals["LLMSTACK_UPSTREAM_KEY_FILE"] = n["upstream_key_file"]
         if s["context_budget_gib"]:
             vals["LLMSTACK_CONTEXT_BUDGET_GIB"] = s["context_budget_gib"]
         if s["vram_headroom"]:
@@ -275,6 +284,10 @@ class EnvFile(Step):
             "An outside watchdog owns the answer to 'may the fleet use this\n"
             "machine right now'; the gateway stops advertising its models\n"
             "whenever the answer is no."),
+        "LLMSTACK_UPSTREAM_KEY_FILE": (
+            "The file holding the key this box's engine wants on /v1. The\n"
+            "gateway reads it at start-up and sends it to that engine alone;\n"
+            "rotating the key is writing this file and restarting."),
     }
 
     def foreign(self, ctx, current: str | None) -> dict[str, str]:
