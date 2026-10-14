@@ -22,7 +22,7 @@ resolved to a machine that was no longer there.
 
 `deploy-gateway.sh` was fixed for that. The hub's peer list was not: it was
 still addressing seven of thirteen peers by bare name or by a LAN lease when
-this module was written, including `gpu-laptop-1` at `192.168.1.144` -- an
+this module was written, including `gpu-laptop-1` at a `192.168.0.x` lease -- an
 address from the very lease pool that cut moved. They kept working only
 because the hub happens to share a LAN with them.
 

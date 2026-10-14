@@ -8,6 +8,8 @@ would have caught it.
 """
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -129,9 +131,17 @@ class TestAScheduledTaskThatAnswersIsLeftAlone:
         assert set(tasks) == {"llm-gateway", "llama-swap"}
 
         def probe(argv, timeout=60):
-            # llm-gateway answers /Query; llama-swap does not exist yet.
-            rc = 0 if "llm-gateway" in argv else 1
-            return SimpleNamespace(returncode=rc, stdout="", stderr="")
+            # llm-gateway answers /Query, keepalive and all; llama-swap does
+            # not exist yet.
+            if "llm-gateway" in argv:
+                return SimpleNamespace(
+                    returncode=0, stderr="",
+                    stdout="<Task><Triggers><BootTrigger/><TimeTrigger>"
+                           "<Repetition><Interval>PT5M</Interval></Repetition>"
+                           "</TimeTrigger></Triggers><Settings>"
+                           "<MultipleInstancesPolicy>IgnoreNew"
+                           "</MultipleInstancesPolicy></Settings></Task>")
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
 
         calls: list[list[str]] = []
         ctx.probe = probe
@@ -191,6 +201,248 @@ class TestAGroupChangeDoesNotChownTheModels:
         step("service-account").apply(ctx)
         assert calls[0][0] == "useradd"
         assert any(c[0] == "chown" for c in calls)
+
+
+# --------------------------------------------------------------------------
+class TestTheServiceAccountDoesNotOwnWhatRootExecutes:
+    """prefix, bin and lib are root's. The gateway account must never own them.
+
+    /etc/sudoers.d/llmstack-fleet gives llmstack NOPASSWD sudo on
+    <bin>/llmstack-gpuconf, a root systemd oneshot runs <bin>/llmstack-
+    powercap (gpu-laptop-1-power.sh on gpu-laptop-1), and <prefix>/lib is on the
+    system loader path. A directory's owner can replace its entries, so an
+    account that owned them turned code execution in the internet-facing
+    gateway into root. It did, on gpu-laptop-1 and apu-box-1, until it was fixed by
+    hand on 2026-10-12 -- and the repo would have put it back: `chown -R
+    llmstack:llmstack <prefix> <bin>` here, the same in two bootstrap
+    scripts, and `install -d -o llmstack ... /opt/llmstack/bin` in the voice
+    installer.
+    """
+
+    @staticmethod
+    def _account(ctx, *, exists: bool):
+        ctx.plan["engine"]["kind"] = "none"          # no GPU groups in play
+        ctx.probe = lambda argv, timeout=60: SimpleNamespace(
+            returncode=0 if exists else 1, stdout="1001", stderr="")
+        calls: list[list[str]] = []
+        ctx.sudo = lambda argv, **kw: calls.append([str(a) for a in argv])
+        return calls
+
+    def test_a_new_account_is_not_handed_the_prefix_or_bin(
+            self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        calls = self._account(ctx, exists=False)
+        step("service-account").apply(ctx)
+        p = ctx.plan["paths"]
+        handed = [c[-1] for c in calls
+                  if c[0] == "chown" and c[-2] == "llmstack:llmstack"]
+        # Exactly what the account writes, and nothing it did not before.
+        assert sorted(handed) == sorted([p["state"], p["models"], p["gateway"],
+                                         p["venv"]])
+        for forbidden in (p["prefix"], p["bin"], p["prefix"] + "/lib"):
+            assert not any("llmstack:llmstack" in c and forbidden in c
+                           for c in calls), (forbidden, calls)
+
+    def test_prefix_and_bin_are_made_root_owned_before_anything_else(
+            self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        calls = self._account(ctx, exists=False)
+        step("service-account").apply(ctx)
+        p = ctx.plan["paths"]
+        mkroot = ["install", "-d", "-o", "root", "-g", "root", "-m", "0755",
+                  p["prefix"], p["bin"]]
+        assert mkroot in calls                       # created root-owned if missing
+        assert ["chown", "root:root", p["prefix"]] in calls   # not recursive: gateway/, venv/
+        assert ["chown", "-R", "root:root", p["bin"]] in calls
+        first_grant = next(i for i, c in enumerate(calls)
+                           if "llmstack:llmstack" in c)
+        assert calls.index(mkroot) < first_grant
+        assert calls.index(["chown", "-R", "root:root", p["bin"]]) < first_grant
+
+    def test_lib_is_made_root_owned_only_when_it_is_there(
+            self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        calls = self._account(ctx, exists=False)
+        lib = ctx.plan["paths"]["prefix"] + "/lib"
+        step("service-account").apply(ctx)
+        assert ["chown", "-R", "root:root", lib] not in calls
+        ctx.path(lib).mkdir(parents=True)
+        calls.clear()
+        step("service-account").apply(ctx)
+        assert ["chown", "-R", "root:root", lib] in calls
+
+    def test_an_existing_account_with_nothing_handed_over_is_left_alone(
+            self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        calls = self._account(ctx, exists=True)
+        ctx.owned_by = lambda user, p, **kw: []
+        assert step("service-account").check(ctx).state == "ok"
+        step("service-account").apply(ctx)
+        assert calls == []
+
+    def test_verify_flags_a_prefix_or_bin_the_account_owns(
+            self, linux_facts, empty_repo, tmp_path):
+        pwd = pytest.importorskip("pwd")
+        me = pwd.getpwuid(os.getuid()).pw_name
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        ctx.plan["service"]["user"] = me
+        self._account(ctx, exists=True)
+        # Nothing on disk yet: nothing to flag (the directories step says
+        # "missing"; this one is about who OWNS what is there).
+        assert step("service-account").check(ctx).state == "ok"
+        # Everything the test creates is owned by `me`, which is now the
+        # "service account" -- exactly the shape the old script left behind.
+        binp = ctx.path(ctx.plan["paths"]["bin"])
+        binp.mkdir(parents=True)
+        (binp / "llmstack-gpuconf").write_text("#!/bin/sh\n", encoding="utf-8")
+        result = step("service-account").check(ctx)
+        assert result.state == "drift"
+        assert "llmstack-gpuconf" in result.detail
+        assert "root executes from" in result.detail
+        assert any("chown -R root:root" in line for line in result.plan)
+
+    def test_an_existing_account_that_was_handed_the_prefix_is_repaired(
+            self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        calls = self._account(ctx, exists=True)
+        p = ctx.plan["paths"]
+        ctx.owned_by = lambda user, path, **kw: [path] if path == p["prefix"] else []
+        assert step("service-account").check(ctx).state == "drift"
+        step("service-account").apply(ctx)
+        assert ["chown", "root:root", p["prefix"]] in calls
+        assert ["chown", "-R", "root:root", p["bin"]] in calls
+        # Repairing is taking back, never giving: no chown to the account.
+        assert not any("llmstack:llmstack" in c for c in calls)
+
+
+class TestWhoOwnsWhat:
+    """Ctx.owned_by -- the probe the check above rests on."""
+
+    @pytest.fixture
+    def me(self):
+        pwd = pytest.importorskip("pwd")
+        return pwd.getpwuid(os.getuid()).pw_name
+
+    def _ctx(self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        top = ctx.path("/opt/llmstack")
+        (top / "bin" / "sub").mkdir(parents=True)
+        (top / "gateway").mkdir()
+        (top / "bin" / "llama-server").write_text("x", encoding="utf-8")
+        (top / "bin" / "sub" / "helper").write_text("x", encoding="utf-8")
+        (top / "gateway" / "app.py").write_text("x", encoding="utf-8")
+        return ctx
+
+    def test_the_top_alone(self, linux_facts, empty_repo, tmp_path, me):
+        ctx = self._ctx(linux_facts, empty_repo, tmp_path)
+        assert ctx.owned_by(me, "/opt/llmstack") == ["/opt/llmstack"]
+
+    def test_recursion_names_what_is_inside_in_plan_space(
+            self, linux_facts, empty_repo, tmp_path, me):
+        ctx = self._ctx(linux_facts, empty_repo, tmp_path)
+        got = ctx.owned_by(me, "/opt/llmstack/bin", recursive=True)
+        assert got[0] == "/opt/llmstack/bin"
+        assert set(got) == {"/opt/llmstack/bin", "/opt/llmstack/bin/sub",
+                            "/opt/llmstack/bin/llama-server",
+                            "/opt/llmstack/bin/sub/helper"}
+        assert not any(str(tmp_path) in g for g in got)
+
+    def test_an_account_that_does_not_exist_owns_nothing(
+            self, linux_facts, empty_repo, tmp_path):
+        ctx = self._ctx(linux_facts, empty_repo, tmp_path)
+        assert ctx.owned_by("no-such-account-xyz", "/opt/llmstack",
+                            recursive=True) == []
+
+    def test_an_absent_path_is_nothing_not_an_error(
+            self, linux_facts, empty_repo, tmp_path, me):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        assert ctx.owned_by(me, "/opt/llmstack/bin", recursive=True) == []
+
+    def test_windows_has_no_uids_to_compare(self, windows_facts, empty_repo,
+                                            tmp_path):
+        ctx = ctx_for(windows_facts, empty_repo, tmp_path)
+        assert ctx.owned_by("SYSTEM", ctx.plan["paths"]["bin"],
+                            recursive=True) == []
+
+
+class TestNoScriptHandsTheServiceAccountWhatRootExecutes:
+    """The same rule, read off the provisioning scripts themselves.
+
+    fleetctl is one way onto a box; the bootstraps and installers are the
+    others, and two of them re-created the exposure on every run. A line that
+    gives the service account (the literal `llmstack` or $LLM_USER) ownership
+    of a prefix, its bin/ or its lib/ is what this finds. gateway/, venv/,
+    voice/ and research/ are fine -- nothing root executes lives in them.
+    """
+
+    SERVICE = r'(?:"?\$\{?LLM_USER\}?"?|llmstack)'
+    OWNS = re.compile(
+        rf'\bchown\b(?:\s+-\S+)*\s+{SERVICE}(?::{SERVICE})?\s+(?P<chown>.+)'
+        rf'|\binstall\b(?=.*\s-d\b)(?=.*\s-[og]\s+{SERVICE}(?=\s))(?P<install>.+)')
+    # $PREFIX / /opt/llmstack, bare or with /bin or /lib -- and not /bin-rocm,
+    # /gateway, /voice or anything else under them.
+    TARGET = re.compile(
+        r'(?:\$\{?PREFIX\}?|/opt/llmstack)(?:/(?:bin|lib))?(?=["\'\s]|$)')
+
+    @classmethod
+    def exposures(cls, text: str) -> list[str]:
+        # A script that sets PREFIX to a subdirectory (voice/, research/) is
+        # talking about THAT directory when it says $PREFIX.
+        sub = re.search(r'^PREFIX=/opt/llmstack/\S+', text, re.M)
+        out = []
+        for line in re.sub(r'\\\n\s*', ' ', text).splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            m = cls.OWNS.search(s)
+            if not m:
+                continue
+            for t in cls.TARGET.finditer(m.group("chown") or m.group("install")):
+                if sub and "PREFIX" in t.group(0):
+                    continue
+                out.append(s)
+                break
+        return out
+
+    def test_the_matcher_would_have_caught_every_old_line(self):
+        old = [
+            'chown -R "$LLM_USER":"$LLM_USER" "$PREFIX/bin" "$PREFIX/lib" 2>/dev/null || true',
+            'install -d -o "$LLM_USER" -g "$LLM_USER" -m 0755 /opt/llmstack',
+            'install -d -o "$LLM_USER" -g "$LLM_USER" -m 0755 /opt/llmstack/bin',
+            'sudo -n install -d -o llmstack -g llmstack -m 0755 "$PREFIX" /opt/llmstack/bin',
+            'chown -R llmstack:llmstack /opt/llmstack/lib',
+        ]
+        for line in old:
+            assert self.exposures(line), line
+
+    def test_the_matcher_leaves_what_the_account_may_own_alone(self):
+        fine = [
+            'chown -R "$LLM_USER":"$LLM_USER" "$PREFIX/gateway"',
+            'chown -R "$LLM_USER":"$LLM_USER" "$PREFIX/venv"',
+            'install -d -o "$LLM_USER" -g "$LLM_USER" -m 0755 /var/lib/llmstack',
+            'chown root:"$LLM_USER" /etc/llmstack',
+            'install -d -o root -g root -m 0755 /opt/llmstack /opt/llmstack/bin',
+            'chown -R root:root "$PREFIX/bin" "$PREFIX/lib"',
+            'sudo -n install -d -o llmstack -g llmstack -m 0755 /opt/llmstack/voice',
+            'PREFIX=/opt/llmstack/research\nsudo -n install -d -o llmstack '
+            '-g llmstack -m 0755 "$PREFIX"',
+        ]
+        for line in fine:
+            assert not self.exposures(line), line
+
+    def test_no_script_in_the_repo_does_it(self, repo):
+        scripts = [*sorted((repo / "hosts").rglob("*.sh")),
+                   *sorted(repo.glob("*.sh"))]
+        if not scripts:
+            pytest.skip("no provisioning scripts in this checkout")
+        found = {}
+        for path in scripts:
+            hits = self.exposures(path.read_text(encoding="utf-8",
+                                                 errors="replace"))
+            if hits:
+                found[str(path.relative_to(repo))] = hits
+        assert not found, ("these hand the service account a directory root "
+                           f"executes from (see this class): {found}")
 
 
 # --------------------------------------------------------------------------

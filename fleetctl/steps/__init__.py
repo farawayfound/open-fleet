@@ -126,6 +126,7 @@ ORDER = (
     "power",
     "firewall",
     "gpu-cap",
+    "power-cap",
     "services",
     "health",
 )

@@ -36,28 +36,6 @@
   nav button.on{color:#04121a;background:var(--accent);font-weight:600}
   main{padding:22px;max-width:1400px;margin:0 auto}
   section{display:none} section.on{display:block}
-  /* A tab whose subject has grown past a screenful of scrolling gets its own
-     vertical nav and one pane per subject -- the Public tab was eight screens
-     deep, so a card in the middle of it (auto-issue, say) was findable only
-     by knowing it was there. */
-  .subwrap{display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;align-items:start}
-  .subnav{position:sticky;top:66px;display:flex;flex-direction:column;gap:2px;
-          background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:8px}
-  .subnav button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;
-                 background:transparent;border:1px solid transparent;color:var(--muted);
-                 padding:7px 11px;border-radius:7px;cursor:pointer;font:inherit;font-size:13px}
-  .subnav button:hover{color:var(--fg);background:var(--panel2)}
-  .subnav button.on{color:var(--fg);background:var(--panel2);border-color:var(--line);
-                    font-weight:600;box-shadow:inset 2px 0 0 var(--accent)}
-  .subnav .n{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted)}
-  .subnav button.on .n{color:var(--fg)}
-  .pane{display:none} .pane.on{display:block}
-  @media(max-width:900px){
-    .subwrap{grid-template-columns:minmax(0,1fr)}
-    .subnav{position:static;flex-direction:row;flex-wrap:wrap}
-    .subnav button{width:auto}
-    .subnav button.on{box-shadow:none}
-  }
   .grid{display:grid;gap:14px}
   .g4{grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
   .g3{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
@@ -240,7 +218,6 @@
     <button data-t="home" class="on">Home</button>
     <button data-t="fleetjobs">Jobs</button>
     <button data-t="teams">Teams</button>
-    <button data-t="public">Public</button>
     <button data-t="config">Configurations</button>
   </nav>
   <nav id="nodenav" style="display:none">
@@ -421,393 +398,6 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
   </div>
 </section>
 
-<!-- ================= PUBLIC (Fleet Pass) ================= -->
-<section id="public">
-<div class="subwrap">
-  <!-- A div, not a <nav>: showTab() drives every `nav button` on the page as a
-       top-level tab, and these are not that. role=tablist says what it is. -->
-  <div class="subnav" id="pubnav" role="tablist" aria-orientation="vertical"
-       aria-label="Fleet Pass sections">
-    <button role="tab" aria-selected="true" aria-controls="pub-glance" data-p="glance" class="on"
-      >At a glance<span class="n" id="pubn_glance"></span></button>
-    <button role="tab" aria-selected="false" aria-controls="pub-models" data-p="models"
-      >Public models</button>
-    <button role="tab" aria-selected="false" aria-controls="pub-employers" data-p="employers"
-      >Eligible employers</button>
-    <button role="tab" aria-selected="false" aria-controls="pub-keys" data-p="keys"
-      >Issued keys</button>
-    <button role="tab" aria-selected="false" aria-controls="pub-auto" data-p="auto"
-      >Auto-issue<span class="n" id="pubn_auto"></span></button>
-    <button role="tab" aria-selected="false" aria-controls="pub-activity" data-p="activity"
-      >Activity</button>
-    <button role="tab" aria-selected="false" aria-controls="pub-settings" data-p="settings"
-      >Settings</button>
-    <button role="tab" aria-selected="false" aria-controls="pub-aliases" data-p="aliases"
-      >Box aliases</button>
-  </div>
-  <div class="panes">
-
-  <div class="pane on" id="pub-glance" role="tabpanel">
-  <h2 class="sec" style="margin-top:0">At a glance</h2>
-  <div class="grid g4" id="pubglance"></div>
-  <div class="spacer"></div>
-  <div class="card"><h3>Requests per day <span class="muted" style="text-transform:none">— last 30 days</span></h3>
-    <div class="chart" id="pubchart"></div>
-  </div>
-
-  <div class="spacer"></div>
-  <div class="card" id="pubpendingcard" style="display:none">
-    <h3>Pending requests</h3>
-    <p class="hint" style="margin-top:0" id="pubpendmeta"></p>
-    <div style="overflow-x:auto"><table id="pubpendtab"><tbody></tbody></table></div>
-  </div>
-
-  </div>
-
-  <div class="pane" id="pub-models" role="tabpanel">
-  <h2 class="sec" style="margin-top:0">Public models</h2>
-  <div class="card" style="overflow-x:auto">
-    <div class="tbar">
-      <span class="muted" style="font-size:12px">The catalogue clients pick from —
-        <span class="mono">public_id</span> is what they send as <span class="mono">model</span>;
-        <span class="mono">fleet ids</span> are the per-host ids that actually are it.</span>
-      <span class="grow"></span>
-      <button class="act" onclick="addPubModel()">+ Add model</button>
-      <button class="act" onclick="reseedPubModels()">Reseed models</button>
-    </div>
-    <table id="pubmodtab"><tbody></tbody></table>
-    <div class="hint">A single-worker key may pick any enabled model regardless of primary/worker —
-      those two flags only shape what a <b>team</b> can be built from.
-      The rows are listed in the order the public page presents them: <b>top</b> first, then
-      family by family in the order set under Settings, then by <b>sort</b> within a family.</div>
-  </div>
-  <div class="spacer"></div>
-  <div class="card">
-    <div class="tbar">
-      <h3 style="margin:0">Kept loaded</h3>
-      <span class="grow"></span>
-      <button class="act" onclick="runPubPreload()">Load now</button>
-    </div>
-    <div id="pubpreload"></div>
-  </div>
-
-  </div>
-
-  <div class="pane" id="pub-employers" role="tabpanel">
-  <h2 class="sec" style="margin-top:0">Eligible employers</h2>
-  <div class="card" style="overflow-x:auto">
-    <div class="row" id="pubdomsummary" style="margin-bottom:10px"></div>
-    <div class="tbar">
-      <div class="field"><label class="f">search</label>
-        <input id="pd_q" placeholder="domain or company" style="min-width:160px"
-          onkeydown="if(event.key==='Enter'){PAGE.domains=0;loadPubDomains()}"></div>
-      <div class="field"><label class="f">source</label>
-        <select id="pd_source" style="width:auto" onchange="PAGE.domains=0;loadPubDomains()">
-          <option value="">all</option>
-          <option value="fortune500">fortune500</option>
-          <option value="forbes-private">forbes-private</option>
-          <option value="denver-tech">denver-tech</option>
-          <option value="gov">gov</option>
-          <option value="custom">custom</option>
-        </select></div>
-      <div class="field"><label class="f">mode</label>
-        <select id="pd_mode" style="width:auto" onchange="PAGE.domains=0;loadPubDomains()">
-          <option value="">all</option><option value="allow">allow</option><option value="block">block</option>
-        </select></div>
-      <button class="act" style="align-self:flex-end" onclick="PAGE.domains=0;loadPubDomains()">Filter</button>
-      <span class="muted" id="pubdommeta" style="font-size:12px"></span>
-      <span class="grow"></span>
-      <button class="act" onclick="addPubDomain()">+ Add domain</button>
-      <button class="act" onclick="reseedPubDomains()">Reseed domains</button>
-    </div>
-    <table id="pubdomtab"><tbody></tbody></table>
-    <div id="pubdompager"></div>
-    <div class="spacer"></div>
-    <div class="row" style="align-items:flex-end">
-      <div class="field" style="flex:1;min-width:260px"><label class="f">import CSV or JSON</label>
-        <textarea id="pd_import" placeholder="domain,company&#10;boeing.com,Boeing&#10;lmco.com,Lockheed Martin"
-          style="min-height:70px"></textarea></div>
-      <button class="act" onclick="importPubDomains()">Import</button>
-    </div>
-    <div class="spacer"></div>
-    <div class="row">
-      <div class="field"><label class="f">check an address</label>
-        <input id="pd_check" placeholder="someone@company.com" style="min-width:220px"></div>
-      <button class="act" style="align-self:flex-end" onclick="checkPubAddress()">Check</button>
-      <span id="pd_checkout"></span>
-    </div>
-  </div>
-
-  </div>
-
-  <div class="pane" id="pub-keys" role="tabpanel">
-  <h2 class="sec" style="margin-top:0">Issued keys</h2>
-  <div class="card" style="overflow-x:auto">
-    <div class="tbar">
-      <div class="field"><label class="f">search</label>
-        <input id="pk_q" placeholder="email" style="min-width:160px"
-          onkeydown="if(event.key==='Enter'){PAGE.pubkeys=0;loadPubKeys()}"></div>
-      <div class="field"><label class="f">status</label>
-        <select id="pk_status" style="width:auto" onchange="PAGE.pubkeys=0;loadPubKeys()">
-          <option value="">all statuses</option>
-          <option value="issued">issued (active/expired)</option>
-          <option value="pending">pending</option>
-          <option value="denied">denied</option>
-          <option value="revoked">revoked</option>
-        </select></div>
-      <div class="field"><label class="f">source</label>
-        <select id="pk_source" style="width:auto" onchange="PAGE.pubkeys=0;loadPubKeys()">
-          <option value="">any source</option>
-          <option value="auto">auto-issued (connected services)</option>
-          <option value="manual">by hand</option>
-        </select></div>
-      <button class="act" style="align-self:flex-end" onclick="PAGE.pubkeys=0;loadPubKeys()">Filter</button>
-      <span class="muted" id="pubkeysmeta" style="font-size:12px"></span>
-      <span class="grow"></span>
-      <button class="act" id="pubkeysarch" onclick="toggleView('pubkeys',loadPubKeys)">Show archived</button>
-    </div>
-    <table id="pubkeytab"><tbody></tbody></table>
-    <div id="pubkeyspager"></div>
-  </div>
-  <div class="spacer"></div>
-  <div class="card" data-help="issue by hand">
-    <h3>Issue a key by hand</h3>
-    <p class="hint" style="margin-top:0">For vouching on someone who wrote from a personal address, or a
-      test straight to your own inbox. This skips eligibility, the free-mail block, and every cap below —
-      it mints and e-mails a key exactly like an approval, it just never asks the usual questions first.</p>
-    <div class="row">
-      <div class="field" style="min-width:220px"><label class="f">email</label>
-        <input id="pk_new_email" placeholder="someone@company.com"></div>
-      <div class="field"><label class="f">kind</label>
-        <select id="pk_new_kind" style="width:auto" onchange="renderPubIssueModels()">
-          <option value="single">single</option><option value="team">team</option>
-        </select></div>
-      <div class="field"><label class="f">ctx</label>
-        <input class="s" id="pk_new_ctx" type="number" step="1024" value="8192"></div>
-    </div>
-    <div class="spacer"></div>
-    <div id="pk_new_models"></div>
-    <div class="spacer"></div>
-    <div class="field" style="max-width:420px"><label class="f">note (optional)</label>
-      <input id="pk_new_note" maxlength="500" placeholder="why this key exists"></div>
-    <div class="spacer"></div>
-    <button class="act primary" onclick="issuePubKeyByHand()">Issue key</button>
-  </div>
-  <div class="spacer"></div>
-  </div>
-
-  <div class="pane" id="pub-auto" role="tabpanel">
-  <h2 class="sec" style="margin-top:0">Auto-issue for connected services</h2>
-  <div class="card" data-help="auto-issue">
-    <h3>Terms</h3>
-    <p class="hint" style="margin-top:0">A service you run &mdash; a job-search autopilot that hands a
-      recruiter a live key inside a cover letter, say &mdash; mints keys here with no person in the loop:
-      <span class="mono">POST /admin/api/public/keys/auto</span> with the admin token, one key per
-      application or message. The key comes out exactly like an approval (the model below, the lifetime
-      and budgets under Limits) and lands in the table above under source
-      <span class="mono">auto:&lt;service&gt;</span>, where it can be revoked or extended. The raw key is
-      returned once to the caller instead of being e-mailed. The service holds none of these settings
-      &mdash; this card is the only place they live.</p>
-    <div class="row">
-      <div class="field"><label class="f">auto-issue</label>
-        <select id="ps_auto_enabled" style="width:90px"><option value="1">on</option><option value="0">off</option></select></div>
-      <div class="field"><label class="f">auto-issue model</label><select id="ps_auto_model" style="width:auto"></select></div>
-      <div class="field"><label class="f">auto-issue ctx</label>
-        <input class="s" id="ps_auto_ctx" type="number" step="1024"></div>
-      <div class="field"><label class="f">daily cap</label>
-        <input class="s" id="ps_auto_daily_cap" type="number"></div>
-    </div>
-    <div class="spacer"></div>
-    <label class="f">setup text</label>
-    <textarea id="ps_auto_setup" style="min-height:90px"></textarea>
-    <div class="spacer"></div>
-    <div id="pubautoline" class="muted" style="font-size:12px"></div>
-    <div class="spacer"></div>
-    <div class="row">
-      <button class="act primary" onclick="savePubSettings()">Save settings</button>
-      <button class="act" onclick="mintAutoTestKey()">Mint a test key</button>
-      <button class="act" onclick="loadPubAuto()">Refresh</button>
-    </div>
-    <div id="pubautokey" style="margin-top:8px"></div>
-  </div>
-
-  </div>
-
-  <div class="pane" id="pub-activity" role="tabpanel">
-  <h2 class="sec" style="margin-top:0">Activity</h2>
-  <div class="card" style="overflow-x:auto">
-    <div class="tbar">
-      <div class="field"><label class="f">event</label>
-        <select id="pe_kind" style="width:auto" onchange="PAGE.pubevents=0;loadPubEvents()">
-          <option value="">all events</option>
-          <option value="rejected">rejected</option><option value="rate_limited">rate_limited</option>
-          <option value="issued">issued</option><option value="pending">pending</option>
-          <option value="approved">approved</option><option value="denied">denied</option>
-          <option value="revoked">revoked</option><option value="extended">extended</option>
-          <option value="resent">resent</option><option value="fallback">fallback</option>
-          <option value="mail_error">mail_error</option>
-        </select></div>
-      <span class="muted" id="pubevmeta" style="font-size:12px"></span>
-      <span class="grow"></span>
-    </div>
-    <table id="pubevtab"><tbody></tbody></table>
-    <div id="pubevpager"></div>
-  </div>
-
-  </div>
-
-  <div class="pane" id="pub-settings" role="tabpanel">
-  <h2 class="sec" style="margin-top:0">Settings</h2>
-  <div class="card">
-    <h3>Limits</h3>
-    <div class="row">
-      <div class="field"><label class="f">single req/day</label><input class="s" id="ps_single_rpd" type="number"></div>
-      <div class="field"><label class="f">single req/hour</label><input class="s" id="ps_single_rph" type="number"></div>
-      <div class="field"><label class="f">team req/day</label><input class="s" id="ps_team_rpd" type="number"></div>
-      <div class="field"><label class="f">team req/hour</label><input class="s" id="ps_team_rph" type="number"></div>
-      <div class="field"><label class="f">key days</label><input class="s" id="ps_key_days" type="number"></div>
-      <div class="field"><label class="f">team workers</label><input class="s" id="ps_team_workers" type="number"></div>
-      <div class="field"><label class="f">team rounds</label><input class="s" id="ps_team_rounds" type="number"></div>
-      <div class="field"><label class="f">max keys / domain</label><input class="s" id="ps_max_domain" type="number"></div>
-      <div class="field"><label class="f">max live keys</label><input class="s" id="ps_max_live" type="number"></div>
-      <div class="field"><label class="f">ip req/day</label><input class="s" id="ps_ip_day" type="number"></div>
-      <div class="field"><label class="f">live keys / email</label><input class="s" id="ps_max_email" type="number" min="0"></div>
-      <div class="field"><label class="f">review unlisted</label>
-        <select id="ps_review_unlisted" style="width:90px"><option value="1">yes</option><option value="0">no</option></select></div>
-    </div>
-  </div>
-  <div class="spacer"></div>
-  <div class="card">
-    <h3>Presentation</h3>
-    <p class="hint" style="margin-top:0">What a visitor to the request form reads,
-      in the order they read it.</p>
-    <div class="row">
-      <div class="field" style="flex:1;min-width:280px"><label class="f">family order</label>
-        <input id="ps_family_order" placeholder="Qwen, Gemma, Nemotron — blank means order by sort alone"></div>
-      <div class="field" style="min-width:200px"><label class="f">suggested first</label>
-        <select id="ps_featured" style="width:auto"></select></div>
-      <div class="field"><label class="f">keep it loaded</label>
-        <select id="ps_preload" style="width:90px"><option value="1">on</option><option value="0">off</option></select></div>
-    </div>
-    <div class="hint">A family the order does not name falls in behind the ones it does,
-      keeping the order its <span class="mono">sort</span> values already gave it.
-      <b>Keep it loaded</b> asks every box that can hold the suggested model to stay warm
-      on it — never interrupting one that is serving, and never downloading.</div>
-  </div>
-  <div class="spacer"></div>
-  <div class="card">
-    <h3>Live demo</h3>
-    <p class="hint" style="margin-top:0" data-help="live demo">The chat box at the bottom of the public
-      tour (<span class="mono">example.org/fleet/tour</span>). No key: one model, the boxes named here,
-      and a budget per visitor address on a rolling hour. Excluded boxes are never used for it however well
-      they score; preferred boxes are tried first when they serve the model, and keep serving keyed traffic
-      as usual. The window is whatever the answering box is holding.</p>
-    <div class="row">
-      <div class="field"><label class="f">enabled</label>
-        <select id="ps_demo_enabled" style="width:90px"><option value="1">on</option><option value="0">off</option></select></div>
-      <div class="field" style="min-width:200px"><label class="f">model</label>
-        <select id="ps_demo_model" style="width:auto"></select></div>
-      <div class="field"><label class="f">requests / hour / address</label>
-        <input class="s" id="ps_demo_ip_rph" type="number" min="1"></div>
-      <div class="field"><label class="f">max tokens / reply</label>
-        <input class="s" id="ps_demo_max_tokens" type="number" min="64"></div>
-      <div class="field"><label class="f">max prompt chars</label>
-        <input class="s" id="ps_demo_max_prompt_chars" type="number" min="200"></div>
-    </div>
-    <div class="row">
-      <div class="field" style="flex:1;min-width:240px"><label class="f">prefer hosts (first wins)</label>
-        <input id="ps_demo_prefer" placeholder="gpu-laptop-1"></div>
-      <div class="field" style="flex:1;min-width:240px"><label class="f">never use</label>
-        <input id="ps_demo_exclude" placeholder="mac-laptop-1, apu-box-1, apu-tablet-1, apu-tablet-2, gpu-desktop-2"></div>
-    </div>
-    <div class="spacer"></div>
-    <label class="f">system prompt</label>
-    <textarea id="ps_demo_prompt" style="min-height:70px"></textarea>
-    <div class="spacer"></div>
-    <div class="tbar">
-      <span class="muted" style="font-size:12px">Who would answer right now, and what the demo has cost today</span>
-      <span class="grow"></span>
-      <button class="act" onclick="loadPubDemo()">Refresh</button>
-    </div>
-    <div id="pubdemo" style="margin-top:6px"></div>
-  </div>
-  <div class="spacer"></div>
-  <div class="card">
-    <h3>Fallback</h3>
-    <div class="row">
-      <div class="field"><label class="f">fallback when</label>
-        <select id="ps_fallback_when" style="width:auto">
-          <option value="not_resident">not_resident</option>
-          <option value="unreachable">unreachable</option>
-          <option value="never">never</option>
-        </select></div>
-      <div class="field"><label class="f">fallback tolerance</label>
-        <input class="s" id="ps_fallback_tolerance" type="number" step="0.05"></div>
-      <div class="field"><label class="f">fallback notice</label>
-        <select id="ps_fallback_notice" style="width:90px"><option value="1">on</option><option value="0">off</option></select></div>
-    </div>
-    <div class="spacer"></div>
-    <label class="f">notice text</label>
-    <textarea id="ps_fallback_text" style="min-height:70px"></textarea>
-  </div>
-  <div class="spacer"></div>
-  <div class="card">
-    <h3>Prompts</h3>
-    <label class="f">team prompt</label>
-    <textarea id="ps_team_prompt"></textarea>
-    <div class="spacer"></div>
-    <label class="f">worker prompt</label>
-    <textarea id="ps_worker_prompt"></textarea>
-  </div>
-  <div class="spacer"></div>
-  <div class="card">
-    <h3>Email</h3>
-    <div class="row">
-      <div class="field" style="min-width:200px"><label class="f">mail from</label><input id="ps_mail_from"></div>
-      <div class="field" style="min-width:200px"><label class="f">reply-to</label><input id="ps_mail_reply_to"></div>
-      <div class="field" style="min-width:200px"><label class="f">admin notify</label><input id="ps_admin_notify"></div>
-      <div class="field" style="flex:1;min-width:260px"><label class="f">email subject</label><input id="ps_email_subject"></div>
-    </div>
-    <div class="spacer"></div>
-    <label class="f">email intro</label>
-    <textarea id="ps_email_intro"></textarea>
-    <div class="spacer"></div>
-    <label class="f">email setup</label>
-    <textarea id="ps_email_setup"></textarea>
-    <div class="spacer"></div>
-    <label class="f">email disclaimer</label>
-    <textarea id="ps_email_disclaimer"></textarea>
-    <div class="spacer"></div>
-    <div class="field" style="max-width:420px"><label class="f">base url</label>
-      <input id="ps_base_url" placeholder="defaults to PUBLIC_API_URL"></div>
-    <div class="spacer"></div>
-    <div id="ps_smtp_line"></div>
-    <div id="ps_intake_line" style="margin-top:4px"></div>
-    <div class="spacer"></div>
-    <div class="row">
-      <button class="act primary" onclick="savePubSettings()">Save settings</button>
-      <button class="act" onclick="sendPubTestMail()">Send test mail</button>
-    </div>
-  </div>
-
-  </div>
-
-  <div class="pane" id="pub-aliases" role="tabpanel">
-  <h2 class="sec" style="margin-top:0">Box aliases</h2>
-  <div class="card" style="overflow-x:auto">
-    <p class="hint" style="margin-top:0" data-help="box aliases">Every host the public overview or the
-      Fleet Pass e-mails can name is sanitized to <span class="mono">Box N</span> (the hub as
-      <span class="mono">Hub</span>) — never a real hostname, never OS or engine-version detail. The
-      number is assigned the first time a host is seen and then kept for good, so it does not shuffle
-      as peers come and go. This table is the only place on the dashboard that shows the mapping back.</p>
-    <table id="pubaliastab"><tbody></tbody></table>
-  </div>
-  </div>
-
-  </div>
-</div>
-</section>
-
 <!-- ================= CONFIGURATIONS (fleet) ================= -->
 <section id="config">
   <div class="grid g2">
@@ -986,17 +576,23 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <b>think</b> controls hybrid reasoning. On <code>auto</code> these models can
       spend an entire <code>max_tokens</code> budget thinking and return empty
       content — set <code>off</code> if a client reports blank replies.<br>
-      <b>warm</b> is this box's standby policy: <code>startup</code> preloads the
-      model whenever the engine starts (one per box; pair with ttl 0 to keep it
-      for good), <code>always</code> pins it resident beside the swap group so
-      nothing evicts it. The Overview card's “warm at startup” control drives
-      the same flag.</p>
+      <b>boot</b> is the one model this box loads the moment its engine starts
+      and keeps warm — a radio, because the swap group holds one model at a
+      time and a second choice would only evict the first. Click the selected
+      circle again to clear it: the box then loads nothing until somebody asks
+      for something. Pair it with ttl 0 so the model stays. <b>pinned</b> is
+      the other half of the standby policy: <code>always</code> gives the model
+      its own group beside the swap group, resident from start-up and safe from
+      eviction, which is why a pinned model does not take the boot slot. Both
+      apply on <b>Save &amp; apply</b>; the Overview card's “warm at startup”
+      picker drives the same boot flag and applies the moment you press Set.</p>
     <div style="overflow-x:auto">
       <table id="mtab">
         <thead><tr>
           <th>On</th><th>Model id</th><th>GGUF</th>
           <th class="num">ctx</th><th class="num">ngl</th><th class="num">n-cpu-moe</th>
-          <th>think</th><th class="num">ttl s</th><th>warm</th><th>extra flags</th><th></th>
+          <th>think</th><th class="num">ttl s</th><th>boot</th><th>pinned</th>
+          <th>extra flags</th><th></th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -1005,6 +601,8 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div class="spacer"></div>
     <div class="row">
       <button class="act" onclick="addModel()">+ Add model</button>
+      <button class="act" id="addall-btn" style="display:none" onclick="addAllLocalModels()"
+              title="stage a record for every complete GGUF on this box that no model serves yet — pulled by hand, by a bootstrap script, or before Add to Models existed">+ Add all on-disk models</button>
       <button class="act primary" onclick="saveModels()">Save &amp; apply</button>
       <span class="hint">Applying rewrites llama-swap.yaml, restarts it, then <b>loads every
         changed model in turn to prove the config works</b> — one at a time, because only
@@ -1105,9 +703,10 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <div class="row">
         <input id="hfq" data-help="hf query" placeholder="e.g. unsloth/Qwen3.8-27B-GGUF" style="flex:1">
         <button class="act" onclick="hfSearch()">Search</button>
-        <button class="act" onclick="hfFiles()">List files</button>
+        <button class="act primary" onclick="hfQuants()">Quants</button>
+        <button class="act" onclick="hfFiles()" title="one row per file — the old view, and the only one a gateway that predates quant grouping can answer">Files</button>
       </div>
-      <div class="hint">Search finds repos; “List files” takes an exact repo id and shows its GGUF files with sizes.</div>
+      <div class="hint">Search finds repos; Quants shows one row per quant level with a single download for all its files; Files is the flat per-file list.</div>
       <div class="spacer"></div>
       <table id="hfres"><tbody></tbody></table>
     </div>
@@ -1184,6 +783,9 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <tr><td class="muted">Base URL</td><td class="mono" id="apiurl">–</td></tr>
       <tr><td class="muted">API key</td><td class="mono">the sk-ffa-… value above</td></tr>
       <tr><td class="muted">Model id</td><td class="mono">whatever you named it on the Models tab</td></tr>
+      <tr><td class="muted">Decisions</td><td><span class="mono">POST /v1/systemone</span> with the same key and base URL,
+        naming a decision model (<span class="mono">tev1</span> on mini-pc-1): a Jev-style model that answers typed
+        questions &mdash; choice, yes/no, score &mdash; with probabilities and generates nothing. Fleet Pass keys reach it too.</td></tr>
     </tbody></table>
     <div class="hint">In Cline: API Provider → <b>OpenAI Compatible</b>, then paste the base URL and key.</div>
   </div>
@@ -1230,6 +832,13 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
     <div class="spacer"></div>
     <label class="f">allowed models (none checked = all allowed)</label>
     <div class="row" id="ag_models" data-help="allowed models" style="margin-top:5px"></div>
+    <div class="spacer"></div>
+    <div class="row">
+      <div class="field" style="flex:1;min-width:240px"><label class="f">prefer hosts (first wins)</label>
+        <input id="ag_prefer_hosts" data-help="prefer/exclude hosts" placeholder="gpu-laptop-1"></div>
+      <div class="field" style="flex:1;min-width:240px"><label class="f">never use</label>
+        <input id="ag_exclude_hosts" data-help="prefer/exclude hosts" placeholder="mac-laptop-1, apu-box-1"></div>
+    </div>
     <div class="spacer"></div>
     <div class="row">
       <div class="field"><label class="f">temperature</label><input class="s" id="ag_temp" type="number" step="0.05" placeholder="—"></div>
@@ -1577,49 +1186,29 @@ const archLabel = on => on ? "Show live" : "Show archived";
 // as a whole (Home, Jobs, Teams); a host pill and the node nav belong to one
 // machine. MODE says which level is showing, and the pills only light up when
 // a machine is actually the subject.
-const FLEET_TABS = new Set(["home", "fleetjobs", "teams", "public", "config"]);
+const FLEET_TABS = new Set(["home", "fleetjobs", "teams", "config"]);
 let MODE = "fleet";
 const LOADERS = {home: loadHome, fleetjobs: loadFleetJobs, teams: loadTeams,
-  public: loadPublic, config: loadConfig,
+  config: loadConfig,
   overview: loadStatus, models: loadModels,
   optimize: loadOptimize, library: loadLibrary, keys: loadKeys, agents: loadAgents,
   usage: loadUsage, logs: loadLogs};
 function tabLoad(t) { (LOADERS[t] || (() => {}))(); }
-function showTab(t) {
+// switchSection is showTab minus the data load: addQuantModel needs to land on
+// the Models tab to show what it just staged without re-fetching /models and
+// stomping the MODELS array it just pushed onto (tabLoad("models") calls
+// loadModels(), which would overwrite the staged-but-unsaved record).
+function switchSection(t) {
   const fleet = FLEET_TABS.has(t);
   if ((MODE === "fleet") !== fleet) { MODE = fleet ? "fleet" : "node"; renderHosts(); }
   $("#fleetnav").style.display = fleet ? "" : "none";
   $("#nodenav").style.display = fleet ? "none" : "";
   $$("nav button").forEach(x => x.classList.toggle("on", x.dataset.t === t));
   $$("section").forEach(x => x.classList.toggle("on", x.id === t));
-  tabLoad(t);
 }
+function showTab(t) { switchSection(t); tabLoad(t); }
 $$("nav button").forEach(b => b.onclick = () => showTab(b.dataset.t));
 
-// ---- public: one tab, one pane at a time ----
-// The Fleet Pass tab is one subject but eight screens of it, and a card in
-// the middle (the auto-issue terms, the fallback policy) could only be found
-// by scrolling past everything else. Each subject is now its own pane behind
-// the vertical nav, and the chosen one is remembered -- coming back to the
-// tab should land where the work was, not at the top.
-const PUB_PANES = ["glance", "models", "employers", "keys", "auto",
-                   "activity", "settings", "aliases"];
-function showPubPane(p) {
-  if (!PUB_PANES.includes(p)) p = "glance";
-  $$("#pubnav button").forEach(b => {
-    const on = b.dataset.p === p;
-    b.classList.toggle("on", on);
-    b.setAttribute("aria-selected", String(on));
-  });
-  for (const k of PUB_PANES) {
-    const el = $("#pub-" + k);
-    if (el) el.classList.toggle("on", k === p);
-  }
-  try { localStorage.setItem("pubpane", p); } catch (e) { /* private mode */ }
-}
-$$("#pubnav button").forEach(b => b.onclick = () => showPubPane(b.dataset.p));
-try { showPubPane(localStorage.getItem("pubpane") || "glance"); }
-catch (e) { showPubPane("glance"); }
 
 // ---- home: pooled resources, machines, network map, fleet storage ----
 let OVERVIEW = null;
@@ -1669,6 +1258,34 @@ function actProgress(j) {
       : `${fmtN(p.done)} / ${fmtN(p.total)}${
           p.failed ? ` · <span style="color:var(--bad)">${fmtN(p.failed)} failed</span>` : ""}`}</div>`;
 }
+// The manual-routing cell on an Active-jobs row: only a real per-key
+// inference job carries key_id (C2 in gateway/app.py) -- everything else
+// (team/demo/native/download/batch) gets an empty cell so the table stays
+// aligned. Best-effort policy readout: AGENTS is only populated once the
+// Agents tab has been visited this session.
+function routeCell(j, i, scope) {
+  if (j.kind !== "inference" || j.key_id == null) return `<td class="muted">—</td>`;
+  const opts = sortedHosts().filter(h => h.online)
+    .map(h => `<option value="${esc(h.name)}">${esc(h.name)}</option>`).join("");
+  const a = AGENTS.find(x => x.key_id === j.key_id);
+  const p = a && a.profile;
+  let policy = "—";
+  if (p) {
+    try {
+      const pr = JSON.parse(p.prefer_hosts || "[]"), ex = JSON.parse(p.exclude_hosts || "[]");
+      const parts = [];
+      if (pr.length) parts.push("prefer: " + pr.join(", "));
+      if (ex.length) parts.push("exclude: " + ex.join(", "));
+      if (parts.length) policy = parts.join(" · ");
+    } catch {}
+  }
+  return `<td style="font-size:12px;white-space:nowrap">
+    <div class="muted" style="font-size:11px;margin-bottom:2px">${esc(policy)}</div>
+    <select id="pjh_${scope}_${i}" style="width:100px;font-size:12px">${opts}</select>
+    <button class="act" style="padding:2px 6px;font-size:11px" onclick="preferJobHost('${scope}',${i})">prefer</button>
+    <button class="act" style="padding:2px 6px;font-size:11px" onclick="preferJobHost('${scope}',${i},true)">clear</button>
+  </td>`;
+}
 function actRow(j, i, scope) {
   return `<tr>
     <td><span class="pill ${j.kind === "inference" ? "mid" : ""}">${esc(j.kind)}</span></td>
@@ -1679,6 +1296,7 @@ function actRow(j, i, scope) {
       j.detail ? `<div class="muted" style="font-size:11px">${esc(j.detail)}</div>` : ""}</td>
     <td class="num muted mono" style="font-size:12px">${age(j.age_s)}</td>
     <td style="width:20%">${actProgress(j)}</td>
+    ${routeCell(j, i, scope)}
     <td style="text-align:right"><button class="act danger" ${j.aborted ? "disabled" : ""}
       onclick="abortJob('${scope}',${i})">${j.aborted ? "aborting…" : "Abort"}</button></td>
   </tr>`;
@@ -1705,9 +1323,9 @@ async function loadActive() {
   $("#abortall").disabled = !ACTIVE.length;
   $("#acttab tbody").innerHTML =
     `<tr><th>kind</th><th>host</th><th>job</th><th class="num">age</th>
-      <th>progress</th><th></th></tr>` +
+      <th>progress</th><th>route</th><th></th></tr>` +
     (ACTIVE.length ? ACTIVE.map((j, i) => actRow(j, i, "fleet")).join("")
-      : `<tr><td class="muted" colspan="6">${ACT_IDLE}</td></tr>`);
+      : `<tr><td class="muted" colspan="7">${ACT_IDLE}</td></tr>`);
   // A box that cannot answer is not a box with nothing running, and saying
   // otherwise is exactly the sort of quiet lie an operator acts on.
   const blind = (d.hosts || []).filter(h => h.error);
@@ -1739,9 +1357,9 @@ async function loadNodeActive() {
   $("#nactmeta").textContent = NACTIVE.length ? `— ${NACTIVE.length} running` : "";
   $("#nabortall").disabled = !NACTIVE.length;
   $("#nacttab tbody").innerHTML =
-    `<tr><th>kind</th><th>job</th><th class="num">age</th><th>progress</th><th></th></tr>` +
+    `<tr><th>kind</th><th>job</th><th class="num">age</th><th>progress</th><th>route</th><th></th></tr>` +
     (NACTIVE.length ? NACTIVE.map((j, i) => actRow(j, i, "node")).join("")
-      : `<tr><td class="muted" colspan="5">nothing running on this machine</td></tr>`);
+      : `<tr><td class="muted" colspan="6">nothing running on this machine</td></tr>`);
 }
 
 async function abortJob(scope, i) {
@@ -1754,6 +1372,51 @@ async function abortJob(scope, i) {
     await hostApi(on, `/active/${encodeURIComponent(j.id)}/abort`, {method: "POST"});
   } catch (e) { return toast(e.message, true); }
   toast(`abort sent to ${on}`);
+  scope === "fleet" ? loadActive() : loadNodeActive();
+}
+
+// Manual per-key host routing from an Active-jobs row (phase 1's
+// prefer_hosts/exclude_hosts on the agent profile, C in the routing plan).
+// GET-then-PUT the key's own profile so only prefer_hosts changes -- the PUT
+// route writes every profile field unconditionally, so sending a bare
+// {prefer_hosts} body would blank the rest (see saveAgent() above, the same
+// shape this mirrors). The GET must be the SINGULAR per-key route
+// (api_agents_get, /agents/{key_id}) -- the plural /agents route takes no
+// key_id filter at all (FastAPI silently drops the unknown query param and
+// returns the most-recently-created key's page instead), which used to
+// splice an unrelated key's profile onto this one. That singular route also
+// hands back prefer_hosts/exclude_hosts already parsed to real arrays
+// (unlike the plural list's raw JSON-text profile), so exclude_hosts below
+// is read directly rather than JSON.parse'd again.
+async function preferJobHost(scope, i, clear) {
+  const j = (scope === "fleet" ? ACTIVE : NACTIVE)[i];
+  if (!j || j.key_id == null) return;
+  const on = j.on || j.host;
+  const sel = $(`#pjh_${scope}_${i}`);
+  const host = sel ? sel.value : "";
+  if (!clear && !host) return toast("pick a host first", true);
+  let p = {};
+  try {
+    p = await hostApi(on, "/agents/" + encodeURIComponent(j.key_id));
+  } catch (e) {
+    // No live profile yet for this key is the common case (most fleet keys
+    // never went through the Agents tab) -- fall through with defaults, same
+    // as the old item.profile == null fallback. Any other failure (host
+    // unreachable, auth) still aborts.
+    if (!/no such live profile/i.test(e.message || "")) return toast(e.message, true);
+  }
+  let overrides = {};
+  try { overrides = JSON.parse(p.param_overrides || "{}"); } catch {}
+  let allowed = [];
+  try { allowed = JSON.parse(p.allowed_models || "[]"); } catch {}
+  const exclude = Array.isArray(p.exclude_hosts) ? p.exclude_hosts : [];
+  try {
+    await hostApi(on, "/agents/" + j.key_id, {method: "PUT", body: {
+      enabled: p.enabled !== 0, name: p.name || "", system_prompt: p.system_prompt || "",
+      rules: p.rules || "", allowed_models: allowed, force_model: p.force_model || "",
+      param_overrides: overrides, prefer_hosts: clear ? [] : [host], exclude_hosts: exclude}});
+  } catch (e) { return toast(e.message, true); }
+  toast(clear ? "prefer-host cleared" : `now preferring ${host}`);
   scope === "fleet" ? loadActive() : loadNodeActive();
 }
 
@@ -2268,7 +1931,8 @@ async function loadStatus() {
   catch (e) { if (REBOOT_BUSY_HOST !== CUR) toast("status: " + e.message, true); return; }
   const h = s.host;
   $("#cpuv").textContent = h.cpu_percent.toFixed(0) + "%";
-  $("#cpus").textContent = h.cpu_count + " threads · load " + h.load.map(x=>x.toFixed(2)).join(" ");
+  $("#cpus").textContent = h.cpu_count + " threads · load " + h.load.map(x=>x.toFixed(2)).join(" ")
+    + (h.cpu_temp_c ? " · " + h.cpu_temp_c.toFixed(0) + "°C" : "");
   setBar("#cpub", h.cpu_percent);
   const mp = h.mem.percent;
   $("#memv").textContent = fmtB(h.mem.used);
@@ -2319,8 +1983,19 @@ async function loadStatus() {
   // The context each resident model actually got. A model can be loaded and
   // still be the wrong shape for the job it is doing, and this is the number
   // that says so.
-  const ctxOf = m => m.n_ctx ? fmtN(m.n_ctx) + " ctx" +
-    (m.slots > 1 ? ` · ${m.slots} slots (${fmtN(Math.floor(m.n_ctx / m.slots))} each)` : "") : "";
+  // llama.cpp's /props reports n_ctx PER SLOT, not the total the server was
+  // given -- see upstream_props() and the note at the ctx verify in app.py.
+  // So the total is n_ctx * slots, and the per-conversation window IS n_ctx.
+  // This used to print n_ctx as the total and then divide it by slots again,
+  // which showed a two-slot 131,072 model as "65,536 ctx · 2 slots (32,768
+  // each)" -- both numbers half the truth, on the one line whose whole job is
+  // to say what the model actually got.
+  const ctxOf = m => {
+    if (!m.n_ctx) return "";
+    const slots = Math.max(1, m.slots || 1);
+    return fmtN(m.n_ctx * slots) + " ctx" +
+      (slots > 1 ? ` · ${slots} slots (${fmtN(m.n_ctx)} each)` : "");
+  };
   const conf = Object.fromEntries((s.models_configured || []).map(c => [c.id, c]));
   $("#running tbody").innerHTML = run.length
     ? run.map(m => `<tr><td class="mono">${esc(m.id)}${
@@ -2923,22 +2598,12 @@ async function teamVerb(keyId, verb) {
   loadTeams();
 }
 
-// ---- public (Fleet Pass) ----
-// Everything here is the hub's own database, like teams and fleet jobs above --
-// public keys are issued by the hub hub, never a peer, so this is always
-// rawApi, never the per-host api() proxy.
-let PUB_SETTINGS = null, PUB_STATS = null, PUB_PENDING = [];
-let PUB_MODELS = [];
-// Presentation comes down with the catalogue: the family order, which model is
-// suggested first, and what the preload loop is doing about it.
-let PUB_PRESENTATION = {family_order: [], featured: "", preload: null};
-let PUB_DOMAINS = [], PUB_DOM_TOTAL = 0, PUB_DOM_SUMMARY = null;
-let PUB_KEYS = [], PUB_KEYS_TOTAL = 0;
-let PUB_EVENTS = [], PUB_EVENTS_TOTAL = 0;
-
-// The one thing the Teams and API keys tables borrow from this one: which keys
-// are Fleet Pass keys, so a row can wear a quiet "fleet-pass" pill. Fetched
-// once and cached -- it is a marker, not something that needs to be fresh to
+// ---- Fleet Pass keys, as the rest of the dashboard sees them ----
+// The Public tab moved to the CareerOps admin (example.org -> Admin ->
+// Public) on 2026-09-17; the hub keeps the /admin/api/public/* API it drove.
+// This is all that stayed behind: which key ids belong to a live Fleet Pass
+// key, so the Teams and API-keys tables can wear a quiet "fleet-pass" pill.
+// Fetched once and cached -- a marker, not something that must be fresh to
 // the second.
 let PUBKEY_IDS = null;
 async function publicKeyIds() {
@@ -2950,776 +2615,32 @@ async function publicKeyIds() {
   return PUBKEY_IDS;
 }
 
-// "in 6d 14h" / "expired 2h ago" -- dur() already turns seconds into the
-// d/h/m the rest of this dashboard uses, so expiry just needs a sign and a
-// direction word wrapped around it.
-function relTime(iso) {
-  if (!iso) return "–";
-  const ms = new Date(iso) - Date.now();
-  const s = dur(Math.floor(Math.abs(ms) / 1000));
-  return ms < 0 ? s + " ago" : "in " + s;
-}
-
-// What a request/key row asked for -- single: one model id; team: primary
-// plus its workers. Shared by the pending table and the issued-keys table,
-// since a row is the same shape in both places.
-function pubKeyModels(k) {
-  let m; try { m = JSON.parse(k.models || "{}"); } catch { m = {}; }
-  return k.kind === "team"
-    ? `${esc(m.primary || "—")} <span class="muted">→</span> ${esc((m.workers || []).join(", ") || "—")}`
-    : esc(m.model || "—");
-}
-// The daily/hourly ceilings behind the "n / limit" column. The key's own
-// stamped numbers first, because those are the ones the gateway enforces and
-// the ones a 429 will quote back; today's settings only stand in for a row
-// that carries none. They agree in the ordinary case -- saving the tab syncs
-// every live key -- and where they ever disagree, this column has to show the
-// number that will actually turn someone away.
-function pubLimitsFor(kind, row) {
-  const s = PUB_SETTINGS || {}, k = row || {};
-  return kind === "team"
-    ? [k.limit_day || s.team_rpd, k.limit_hour || s.team_rph]
-    : [k.limit_day || s.single_rpd, k.limit_hour || s.single_rph];
-}
-
-async function loadPublic() {
-  // Settings and the domain summary feed the glance cards, so they load
-  // first; everything else is independent and can run at once.
-  await loadPubSettings();
-  await loadPubDomainSummary();
-  await Promise.all([loadPubStats(), loadPubPending(), loadPubModels(),
-    loadPubDomains(), loadPubKeys(), loadPubEvents(), loadPubAliases(), loadPubDemo(),
-    loadPubAuto()]);
-}
-
-// ---- at a glance ----
-async function loadPubStats() {
-  PUB_STATS = await rawApi("/public/stats?days=30").catch(() => null);
-  renderPubStats();
-}
-function renderPubStats() {
-  const s = PUB_STATS;
-  const days = (s && s.requests_by_day) || [];
-  const today = days.length ? days[days.length - 1] : {requests: 0, fallbacks: 0};
-  const domTotal = PUB_DOM_SUMMARY
-    ? Object.values(PUB_DOM_SUMMARY.sources || {}).reduce((a, v) => a + (v.count || 0), 0) : null;
-  const card = (title, big, warn) => `<div class="card"><h3>${title}</h3>
-    <div class="big" ${warn ? 'style="color:var(--warn)"' : ""}>${big}</div></div>`;
-  $("#pubglance").innerHTML = !s ? `<div class="card muted">public stats unavailable</div>` :
-    card("Live keys", fmtN(s.live_keys)) +
-    card("Pending", fmtN(s.pending), s.pending > 0) +
-    card("Requests today", fmtN(today.requests)) +
-    card("Fallbacks today", fmtN(today.fallbacks)) +
-    card("Domains listed", domTotal === null ? "–" : fmtN(domTotal));
-  const max = Math.max(1, ...days.map(d => d.requests));
-  $("#pubchart").innerHTML = days.map(d =>
-    `<i style="height:${d.requests / max * 100}%" title="${esc(d.day)} — ${fmtN(d.requests)} req, ${fmtN(d.fallbacks)} fallback(s)"></i>`
-  ).join("") || `<span class="muted">no traffic in the last 30 days</span>`;
-}
-
-// ---- pending requests ----
-async function loadPubPending() {
-  const d = await rawApi("/public/keys?status=pending&archived=false&limit=200").catch(() => null);
-  PUB_PENDING = (d && d.items) || [];
-  renderPubPending();
-}
-function renderPubPending() {
-  const card = $("#pubpendingcard");
-  card.style.display = PUB_PENDING.length ? "" : "none";
-  const badge = $("#pubn_glance");
-  if (badge) badge.textContent = PUB_PENDING.length ? String(PUB_PENDING.length) : "";
-  if (!PUB_PENDING.length) return;
-  $("#pubpendmeta").textContent = `${PUB_PENDING.length} request(s) waiting on a decision`;
-  $("#pubpendtab tbody").innerHTML =
-    `<tr><th>when</th><th>email</th><th>company / source</th><th>kind</th>
-      <th>models</th><th class="num">ctx</th><th>note</th><th></th></tr>` +
-    PUB_PENDING.map(k => `<tr>
-      <td class="mono" style="font-size:11px">${esc((k.created_at || "").replace("T", " ").replace("+00:00", "Z"))}</td>
-      <td>${esc(k.email)}</td>
-      <td style="font-size:12px">${k.company ? esc(k.company) : "—"}${
-        k.source ? ` <span class="muted">(${esc(k.source)})</span>` : ""}</td>
-      <td><span class="pill">${esc(k.kind)}</span></td>
-      <td class="mono" style="font-size:12px">${pubKeyModels(k)}</td>
-      <td class="num">${fmtN(k.ctx)}</td>
-      <td style="font-size:12px;max-width:220px">${k.note ? esc(k.note) : '<span class="muted">—</span>'}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <button class="act primary" onclick="pubApprove(${k.id})">approve</button>
-        <button class="act danger" onclick="pubDeny(${k.id})">deny</button>
-      </td>
-    </tr>`).join("");
-}
-async function pubApprove(id) {
-  try { await rawApi(`/public/keys/${id}/approve`, {method: "POST"}); }
-  catch (e) { return toast(e.message, true); }
-  toast("approved — key emailed");
-  PUBKEY_IDS = null;
-  loadPubPending(); loadPubKeys(); loadPubStats(); loadPubEvents();
-}
-async function pubDeny(id) {
-  const reason = prompt("Reason for denying (optional -- sent to the requester):", "");
-  if (reason === null) return;
-  try { await rawApi(`/public/keys/${id}/deny`, {method: "POST", body: {reason}}); }
-  catch (e) { return toast(e.message, true); }
-  toast("denied");
-  loadPubPending(); loadPubKeys(); loadPubStats(); loadPubEvents();
-}
-
-// ---- public models ----
-async function loadPubModels() {
-  const d = await rawApi("/public/models").catch(e => (toast("public models: " + e.message, true), null));
-  if (!d) return;
-  // Left in the order the server sent, which IS the order the public page will
-  // use -- re-sorting by `sort` here would show a listing nobody will ever see.
-  PUB_MODELS = d.items || [];
-  PUB_PRESENTATION = {family_order: d.family_order || [], featured: d.featured || "",
-    preload: d.preload || null};
-  renderPubModels();
-  renderPubSettings();
-  renderPubPreload();
-  renderPubIssueModels();
-}
-const pubModUpd = (i, k, v) => { PUB_MODELS[i][k] = v; };
-const pubModClass = m => `${esc(m.arch)} ${m.params_b}B` + (m.arch === "moe" ? `·${m.active_b}B` : "");
-// Per fleet id: is it resident anywhere online, merely available, or not
-// served at all -- the three states the routing scorer itself cares about.
-function pubModLive(m) {
-  const fl = m.fleet_live || {}, ids = m.fleet_ids || [];
-  if (!ids.length) return `<span class="muted">—</span>`;
-  return ids.map(fid => {
-    const l = fl[fid] || {}, hosts = l.hosts || [], resident = l.resident || [], nctx = l.n_ctx || {};
-    const cls = resident.length ? "ok" : hosts.length ? "mid" : "dim";
-    const state = resident.length ? "resident" : hosts.length ? "available" : "not served";
-    const ctxs = Object.entries(nctx).map(([h, n]) => `${esc(h)}:${fmtN(n)}`).join(", ");
-    return `<div class="mono" style="font-size:11px;margin-bottom:2px">
-      <span class="pill ${cls}" style="font-size:10px">${state}</span> ${esc(fid)}
-      ${hosts.length ? `<span class="muted"> — ${hosts.map(esc).join(", ")}</span>` : ""}
-      ${ctxs ? `<div class="muted">ctx ${esc(ctxs)}</div>` : ""}</div>`;
-  }).join("");
-}
-// A model can be configured for a longer context than any host currently has
-// it loaded with -- the first request at that length gets a context-limit
-// 413 the catalogue promised it would not. Flag it here rather than let that
-// be the first anyone hears of it.
-function pubModCtxWarn(m) {
-  const fl = m.fleet_live || {};
-  const loaded = Object.values(fl).flatMap(l => Object.values(l.n_ctx || {}));
-  const maxLoaded = loaded.length ? Math.max(...loaded) : 0;
-  return maxLoaded && m.ctx_max > maxLoaded
-    ? `<div><span class="pill mid">ctx max &gt; loaded (${fmtN(maxLoaded)})</span></div>` : "";
-}
-function renderPubModels() {
-  $("#pubmodtab tbody").innerHTML =
-    `<tr><th>on</th><th title="the model the public request form suggests first">top</th>
-      <th>public id</th><th>name</th><th>family</th><th class="num">sort</th>
-      <th>vendor</th><th>class</th>
-      <th>primary</th><th>worker</th><th class="num">ctx max</th><th class="num">ctx default</th>
-      <th>fleet ids</th><th>live</th><th></th></tr>` +
-    (PUB_MODELS.length ? PUB_MODELS.map((m, i) => `<tr>
-      <td><input type="checkbox" style="width:auto" ${m.enabled ? "checked" : ""}
-        onchange="pubModUpd(${i},'enabled',this.checked)"></td>
-      <td><input type="radio" name="pubfeatured" style="width:auto" ${m.featured ? "checked" : ""}
-        title="suggest this model first on the public request form"
-        onchange="setPubFeatured(${jsArg(m.public_id)})"></td>
-      <td class="mono">${esc(m.public_id)}</td>
-      <td>${esc(m.name)}</td>
-      <td><input value="${esc(m.family || "")}" style="width:90px"
-        onchange="pubModUpd(${i},'family',this.value)"></td>
-      <td><input class="s" type="number" step="10" value="${m.sort || 0}"
-        onchange="pubModUpd(${i},'sort',+this.value)"></td>
-      <td class="muted" style="font-size:12px">${esc(m.vendor)}</td>
-      <td><span class="pill arch">${pubModClass(m)}</span></td>
-      <td><input type="checkbox" style="width:auto" ${m.allow_primary ? "checked" : ""}
-        onchange="pubModUpd(${i},'allow_primary',this.checked)"></td>
-      <td><input type="checkbox" style="width:auto" ${m.allow_worker ? "checked" : ""}
-        onchange="pubModUpd(${i},'allow_worker',this.checked)"></td>
-      <td><input class="s" type="number" step="1024" value="${m.ctx_max}"
-        onchange="pubModUpd(${i},'ctx_max',+this.value)">${pubModCtxWarn(m)}</td>
-      <td><input class="s" type="number" step="1024" value="${m.ctx_default}"
-        onchange="pubModUpd(${i},'ctx_default',+this.value)"></td>
-      <td><input value="${esc((m.fleet_ids || []).join(", "))}" style="min-width:170px"
-        onchange="pubModUpd(${i},'fleet_ids',this.value.split(',').map(s=>s.trim()).filter(Boolean))"></td>
-      <td>${pubModLive(m)}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <button class="act primary" onclick="savePubModel(${i})">save</button>
-        <button class="act danger" onclick="deletePubModel(${jsArg(m.public_id)})">×</button>
-      </td>
-    </tr>`).join("")
-      : `<tr><td class="muted" colspan="15">no public models yet — reseed the catalogue</td></tr>`);
-}
-async function savePubModel(i) {
-  const m = PUB_MODELS[i];
-  const body = {name: m.name, vendor: m.vendor, description: m.description || "",
-    family: m.family || "",
-    fleet_ids: m.fleet_ids || [], arch: m.arch, params_b: m.params_b, active_b: m.active_b,
-    allow_primary: m.allow_primary ? 1 : 0, allow_worker: m.allow_worker ? 1 : 0,
-    ctx_max: m.ctx_max, ctx_default: m.ctx_default, enabled: m.enabled ? 1 : 0, sort: m.sort || 0};
-  try { await rawApi(`/public/models/${encodeURIComponent(m.public_id)}`, {method: "PUT", body});
-    toast("saved " + m.public_id); loadPubModels(); }
-  catch (e) { toast(e.message, true); }
-}
-async function deletePubModel(id) {
-  if (!confirm(`Delete ${id} from the catalogue?\n\nRefused with a 409 if a live public key still uses it -- revoke or wait out those keys first.`))
-    return;
-  try { await rawApi(`/public/models/${encodeURIComponent(id)}`, {method: "DELETE"});
-    toast("deleted"); loadPubModels(); }
-  catch (e) { toast(e.message, true); }
-}
-// A quick sequence of prompts rather than a full editor -- the columns in the
-// table below cover everything an existing row needs to adjust; this is only
-// for the handful of fields a brand-new row has to be born with.
-async function addPubModel() {
-  const public_id = (prompt("public id (what clients send as \"model\"), e.g. my-new-model") || "").trim();
-  if (!public_id) return;
-  const fleetIds = (prompt("fleet id(s), comma-separated — the per-host ids that ARE this model:") || "").trim();
-  if (!fleetIds) return toast("at least one fleet id is required", true);
-  const name = prompt("display name:", public_id) || public_id;
-  const vendor = prompt("vendor:", "") || "";
-  const arch = (prompt("arch — moe or dense:", "dense") || "dense").trim().toLowerCase() === "moe" ? "moe" : "dense";
-  const params_b = +prompt("total parameters (billions):", "0") || 0;
-  const active_b = +prompt("active parameters per token (billions — same as total for dense):", String(params_b)) || params_b;
-  try {
-    await rawApi(`/public/models/${encodeURIComponent(public_id)}`, {method: "PUT", body: {
-      name, vendor, description: "", fleet_ids: fleetIds.split(",").map(s => s.trim()).filter(Boolean),
-      arch, params_b, active_b, allow_primary: 0, allow_worker: 1,
-      ctx_max: 16384, ctx_default: 8192, enabled: 1, sort: 0}});
-    toast("added " + public_id + " — set primary/worker and context above");
-    loadPubModels();
-  } catch (e) { toast(e.message, true); }
-}
-// Which model leads the public request form is a SETTING, not a column on the
-// row -- there can only ever be one, and a flag per row could disagree with
-// itself. The radio writes it straight through so the tab does not carry an
-// unsaved "top" that the public page is not showing.
-async function setPubFeatured(id) {
-  try {
-    PUB_SETTINGS = await rawApi("/public/settings", {method: "PUT", body: {featured_model: id}});
-    toast(id + " is now suggested first");
-    renderPubSettings(); loadPubModels();
-  } catch (e) { toast(e.message, true); loadPubModels(); }
-}
-// What the preload loop has actually managed to do, box by box. Worth showing
-// rather than assuming: a box that does not serve the suggested model at all,
-// or is too small to hold it, simply never appears here -- and "why is it not
-// warm" is otherwise unanswerable from the outside.
-const PRELOAD_PILL = {resident: "ok", loading: "mid", refreshing: "mid", busy: "mid",
-  "in use": "mid", cooling: "no", waiting: "mid", failed: "no"};
-function renderPubPreload() {
-  const el = $("#pubpreload");
-  if (!el) return;
-  const p = PUB_PRESENTATION.preload;
-  if (!p) { el.innerHTML = ""; return; }
-  const head = !p.enabled
-    ? `<span class="pill no">preload off</span> <span class="muted">the suggested model is loaded only when somebody asks for it</span>`
-    : !p.model
-      ? `<span class="pill no">no model suggested</span> <span class="muted">pick one with the "top" column above</span>`
-      : !p.orchestrator
-        ? `<span class="pill mid">not the hub</span> <span class="muted">only the box with peers pins <span class="mono">${esc(p.model)}</span></span>`
-        : `<span class="pill ok">keeping <span class="mono">${esc(p.model)}</span> loaded</span>`;
-  const hosts = (p.hosts || []).map(h =>
-    `<span class="pill ${PRELOAD_PILL[h.phase] || "dim"}" title="${esc(h.detail || "")}">
-      ${esc(h.box || h.host)} — ${esc(h.phase)}</span>`).join(" ");
-  el.innerHTML = head + (hosts ? `<div style="margin-top:6px">${hosts}</div>` : "") +
-    `<div class="hint">Only boxes that already hold the weights and can fit the whole
-     model appear here; the loop never downloads and never interrupts a box that is
-     serving. Use the warm-up button on a key to put a model on a new box.</div>`;
-}
-async function runPubPreload() {
-  try {
-    const r = await rawApi("/public/preload", {method: "POST"});
-    PUB_PRESENTATION.preload = r; renderPubPreload();
-    toast(r.touched && r.touched.length
-      ? "loading on " + r.touched.map(t => t.host).join(", ")
-      : "nothing to do — every capable box is already warm or busy");
-  } catch (e) { toast(e.message, true); }
-}
-async function reseedPubModels() {
-  try { await rawApi("/public/models/reseed", {method: "POST"});
-    toast("catalogue reseeded"); loadPubModels(); }
-  catch (e) { toast(e.message, true); }
-}
-
-// ---- eligible employers ----
-async function loadPubDomainSummary() {
-  PUB_DOM_SUMMARY = await rawApi("/public/domains/summary").catch(() => null);
-  renderPubDomainSummary();
-}
-function renderPubDomainSummary() {
-  const s = PUB_DOM_SUMMARY;
-  if (!s) { $("#pubdomsummary").innerHTML = ""; return; }
-  const pill = (label, n, on) => `<span class="pill ${on ? "ok" : "dim"}">${esc(label)}: ${fmtN(n)}</span>`;
-  $("#pubdomsummary").innerHTML =
-    Object.entries(s.sources || {}).map(([k, v]) => pill(k, v.count, v.enabled)).join(" ") +
-    ` <span class="pill no">blocked: ${fmtN(s.blocked)}</span>`;
-}
-async function loadPubDomains() {
-  const seq = ++SEQ.domains;
-  await settings();
-  const lim = psize(), off = PAGE.domains;
-  const q = $("#pd_q").value.trim(), src = $("#pd_source").value, mode = $("#pd_mode").value;
-  const url = o => `/public/domains?limit=${lim}&offset=${o}`
-    + (q ? "&q=" + encodeURIComponent(q) : "")
-    + (src ? "&source=" + encodeURIComponent(src) : "")
-    + (mode ? "&mode=" + encodeURIComponent(mode) : "");
-  let d = await rawApi(url(off)).catch(e => (toast(e.message, true), null));
-  if (!d) return;
-  if (off && off >= d.total) { pageClamp("domains", d.total, lim); d = await rawApi(url(PAGE.domains)).catch(() => d); }
-  if (stale("domains", seq)) return;
-  PUB_DOMAINS = d.items || []; PUB_DOM_TOTAL = d.total || 0;
-  renderPubDomains();
-}
-function renderPubDomains() {
-  $("#pubdommeta").textContent = PUB_DOM_TOTAL ? `${PUB_DOM_TOTAL.toLocaleString()} domain(s)` : "";
-  $("#pubdompager").innerHTML = pager("domains", PUB_DOM_TOTAL, psize(), "loadPubDomains");
-  $("#pubdomtab tbody").innerHTML =
-    `<tr><th>domain</th><th>company</th><th>source</th><th class="num">rank</th>
-      <th>mode</th><th>enabled</th><th></th></tr>` +
-    (PUB_DOMAINS.length ? PUB_DOMAINS.map(d => `<tr>
-      <td class="mono">${esc(d.domain)}</td>
-      <td>${esc(d.company)}</td>
-      <td><span class="pill dim">${esc(d.source)}</span></td>
-      <td class="num">${d.rank ?? "–"}</td>
-      <td><span class="pill ${d.mode === "block" ? "no" : "ok"}">${esc(d.mode)}</span></td>
-      <td>${d.enabled ? '<span class="pill ok">yes</span>' : '<span class="pill dim">no</span>'}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <button class="act" onclick="domainSetMode(${d.id},'${d.mode === "block" ? "allow" : "block"}')">${
-          d.mode === "block" ? "allow" : "block"}</button>
-        <button class="act" onclick="domainSetEnabled(${d.id},${d.enabled ? 0 : 1})">${d.enabled ? "disable" : "enable"}</button>
-        <button class="act danger" onclick="domainRemove(${d.id})">remove</button>
-      </td>
-    </tr>`).join("")
-      : `<tr><td class="muted" colspan="7">no domains match</td></tr>`);
-}
-async function domainSetMode(id, mode) {
-  try { await rawApi(`/public/domains/${id}`, {method: "PATCH", body: {mode}}); loadPubDomains(); }
-  catch (e) { toast(e.message, true); }
-}
-async function domainSetEnabled(id, enabled) {
-  try { await rawApi(`/public/domains/${id}`, {method: "PATCH", body: {enabled: !!enabled}}); loadPubDomains(); }
-  catch (e) { toast(e.message, true); }
-}
-async function domainRemove(id) {
-  if (!confirm("Remove this domain from the list?\n\nThis is a hard delete, not an archive -- add it back with + Add domain if that turns out to be wrong."))
-    return;
-  try { await rawApi(`/public/domains/${id}`, {method: "DELETE"});
-    toast("removed"); loadPubDomains(); loadPubDomainSummary(); }
-  catch (e) { toast(e.message, true); }
-}
-async function addPubDomain() {
-  const domain = (prompt("Domain (a leading '.' matches every subdomain), e.g. boeing.com or .gov:") || "").trim();
-  if (!domain) return;
-  const company = prompt("Company:", "") || "";
-  try {
-    await rawApi("/public/domains", {method: "POST", body: {items: [{domain, company, source: "custom"}]}});
-    toast("added " + domain); loadPubDomains(); loadPubDomainSummary();
-  } catch (e) { toast(e.message, true); }
-}
-async function importPubDomains() {
-  const csv = $("#pd_import").value.trim();
-  if (!csv) return toast("paste some rows first", true);
-  try {
-    await rawApi("/public/domains/import", {method: "POST", body: {csv, source: "custom"}});
-    toast("import complete"); $("#pd_import").value = "";
-    loadPubDomains(); loadPubDomainSummary();
-  } catch (e) { toast(e.message, true); }
-}
-async function reseedPubDomains() {
-  try { await rawApi("/public/domains/reseed", {method: "POST"});
-    toast("domain lists reseeded"); loadPubDomains(); loadPubDomainSummary(); }
-  catch (e) { toast(e.message, true); }
-}
-async function checkPubAddress() {
-  const email = $("#pd_check").value.trim();
-  if (!email) return;
-  try {
-    const r = await rawApi("/public/domains/check", {method: "POST", body: {email}});
-    const cls = r.verdict === "allow" ? "ok" : r.verdict === "review" ? "mid" : "no";
-    $("#pd_checkout").innerHTML = `<span class="pill ${cls}">${esc(r.verdict)}</span>` +
-      (r.code ? ` <span class="mono muted">${esc(r.code)}</span>` : "") +
-      (r.company ? ` — ${esc(r.company)}` : "") +
-      (r.source ? ` <span class="muted">(${esc(r.source)}${r.rank ? ", rank " + r.rank : ""})</span>` : "");
-  } catch (e) { toast(e.message, true); }
-}
-
-// ---- issued keys ----
-const PUB_STATUS_CLS = {active: "ok", pending: "mid", denied: "no", revoked: "no", expired: "dim"};
-// The admin route is expected to hand back the derived status ("active" for
-// a live key, never the raw schema value "issued" -- see the pill vocabulary
-// this table promises), but if it ever slips through un-derived, work out
-// liveness from expires_at the same way relTime already does rather than
-// let a perfectly good key render as an unstyled, unrecognized pill.
-function pubKeyStatus(k) {
-  if (k.status !== "issued") return k.status;
-  return k.expires_at && new Date(k.expires_at) < Date.now() ? "expired" : "active";
-}
-async function loadPubKeys() {
-  const seq = ++SEQ.pubkeys;
-  await settings();
-  const lim = psize(), off = PAGE.pubkeys, arch = VIEW.pubkeys;
-  const status = $("#pk_status").value, q = $("#pk_q").value.trim();
-  const source = ($("#pk_source") || {}).value || "";
-  const url = o => `/public/keys?limit=${lim}&offset=${o}&archived=${arch}`
-    + (status ? "&status=" + encodeURIComponent(status) : "")
-    + (source ? "&source=" + encodeURIComponent(source) : "")
-    + (q ? "&q=" + encodeURIComponent(q) : "");
-  let d = await rawApi(url(off)).catch(e => (toast(e.message, true), null));
-  if (!d) return;
-  if (off && off >= d.total) { pageClamp("pubkeys", d.total, lim); d = await rawApi(url(PAGE.pubkeys)).catch(() => d); }
-  if (stale("pubkeys", seq)) return;
-  PUB_KEYS = d.items || []; PUB_KEYS_TOTAL = d.total || 0;
-  renderPubKeys();
-}
-function pubKeyActions(k) {
-  if (k.archived_at) return `<button class="act" onclick="pubKeyVerb(${k.id},'restore')">restore</button>
-    <button class="act danger" onclick="pubKeyVerb(${k.id},'purge')">delete</button>`;
-  if (k.status === "pending") return `<span class="muted" style="font-size:12px">see pending above</span>`;
-  if (k.status === "denied") return "";
-  // No address, no resend: an auto-issued key is carried by the service that
-  // minted it, and a replacement would be mailed to nobody.
-  return `<button class="act danger" ${k.status === "revoked" ? "disabled" : ""}
-      onclick="pubKeyVerb(${k.id},'revoke')">revoke</button>
-    <button class="act" onclick="pubKeyVerb(${k.id},'extend')">extend</button>
-    ${k.email ? `<button class="act" onclick="pubKeyVerb(${k.id},'resend')">resend</button>` : ""}`;
-}
-function renderPubKeys() {
-  $("#pubkeysarch").textContent = archLabel(VIEW.pubkeys);
-  $("#pubkeysmeta").textContent = PUB_KEYS_TOTAL
-    ? `${PUB_KEYS_TOTAL.toLocaleString()} ${VIEW.pubkeys ? "archived" : "live"} request(s)` : "";
-  $("#pubkeyspager").innerHTML = pager("pubkeys", PUB_KEYS_TOTAL, psize(), "loadPubKeys");
-  $("#pubkeytab tbody").innerHTML =
-    `<tr><th>issued</th><th>email</th><th>company</th><th>kind</th><th>models</th>
-      <th class="num">ctx</th><th>used</th><th class="num">fallbacks</th>
-      <th>expires</th><th>status</th><th></th></tr>` +
-    (PUB_KEYS.length ? PUB_KEYS.map(k => {
-      const [ld, lh] = pubLimitsFor(k.kind, k);
-      const auto = String(k.source || "").startsWith("auto:");
-      return `<tr>
-        <td class="mono" style="font-size:11px">${esc((k.created_at || "").replace("T", " ").replace("+00:00", "Z"))}</td>
-        <td>${k.email ? esc(k.email) : `<span class="pill dim">${esc(k.source || "no address")}</span>`}</td>
-        <td style="font-size:12px">${esc(k.company)}${auto && k.note
-          ? ` <span class="muted mono" style="font-size:11px">${esc(k.note)}</span>` : ""}</td>
-        <td><span class="pill">${esc(k.kind)}</span></td>
-        <td class="mono" style="font-size:12px">${pubKeyModels(k)}</td>
-        <td class="num">${fmtN(k.ctx)}</td>
-        <td class="mono" style="font-size:12px">${fmtN(k.used_day)}/${ld ?? "∞"}d · ${fmtN(k.used_hour)}/${lh ?? "∞"}h</td>
-        <td class="num">${fmtN(k.fallbacks)}</td>
-        <td class="mono" style="font-size:12px">${relTime(k.expires_at)}</td>
-        <td><span class="pill ${PUB_STATUS_CLS[pubKeyStatus(k)] || "dim"}">${esc(pubKeyStatus(k))}</span></td>
-        <td style="text-align:right;white-space:nowrap">${pubKeyActions(k)}</td>
-      </tr>`;
-    }).join("")
-      : `<tr><td class="muted" colspan="11">${VIEW.pubkeys ? "nothing archived" : "no requests yet"}</td></tr>`);
-}
-async function pubKeyVerb(id, verb) {
-  const ask = {
-    revoke: "Revoke this key?\n\nIt stops authenticating immediately — every request with it gets 401 from now on.",
-    resend: "Resend mints a replacement key: the old one is archived and stops working the moment the new one is minted, and the new key is emailed to the same address. The raw key can never be shown again, which is why resend cannot just repeat the email.",
-    purge: "Delete this archived request permanently?",
-  }[verb];
-  if (ask && !confirm(ask)) return;
-  const req = verb === "restore" ? [`/public/keys/${id}/restore`, {method: "POST"}]
-            : verb === "purge"   ? [`/public/keys/${id}/purge`, {method: "DELETE"}]
-            :                      [`/public/keys/${id}/${verb}`, {method: "POST"}];
-  try { await rawApi(...req); } catch (e) { return toast(e.message, true); }
-  PUBKEY_IDS = null;
-  toast({revoke: "revoked", extend: "extended", resend: "replacement key emailed",
-    restore: "restored", purge: "deleted permanently"}[verb] || "done");
-  loadPubKeys(); loadPubStats();
-}
-
-// A single key may pick any enabled model; a team's primary and worker
-// pickers are narrowed by the same allow_primary/allow_worker flags the
-// catalogue table edits -- reuse them rather than re-deriving the rule.
-function renderPubIssueModels() {
-  const kind = $("#pk_new_kind").value;
-  const enabled = PUB_MODELS.filter(m => m.enabled);
-  if (kind === "team") {
-    const primaries = enabled.filter(m => m.allow_primary);
-    const workers = enabled.filter(m => m.allow_worker);
-    $("#pk_new_models").innerHTML =
-      `<div class="field" style="min-width:240px"><label class="f">primary model</label>
-        <select id="pk_new_primary">${primaries.map(m =>
-          `<option value="${esc(m.public_id)}">${esc(m.name)} — ${pubModClass(m)}</option>`).join("")
-          || `<option value="">no primary-eligible models enabled</option>`}</select></div>
-      <div class="spacer"></div>
-      <label class="f" data-help="issue workers">worker models (1–2)</label>
-      <div class="row" style="margin-top:5px">${workers.map(m => `
-        <label class="row" style="gap:4px;font-size:13px">
-          <input type="checkbox" style="width:auto" data-pk-worker="${esc(m.public_id)}"> ${esc(m.name)}</label>`).join("")
-        || `<span class="muted">no worker-eligible models enabled</span>`}</div>`;
-  } else {
-    $("#pk_new_models").innerHTML =
-      `<div class="field" style="min-width:240px"><label class="f">model</label>
-        <select id="pk_new_model">${enabled.map(m =>
-          `<option value="${esc(m.public_id)}">${esc(m.name)} — ${pubModClass(m)}</option>`).join("")
-          || `<option value="">no models enabled</option>`}</select></div>`;
-  }
-}
-async function issuePubKeyByHand() {
-  const email = $("#pk_new_email").value.trim();
-  if (!email) return toast("email is required", true);
-  const kind = $("#pk_new_kind").value;
-  const body = {email, kind, ctx: +$("#pk_new_ctx").value || 0,
-    note: $("#pk_new_note").value.trim() || undefined};
-  if (kind === "team") {
-    const primary = ($("#pk_new_primary") || {}).value;
-    if (!primary) return toast("pick a primary model", true);
-    const workers = $$("#pk_new_models input:checked").map(i => i.dataset.pkWorker);
-    if (!workers.length) return toast("pick at least one worker model", true);
-    body.primary = primary; body.workers = workers;
-  } else {
-    const model = ($("#pk_new_model") || {}).value;
-    if (!model) return toast("pick a model", true);
-    body.model = model;
-  }
-  try {
-    await rawApi("/public/keys", {method: "POST", body});
-    toast("key issued and emailed to " + email);
-    $("#pk_new_email").value = ""; $("#pk_new_note").value = ""; $("#pk_new_ctx").value = "8192";
-    PUBKEY_IDS = null;
-    loadPubKeys(); loadPubStats(); loadPubEvents();
-  } catch (e) { toast(e.message, true); }
-}
-
-// ---- activity ----
-const PUB_EVENT_CLS = {issued: "ok", approved: "ok", pending: "mid", fallback: "mid",
-  resent: "dim", extended: "dim", rejected: "no", rate_limited: "no", denied: "no",
-  revoked: "no", mail_error: "no"};
-async function loadPubEvents() {
-  const seq = ++SEQ.pubevents;
-  await settings();
-  const lim = psize(), off = PAGE.pubevents, kind = $("#pe_kind").value;
-  const url = o => `/public/events?limit=${lim}&offset=${o}` + (kind ? "&kind=" + encodeURIComponent(kind) : "");
-  let d = await rawApi(url(off)).catch(e => (toast(e.message, true), null));
-  if (!d) return;
-  if (off && off >= d.total) { pageClamp("pubevents", d.total, lim); d = await rawApi(url(PAGE.pubevents)).catch(() => d); }
-  if (stale("pubevents", seq)) return;
-  PUB_EVENTS = d.items || []; PUB_EVENTS_TOTAL = d.total || 0;
-  renderPubEvents();
-}
-function renderPubEvents() {
-  $("#pubevmeta").textContent = PUB_EVENTS_TOTAL ? `${PUB_EVENTS_TOTAL.toLocaleString()} event(s)` : "";
-  $("#pubevpager").innerHTML = pager("pubevents", PUB_EVENTS_TOTAL, psize(), "loadPubEvents");
-  $("#pubevtab tbody").innerHTML =
-    `<tr><th>when</th><th>event</th><th>email</th><th>ip</th><th>detail</th></tr>` +
-    (PUB_EVENTS.length ? PUB_EVENTS.map(e => `<tr>
-      <td class="mono" style="font-size:11px">${esc((e.ts || "").replace("T", " ").replace("+00:00", "Z"))}</td>
-      <td><span class="pill ${PUB_EVENT_CLS[e.kind] || "dim"}">${esc(e.kind)}</span></td>
-      <td>${e.email ? esc(e.email) : '<span class="muted">—</span>'}</td>
-      <td class="mono muted" style="font-size:12px">${e.ip ? esc(e.ip) : "—"}</td>
-      <td style="font-size:12px">${esc(e.detail)}</td>
-    </tr>`).join("")
-      : `<tr><td class="muted" colspan="5">no activity yet</td></tr>`);
-}
-
-// ---- settings ----
-async function loadPubSettings() {
-  PUB_SETTINGS = await rawApi("/public/settings").catch(e => (toast("public settings: " + e.message, true), null));
-  renderPubSettings();
-}
-function renderPubSettings() {
-  const s = PUB_SETTINGS;
-  if (!s) return;
-  // Same "never clobber what's being typed" guard the retention form uses.
-  const put = (id, v) => { const el = $(id); if (el && el !== document.activeElement) el.value = v; };
-  const putBool = (id, v) => put(id, v ? "1" : "0");
-  put("#ps_single_rpd", s.single_rpd); put("#ps_single_rph", s.single_rph);
-  put("#ps_team_rpd", s.team_rpd); put("#ps_team_rph", s.team_rph);
-  put("#ps_key_days", s.key_days);
-  put("#ps_team_workers", s.team_max_workers); put("#ps_team_rounds", s.team_max_rounds);
-  put("#ps_max_domain", s.max_keys_per_domain); put("#ps_max_live", s.max_live_keys);
-  put("#ps_ip_day", s.ip_requests_per_day);
-  put("#ps_max_email", s.max_keys_per_email);
-  putBool("#ps_review_unlisted", s.review_unlisted);
-  put("#ps_family_order", (s.model_family_order || []).join(", "));
-  // Rebuilt from the catalogue each time so a model that was just added or
-  // deleted cannot be left selectable (or stranded as the selection).
-  const featSel = $("#ps_featured");
-  if (featSel && featSel !== document.activeElement) {
-    featSel.innerHTML = `<option value="">— none —</option>` + PUB_MODELS
-      .filter(m => m.enabled)
-      .map(m => `<option value="${esc(m.public_id)}">${esc(m.name)}</option>`).join("");
-    featSel.value = s.featured_model || "";
-  }
-  putBool("#ps_preload", s.preload_featured);
-  putBool("#ps_demo_enabled", s.demo_enabled);
-  const demoSel = $("#ps_demo_model");
-  if (demoSel && demoSel !== document.activeElement) {
-    demoSel.innerHTML = `<option value="">— none —</option>` + PUB_MODELS
-      .filter(m => m.enabled)
-      .map(m => `<option value="${esc(m.public_id)}">${esc(m.name)}</option>`).join("");
-    demoSel.value = s.demo_model || "";
-  }
-  put("#ps_demo_ip_rph", s.demo_ip_rph); put("#ps_demo_max_tokens", s.demo_max_tokens);
-  put("#ps_demo_max_prompt_chars", s.demo_max_prompt_chars);
-  put("#ps_demo_prefer", (s.demo_prefer_hosts || []).join(", "));
-  put("#ps_demo_exclude", (s.demo_exclude_hosts || []).join(", "));
-  put("#ps_demo_prompt", s.demo_system_prompt);
-  putBool("#ps_auto_enabled", s.auto_issue_enabled);
-  const autoSel = $("#ps_auto_model");
-  if (autoSel && autoSel !== document.activeElement) {
-    autoSel.innerHTML = `<option value="">— none —</option>` + PUB_MODELS
-      .filter(m => m.enabled)
-      .map(m => `<option value="${esc(m.public_id)}">${esc(m.name)}</option>`).join("");
-    autoSel.value = s.auto_issue_model || "";
-  }
-  put("#ps_auto_ctx", s.auto_issue_ctx); put("#ps_auto_daily_cap", s.auto_issue_daily_cap);
-  put("#ps_auto_setup", s.auto_issue_setup_text);
-  put("#ps_fallback_when", s.fallback_when || "not_resident");
-  put("#ps_fallback_tolerance", s.fallback_tolerance);
-  putBool("#ps_fallback_notice", s.fallback_notice);
-  put("#ps_fallback_text", s.fallback_notice_text);
-  put("#ps_team_prompt", s.team_prompt); put("#ps_worker_prompt", s.worker_prompt);
-  put("#ps_mail_from", s.mail_from); put("#ps_mail_reply_to", s.mail_reply_to);
-  put("#ps_admin_notify", s.admin_notify); put("#ps_email_subject", s.email_subject);
-  put("#ps_email_intro", s.email_intro); put("#ps_email_setup", s.email_setup);
-  put("#ps_email_disclaimer", s.email_disclaimer); put("#ps_base_url", s.public_base_url);
-  $("#ps_smtp_line").innerHTML = s.smtp_configured
-    ? `<span class="pill ok">SMTP configured</span> as <span class="mono">${esc(s.smtp_from || "")}</span>`
-    : `<span class="pill no">SMTP not configured</span> — set LLMSTACK_SMTP_* in gateway.env`;
-  $("#ps_intake_line").innerHTML = s.intake_configured
-    ? `<span class="pill ok">Intake token set</span>`
-    : `<span class="pill no">Intake token missing</span> — set LLMSTACK_PUBLIC_INTAKE_TOKEN in gateway.env`;
-}
-async function savePubSettings() {
-  const body = {
-    single_rpd: +$("#ps_single_rpd").value || 0, single_rph: +$("#ps_single_rph").value || 0,
-    team_rpd: +$("#ps_team_rpd").value || 0, team_rph: +$("#ps_team_rph").value || 0,
-    key_days: +$("#ps_key_days").value || 0,
-    team_max_workers: +$("#ps_team_workers").value || 0, team_max_rounds: +$("#ps_team_rounds").value || 0,
-    max_keys_per_domain: +$("#ps_max_domain").value || 0, max_live_keys: +$("#ps_max_live").value || 0,
-    ip_requests_per_day: +$("#ps_ip_day").value || 0,
-    max_keys_per_email: +$("#ps_max_email").value || 0,
-    review_unlisted: $("#ps_review_unlisted").value === "1",
-    model_family_order: $("#ps_family_order").value.split(",")
-      .map(x => x.trim()).filter(Boolean),
-    featured_model: $("#ps_featured").value,
-    preload_featured: $("#ps_preload").value === "1",
-    demo_enabled: $("#ps_demo_enabled").value === "1",
-    demo_model: $("#ps_demo_model").value,
-    demo_ip_rph: +$("#ps_demo_ip_rph").value || 0,
-    demo_max_tokens: +$("#ps_demo_max_tokens").value || 0,
-    demo_max_prompt_chars: +$("#ps_demo_max_prompt_chars").value || 0,
-    demo_prefer_hosts: $("#ps_demo_prefer").value.split(",").map(x => x.trim()).filter(Boolean),
-    demo_exclude_hosts: $("#ps_demo_exclude").value.split(",").map(x => x.trim()).filter(Boolean),
-    demo_system_prompt: $("#ps_demo_prompt").value,
-    auto_issue_enabled: $("#ps_auto_enabled").value === "1",
-    auto_issue_model: $("#ps_auto_model").value,
-    auto_issue_ctx: +$("#ps_auto_ctx").value || 0,
-    auto_issue_daily_cap: +$("#ps_auto_daily_cap").value || 0,
-    auto_issue_setup_text: $("#ps_auto_setup").value,
-    fallback_when: $("#ps_fallback_when").value,
-    fallback_tolerance: +$("#ps_fallback_tolerance").value || 0,
-    fallback_notice: $("#ps_fallback_notice").value === "1",
-    fallback_notice_text: $("#ps_fallback_text").value,
-    team_prompt: $("#ps_team_prompt").value, worker_prompt: $("#ps_worker_prompt").value,
-    mail_from: $("#ps_mail_from").value, mail_reply_to: $("#ps_mail_reply_to").value,
-    admin_notify: $("#ps_admin_notify").value, email_subject: $("#ps_email_subject").value,
-    email_intro: $("#ps_email_intro").value, email_setup: $("#ps_email_setup").value,
-    email_disclaimer: $("#ps_email_disclaimer").value, public_base_url: $("#ps_base_url").value,
-  };
-  try {
-    PUB_SETTINGS = await rawApi("/public/settings", {method: "PUT", body});
-    toast("public settings saved"); renderPubSettings(); loadPubDemo(); loadPubAuto();
-  } catch (e) { toast(e.message, true); }
-}
-// ---- auto-issue (connected services) ----
-// The status line under the card: what a mint would produce right now, and
-// how many keys the services have taken today / hold live.
-async function loadPubAuto() {
-  const el = $("#pubautoline");
-  if (!el) return;
-  const badge = $("#pubn_auto");
-  let a;
-  try {
-    a = await rawApi("/public/auto");
-  } catch (e) {
-    el.textContent = "auto-issue: " + e.message;
-    if (badge) badge.textContent = "";
-    return;
-  }
-  if (badge) badge.textContent = a.enabled ? String(a.live || 0) : "off";
-  const who = (a.by_service || []).map(s => `${esc(s.service)} (${fmtN(s.keys)})`).join(", ");
-  el.innerHTML = (a.enabled ? `<span class="pill ok">on</span>` : `<span class="pill no">off</span>`)
-    + ` &middot; mints <b>${esc(a.model_name || a.model || "—")}</b>`
-    + (a.model && !a.model_enabled ? ` <span class="pill no">model disabled in the catalogue</span>` : "")
-    + ` at ${fmtN(a.ctx)} ctx, ${fmtN(a.key_days)} day(s), ${fmtN(a.limit_day)}/day ${fmtN(a.limit_hour)}/hour`
-    + ` &middot; today ${fmtN(a.issued_today)}/${fmtN(a.daily_cap)} &middot; live ${fmtN(a.live)}`
-    + (who ? ` &middot; services: ${who}` : ` &middot; no service has minted yet`)
-    + ` &middot; base url <span class="mono">${esc(a.base_url || "—")}</span>`;
-}
-// A key minted from the card itself, shown once -- for checking what a
-// connected service is going to receive without involving one.
-async function mintAutoTestKey() {
-  const out = $("#pubautokey");
-  try {
-    const r = await rawApi("/public/keys/auto", {method: "POST",
-      body: {service: "dashboard", ref: "test-" + Date.now(), company: "(test from the dashboard)"}});
-    out.innerHTML = `<div class="hint">Shown once &mdash; this is exactly the bundle a connected service gets back.
-        It is a real key (it counts toward the daily cap and lives the full term); revoke it when you are done.</div>
-      <pre class="mono" style="white-space:pre-wrap;font-size:12px;margin-top:6px">${esc(r.setup_text || "")}\n\nexpires ${esc(r.expires_at)}${r.warm_url ? "\nwarm-up: " + esc(r.warm_url) : ""}</pre>
-      <button class="act danger" onclick="pubKeyVerb(${+r.id},'revoke');this.disabled=true;$('#pubautokey .hint').textContent='revoked.'">Revoke this test key</button>`;
-    PUBKEY_IDS = null;
-    toast("test key minted");
-    loadPubKeys(); loadPubStats(); loadPubEvents(); loadPubAuto();
-  } catch (e) { toast(e.message, true); }
-}
-// The demo's own report: the boxes the policy would use right now (real
-// names here, aliases on the public side), which excluded boxes are serving
-// the model anyway, and what the demo has cost in the last day.
-async function loadPubDemo() {
-  const el = $("#pubdemo");
-  if (!el) return;
-  const d = await rawApi("/public/demo").catch(e => (toast("demo report: " + e.message, true), null));
-  if (!d) return;
-  const head = !d.enabled
-    ? `<span class="pill no">demo off</span>`
-    : !d.model_known
-      ? `<span class="pill no">model <span class="mono">${esc(d.model || "—")}</span> is not an enabled catalogue row</span>`
-      : !(d.candidates || []).length
-        ? `<span class="pill mid">nobody awake</span> <span class="muted">no allowed box serves <span class="mono">${esc(d.model)}</span> right now</span>`
-        : `<span class="pill ok">answering from ${esc(d.candidates[0].host)}</span> <span class="muted">(${esc(d.candidates[0].box)})</span>`;
-  const cands = (d.candidates || []).map(c =>
-    `<span class="pill ${c.resident ? "ok" : "dim"}" title="${esc(c.fleet_id)}">${esc(c.host)} · ${esc(c.box)} · ${c.ctx ? c.ctx.toLocaleString() + " ctx" : "ctx ?"}${c.preferred ? " · preferred" : ""}${c.resident ? " · loaded" : ""}</span>`).join(" ");
-  const shut = (d.excluded_serving || []).length
-    ? `<div class="hint">Serving it but excluded by policy: ${d.excluded_serving.map(esc).join(", ")}</div>` : "";
-  const cost = `<div class="hint">${d.requests_hour} request${d.requests_hour === 1 ? "" : "s"} in the last hour, ${d.requests_day} in the last day` +
-    ((d.by_host || []).length ? ` — ${d.by_host.map(h => esc(h.host || "?") + " " + h.n + " (avg " + (h.latency_ms / 1000).toFixed(1) + "s)").join(", ")}` : "") +
-    `. Metered under the key name <span class="mono">fleet-pass-demo</span> on the Telemetry tab.</div>`;
-  el.innerHTML = head + (cands ? `<div style="margin-top:6px">${cands}</div>` : "") + shut + cost;
-}
-async function sendPubTestMail() {
-  const to = prompt("Send a test mail to:");
-  if (!to) return;
-  try {
-    const r = await rawApi("/public/settings/test-mail", {method: "POST", body: {to}});
-    toast(r.ok ? "test mail sent to " + to : "send failed: " + (r.error || "unknown error"), !r.ok);
-  } catch (e) { toast(e.message, true); }
-}
-
-// ---- box aliases ----
-// The only place the dashboard shows the real host behind a "Box N" -- every
-// public-facing surface (the overview, the models list, the key e-mails)
-// only ever names the alias.
-async function loadPubAliases() {
-  const d = await rawApi("/public/aliases").catch(() => null);
-  renderPubAliases((d && d.items) || []);
-}
-function renderPubAliases(items) {
-  $("#pubaliastab tbody").innerHTML =
-    `<tr><th>real host</th><th>public label</th></tr>` +
-    (items.length ? items.map(a => `<tr>
-      <td class="mono">${esc(a.host)}</td>
-      <td><span class="pill dim">${esc(a.label || ("Box " + a.box))}</span></td>
-    </tr>`).join("")
-      : `<tr><td class="muted" colspan="2">no aliases assigned yet — one is created the first time a host is seen</td></tr>`);
-}
-
 // ---- models ----
 let MODELS = [], LOCAL = [], DEFAULTS = {}, SIZING = {}, UPSTREAM = {enabled: false, models: []};
+// Rows on the page the gateway has never seen: "+ Add model", the Library's
+// Add to Models, the add-all backlog pass. Every /models reload used to
+// replace MODELS wholesale, so the SECOND Add to Models click (which reloads
+// first, to stage on fresh state) silently threw away what the first one had
+// staged -- as did a visit to another tab. A reload now adopts the gateway's
+// records and puts the still-unsaved rows back, unless the gateway has since
+// learned that file (a save landed, here or in another window). Rows belong
+// to the host they were staged for and never follow a host switch.
+let SERVER_ROWS = new WeakSet(), MODELS_HOST = null;
+function stagedRows() {
+  return MODELS_HOST === CUR ? MODELS.filter(m => !SERVER_ROWS.has(m)) : [];
+}
+function adoptServerModels(configured) {
+  const staged = stagedRows();
+  MODELS = configured || [];
+  SERVER_ROWS = new WeakSet(MODELS);
+  MODELS_HOST = CUR;
+  const have = new Set(MODELS.map(m => normPath(m.path)));
+  staged.forEach(m => { if (!m.path || !have.has(normPath(m.path))) MODELS.push(m); });
+}
 async function loadModels() {
   const d = await api("/models").catch(e => (toast(e.message, true), null));
   if (!d) return;
-  MODELS = d.configured; LOCAL = d.local_files; DEFAULTS = d.defaults;
+  adoptServerModels(d.configured); LOCAL = d.local_files; DEFAULTS = d.defaults;
   UPSTREAM = d.upstream || {enabled: false, models: []};
   SIZING = {};
   (d.sizing || []).forEach(s => { SIZING[s.id] = s; });
@@ -3825,14 +2746,55 @@ function ctxHint(m) {
   return `<div class="muted" style="font-size:11px" title="${esc(why)}">auto → ${fmtN(s.ctx)}</div>`;
 }
 function renderModels() {
-  const opts = f => LOCAL.map(l =>
-    `<option value="${esc(l.path)}" ${l.path === f ? "selected" : ""}>${esc(l.name)} (${fmtB(l.size)})</option>`).join("");
+  // Only a `kind === "main"` LOCAL entry is a loadable model -- a lone shard
+  // or a projector opened directly would give llama.cpp a file it cannot
+  // serve. An older gateway sends no `kind` at all; treat that as "main" so
+  // this box's own downloads (pre-dating the field) still show up. A record
+  // already pointed at something else (a shard, a projector) keeps a
+  // synthetic option rather than going blank, so the save never silently
+  // drops a path nobody asked to change.
+  const opts = f => {
+    const loadable = LOCAL.filter(l => !l.kind || l.kind === "main");
+    // samePath, not ===: a record typed by hand on a Windows box says
+    // `d:/models/x.gguf` where the gateway's listing says `D:\models\x.gguf`,
+    // and the file it names is on disk and loadable all the same.
+    let html = loadable.map(l =>
+      `<option value="${esc(l.path)}" ${samePath(l.path, f) ? "selected" : ""}>${esc(l.name)} (${fmtB(l.bytes != null ? l.bytes : l.size)})</option>`).join("");
+    if (f && !loadable.some(l => samePath(l.path, f))) {
+      const l = LOCAL.find(x => samePath(x.path, f));
+      html += `<option value="${esc(f)}" selected>${esc((l && l.name) || f)} (shard/projector — not a loadable model)</option>`;
+    }
+    return html;
+  };
+  // The vision projector (--mmproj), edited where the weights are picked. A
+  // projector belongs to the repo it shipped with, so the ones beside this
+  // model's GGUF come first and the rest sit under "other folders"; one the
+  // record already names that is NOT under the models folder (an LM Studio
+  // import points at LM Studio's own copy) keeps a synthetic option rather
+  // than being blanked by a save. No projector on the box and none on the
+  // record means no control at all -- a text-only fleet box stays uncluttered.
+  const projectors = LOCAL.filter(l => l.kind === "mmproj");
+  const mmSelect = (m, i) => {
+    if (!projectors.length && !m.mmproj) return "";
+    const here = normDir(m.path);
+    const opt = l => `<option value="${esc(l.path)}" ${samePath(l.path, m.mmproj) ? "selected" : ""}>${esc(l.name)} (${fmtB(l.size)})</option>`;
+    const near = projectors.filter(l => normDir(l.path) === here);
+    const far = projectors.filter(l => normDir(l.path) !== here);
+    const farOpt = l => `<option value="${esc(l.path)}" ${samePath(l.path, m.mmproj) ? "selected" : ""}>${esc(baseName(dirOf(l.path)))} / ${esc(l.name)} (${fmtB(l.size)})</option>`;
+    const known = projectors.some(l => samePath(l.path, m.mmproj));
+    return `<select data-help="projector" title="vision projector (--mmproj)" onchange="upd(${i},'mmproj',this.value)" style="min-width:230px;margin-top:4px">
+            <option value="">— no projector —</option>${near.map(opt).join("")}
+            ${far.length ? `<optgroup label="other folders">${far.map(farOpt).join("")}</optgroup>` : ""}
+            ${m.mmproj && !known ? `<option value="${esc(m.mmproj)}" selected>${esc(baseName(m.mmproj))} (outside the models folder)</option>` : ""}
+          </select>`;
+  };
   $("#mtab tbody").innerHTML = MODELS.map((m, i) => `
     <tr>
       <td><input type="checkbox" style="width:auto" ${m.enabled ? "checked" : ""} onchange="upd(${i},'enabled',this.checked)"></td>
       <td><input value="${esc(m.id)}" onchange="upd(${i},'id',this.value)" style="min-width:150px"></td>
-      <td><select onchange="upd(${i},'path',this.value)" style="min-width:230px">
-            <option value="">— pick a GGUF —</option>${opts(m.path)}</select></td>
+      <td><select onchange="updPath(${i},this.value)" style="min-width:230px">
+            <option value="">— pick a GGUF —</option>${opts(m.path)}</select>
+          ${mmSelect(m, i)}</td>
       <td><input class="s" type="number" value="${m.ctx}"
                  onchange="upd(${i},'ctx',+this.value)">${ctxHint(m)}</td>
       <td><input class="s" type="number" value="${m.ngl}" onchange="upd(${i},'ngl',+this.value)"></td>
@@ -3842,28 +2804,167 @@ function renderModels() {
               `<option value="${v}" ${(m.reasoning||"auto") === v ? "selected" : ""}>${v}</option>`).join("")}
           </select></td>
       <td><input class="s" type="number" value="${m.ttl}" onchange="upd(${i},'ttl',+this.value)"></td>
-      <td><select onchange="updWarm(${i},this.value)" style="width:96px"
-            data-help="warm standby">
-            ${[["", "off"], ["preload", "startup"], ["persistent", "always"]].map(([v, t]) =>
-              `<option value="${v}" ${(m.persistent ? "persistent" : m.preload ? "preload" : "") === v ? "selected" : ""}>${t}</option>`).join("")}
+      <td style="text-align:center"><input type="radio" name="bootmodel" style="width:auto"
+            data-help="warm standby"
+            ${m.preload && !m.persistent ? "checked" : ""} ${m.persistent ? "disabled" : ""}
+            title="${m.persistent
+              ? "pinned already \u2014 resident from start-up and never evicted"
+              : "load this model when the engine starts, and keep it warm; click again to clear"}"
+            onclick="bootPick(${i})"></td>
+      <td><select onchange="updPinned(${i},this.value)" style="width:82px">
+            ${[["", "no"], ["persistent", "always"]].map(([v, t]) =>
+              `<option value="${v}" ${(m.persistent ? "persistent" : "") === v ? "selected" : ""}>${t}</option>`).join("")}
           </select></td>
       <td><input value="${esc(m.extra_flags)}" onchange="upd(${i},'extra_flags',this.value)" style="min-width:160px"></td>
       <td><button class="act danger" onclick="MODELS.splice(${i},1);renderModels()">×</button></td>
-    </tr>`).join("") || `<tr><td colspan="11" class="muted">${UPSTREAM.enabled
+    </tr>`).join("") || `<tr><td colspan="12" class="muted">${UPSTREAM.enabled
       ? "no llama-swap models here — this box is Ollama-managed, see the table above"
       : "no models configured yet — download a GGUF on the Library tab, then add it here"}</td></tr>`;
+  // The backlog button says how much backlog there is, and is simply not
+  // there when there is none (or on an Ollama box, where a GGUF record is a
+  // model nothing can serve). Counted against MODELS as it stands on the
+  // page, so it drops to nothing the moment the rows are staged.
+  const addAll = $("#addall-btn");
+  if (addAll) {
+    const n = (UPSTREAM.enabled || !bulkAddSupported(LOCAL)) ? 0 : unregisteredLocal(LOCAL, MODELS).length;
+    addAll.style.display = n ? "" : "none";
+    addAll.textContent = `+ Add all ${n} on-disk model${n === 1 ? "" : "s"}`;
+  }
 }
 const upd = (i, k, v) => { MODELS[i][k] = v; };
-// warm: "" = load on demand; "preload" = load at engine start-up (one per
-// box -- the save refuses two, the swap group holds one model); "persistent"
-// = own warm group, resident forever, nothing may evict it.
-const updWarm = (i, v) => {
-  MODELS[i].preload = v === "preload";
+// Picking different weights moves the projector with them. A projector is
+// only ever right for the repo it shipped with, so one left behind from the
+// previous GGUF's folder is a launch that fails (or worse, loads and sees
+// garbage); the new file's own sibling projector -- the gateway names the
+// smallest, as `mmproj` on its LOCAL entry -- takes its place, or none does.
+// A projector already beside the new GGUF is the owner's choice and stays.
+// What decides it is whether the WEIGHTS changed folder, never where the
+// projector happens to be: a record kept text-only on purpose (no projector,
+// to save its VRAM) must stay text-only when it moves to a sibling quant, and
+// one paired by hand with a projector elsewhere keeps it across that move too.
+function updPath(i, v) {
+  const m = MODELS[i];
+  const before = m.path;
+  m.path = v;
+  if (normDir(before) !== normDir(v)) {
+    const main = LOCAL.find(l => l.path === v);
+    m.mmproj = (main && main.mmproj) || "";
+  }
+  renderModels();
+}
+// The boot slot (models.json's `preload`) is a radio and not a per-row switch
+// because a box has exactly one: the swap group holds one model at a time, so
+// a second preload is not a second warm model, it is one cold load followed by
+// another that evicts it -- which is why check_preload_count refuses the save
+// outright. Clicking the checked circle clears the slot, and the box then
+// loads nothing until a request asks for something. A radio cannot report
+// "none" by itself (there is no unchecked state to click), so this reads the
+// flag we are about to change: `was` is the state the click just overwrote in
+// the DOM, and re-rendering puts the DOM back in step with MODELS either way.
+const bootPick = (i) => {
+  const was = !!MODELS[i].preload && !MODELS[i].persistent;
+  MODELS.forEach(m => { if (!m.persistent) m.preload = false; });
+  if (!was) MODELS[i].preload = true;
+  renderModels();
+};
+// pinned: its own llama-swap group, resident from start-up, nothing may evict
+// it. It is warm at boot by definition (render_swap_config preloads every
+// persistent model), so it gives up the boot slot rather than holding one the
+// radio would then have to show as unavailable.
+const updPinned = (i, v) => {
   MODELS[i].persistent = v === "persistent";
+  if (MODELS[i].persistent) MODELS[i].preload = false;
+  renderModels();
 };
 function addModel() {
   MODELS.push(Object.assign({}, DEFAULTS, {id: "new-model-" + (MODELS.length + 1)}));
   renderModels();
+}
+// Staging a Library download as a Models record. loadModels() first so this
+// works from a Library tab that has been open a while (another browser tab,
+// or this one's own earlier saves, may have changed MODELS since it last
+// loaded) -- staging on top of a stale MODELS array is how a save silently
+// re-adds something someone else already removed. The projector it pairs is
+// named in the toast and stays editable under the row's GGUF picker.
+let ADDQ_BUSY = false;
+async function addQuantModel(id, path, mmproj) {
+  // One at a time: two overlapping calls each await their own /models fetch,
+  // and whichever resolves last replaces MODELS wholesale -- including the
+  // record the other one had just pushed. A double-click is the common case.
+  if (ADDQ_BUSY) return;
+  ADDQ_BUSY = true;
+  try {
+    await loadModels();
+    const existing = MODELS.find(m => m.path === path);
+    if (existing) {
+      toast(`already in Models as ${existing.id}`);
+      switchSection("models");
+      return;
+    }
+    MODELS.push(Object.assign({}, DEFAULTS, {id, path, mmproj: mmproj || ""}));
+    renderModels();
+    switchSection("models");
+    toast(`staged ${id} — review ctx/ngl, then Save & apply`
+      + (mmproj ? ` (paired with ${baseName(mmproj)} — change it under the GGUF picker)` : ""));
+  } finally { ADDQ_BUSY = false; }
+}
+// Every loadable GGUF on this box that no model record serves yet: what was
+// pulled by hand (curl, the bootstrap scripts, the old per-file Library
+// button) before "Add to Models" existed. Pure, so the check can drive it.
+//   * `in_models` is the gateway's answer and covers what a path compare
+//     cannot: the same weights registered under their LM Studio hard link.
+//   * a record staged but not saved yet counts too, or a second click would
+//     stage everything twice.
+//   * a split model missing a shard is left out -- it cannot load, and a
+//     record for it would only be rolled back by Save & apply.
+function unregisteredLocal(local, models) {
+  const staged = new Set((models || []).map(m => normPath(m.path)));
+  return (local || []).filter(l => (!l.kind || l.kind === "main")
+    && l.complete !== false && !l.in_models && !staged.has(normPath(l.path)));
+}
+// The add-everything pass is only safe where the gateway says which files
+// are already served (`in_models`). A peer still on a gateway that predates
+// the field answers without it, and a path compare alone cannot see a GGUF
+// registered under its LM Studio hard link -- so there the backlog is left
+// to the per-row buttons, where each add is a decision someone looked at.
+function bulkAddSupported(local) {
+  const mains = (local || []).filter(l => !l.kind || l.kind === "main");
+  return mains.length > 0 && mains.every(l => "in_models" in l);
+}
+// One pass over the backlog instead of one click per file. Staged like a
+// single add -- nothing is saved until Save & apply, which then proves each
+// new record by loading it, so a big backlog is a long apply: the toast says
+// how many, and unwanted rows can be removed (×) or switched off first.
+async function addAllLocalModels() {
+  if (ADDQ_BUSY) return;
+  ADDQ_BUSY = true;
+  try {
+    await loadModels();
+    if (UPSTREAM.enabled) { toast("this box is Ollama-managed — nothing here can serve a GGUF record", true); return; }
+    if (!bulkAddSupported(LOCAL)) {
+      toast("this box's gateway cannot say which files are already served — redeploy it, or add them one at a time from the Library", true);
+      return;
+    }
+    const todo = unregisteredLocal(LOCAL, MODELS);
+    if (!todo.length) { toast("every complete GGUF on this box is already in Models"); switchSection("models"); return; }
+    const taken = new Set(MODELS.flatMap(m => [m.id, ...(m.aliases || [])]));
+    todo.forEach(l => {
+      // The gateway's suggestions are unique among themselves and against
+      // saved records; the loop covers ids staged on this page but not saved.
+      // A suffix is cut in under the 64-character limit, as the gateway's
+      // own _fleet_id_for does: one over-long id fails the WHOLE save.
+      const base = (l.suggested_id || fallbackSlug(baseName(dirOf(l.path)).replace(/^.*__/, ""), ""))
+        .replace(/-+$/, "").slice(0, 64) || "model";
+      let id = base;
+      for (let n = 2; taken.has(id); n++) id = `${base.slice(0, 60)}-${n}`;
+      taken.add(id);
+      MODELS.push(Object.assign({}, DEFAULTS, {id, path: l.path, mmproj: l.mmproj || ""}));
+    });
+    renderModels();
+    switchSection("models");
+    toast(`staged ${todo.length} on-disk model${todo.length === 1 ? "" : "s"} — review, then Save & apply `
+      + `(each one is loaded in turn to prove it works)`);
+  } finally { ADDQ_BUSY = false; }
 }
 async function saveModels() {
   try {
@@ -3884,10 +2985,13 @@ async function saveModels() {
 let TUNE = null, GPU = null;
 async function loadOptimize() {
   const d = await api("/models").catch(e => (toast(e.message, true), null));
-  if (d) { MODELS = d.configured; LOCAL = d.local_files; DEFAULTS = d.defaults; }
+  if (d) { adoptServerModels(d.configured); LOCAL = d.local_files; DEFAULTS = d.defaults; }
   const sel = $("#tunesel");
   const prev = sel.value;
-  sel.innerHTML = MODELS.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join("")
+  // Saved records only: a row staged on the Models tab survives this reload
+  // (see adoptServerModels) but the gateway cannot tune a model it has never
+  // been told about.
+  sel.innerHTML = MODELS.filter(m => SERVER_ROWS.has(m)).map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join("")
     || `<option value="">no models configured</option>`;
   if (prev && MODELS.some(m => m.id === prev)) sel.value = prev;
   renderTune();
@@ -4100,18 +3204,40 @@ async function stageGtt() {
 }
 
 // ---- library ----
+// "177B" not "177000000000" -- HF's raw parameter count would otherwise blow
+// out the quant header's width and force a scroll on every repo.
+function fmtParams(n) {
+  if (n === null || n === undefined) return "?";
+  if (n >= 1e12) return (n / 1e12).toFixed(1) + "T";
+  if (n >= 1e9) return Math.round(n / 1e9) + "B";
+  if (n >= 1e6) return Math.round(n / 1e6) + "M";
+  return fmtN(n);
+}
+// Local dest paths are OS-native (backslash on Windows); HF tree paths are
+// always "/" (house style). Splitting on both covers either without the
+// caller having to know which kind of path it is holding.
+function baseName(p) { return String(p || "").split(/[\\/]/).pop(); }
+function dirOf(p) {
+  const s = String(p || "");
+  const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+  return i === -1 ? "" : s.slice(0, i);
+}
+// For COMPARING folders only: a record typed by hand on a Windows box says
+// `d:/models/x` where the gateway's own listing says `D:\models\x`.
+function normDir(p) { return dirOf(p).replace(/\\/g, "/").toLowerCase(); }
+function normPath(p) { return String(p || "").replace(/\\/g, "/").toLowerCase(); }
+function samePath(a, b) { return !!a && !!b && normPath(a) === normPath(b); }
+// Holds the last /hf/quants response so pullQuant(i) and the mmproj <select>
+// it reads can work off an index instead of threading the whole payload
+// through onclick attributes.
+let HFQ = null;
 async function loadLibrary() {
   const d = await api("/models").catch(() => null);
   if (d) {
     UPSTREAM = d.upstream || {enabled: false, models: []};
     renderUpstream("upslib");
     LOCAL = d.local_files;
-    $("#local tbody").innerHTML = LOCAL.length ? LOCAL.map(l => `
-      <tr><td class="mono">${esc(l.name)}</td>
-          <td class="num">${fmtB(l.size)}</td>
-          <td class="muted" style="font-size:11px">${esc(l.path)}</td>
-          <td style="text-align:right"><button class="act danger" onclick="delLocal(${jsArg(l.path)})">delete</button></td></tr>`).join("")
-      : `<tr><td class="muted">no completed GGUF files yet — check Downloads above</td></tr>`;
+    $("#local tbody").innerHTML = renderLocalRows(LOCAL, d.configured, UPSTREAM.enabled, stagedRows());
   }
   api("/status").then(s => {
     const st = (s.host && s.host.storage) || null;
@@ -4126,16 +3252,75 @@ async function loadLibrary() {
   loadJobs();
   loadLmStudio();
 }
-async function delLocal(p) {
-  if (!confirm("Delete " + p + " ?\n\nThis permanently removes the file from disk.")) return;
-  try { await api("/local-model?path=" + encodeURIComponent(p), {method: "DELETE"});
-    toast("deleted"); loadLibrary(); } catch (e) { toast(e.message, true); }
+// One row per loadable model (kind === "main"; a gateway that predates the
+// field sends none at all, which means "main" too) rather than one row per
+// file on disk -- a split model used to list N-1 shard rows nobody could act
+// on individually, and the only real action on any of them was "delete
+// everything together" through the first shard anyway.
+// `staged` = rows on the Models tab the gateway has not been given yet (see
+// stagedRows). Without them this tab kept offering "Add all 5" for five
+// models that were already sitting staged one tab over.
+function renderLocalRows(local, configured, upstream, staged) {
+  local = local || []; configured = configured || []; staged = staged || [];
+  const mains = local.filter(l => !l.kind || l.kind === "main");
+  const mmprojs = local.filter(l => l.kind === "mmproj");
+  if (!mains.length && !mmprojs.length)
+    return `<tr><td class="muted">no completed GGUF files yet — check Downloads above</td></tr>`;
+  // The backlog in one action: everything pulled by hand before Add to
+  // Models existed. Offered from two up -- for one, the row's own button is
+  // the same click -- and never on an Ollama box, where a GGUF record is a
+  // model nothing can serve.
+  const backlog = (upstream || !bulkAddSupported(local))
+    ? [] : unregisteredLocal(local, configured.concat(staged));
+  const banner = backlog.length > 1
+    ? `<tr><td colspan="4"><span class="pill mid">${backlog.length} not in Models yet</span>
+        <span class="muted">complete GGUFs on this box that no model record serves</span>
+        <button class="act primary" style="float:right" onclick="addAllLocalModels()">Add all ${backlog.length} to Models</button></td></tr>`
+    : "";
+  const mainRows = mains.map(l => {
+    // `in_models` is the gateway's answer and sees what a path compare
+    // cannot: the same weights registered under their LM Studio hard link.
+    const cfg = configured.find(m => samePath(m.path, l.path));
+    const cfgId = (cfg && cfg.id) || l.in_models || "";
+    const st = staged.find(m => samePath(m.path, l.path));
+    const bytes = l.bytes != null ? l.bytes : l.size;
+    const shardNote = l.shards > 1 ? ` · ${l.shards} shards` : "";
+    const incomplete = l.complete === false ? ` <span class="pill no">incomplete</span>` : "";
+    const mmSub = l.mmproj ? `<div class="muted" style="font-size:11px">+ projector: ${esc(baseName(l.mmproj))}</div>` : "";
+    const action = cfgId
+      ? `<span class="muted">in Models as <span class="mono">${esc(cfgId)}</span></span>`
+      : st ? `<span class="muted">staged as <span class="mono">${esc(st.id)}</span> — Save &amp; apply on the Models tab</span>`
+      : (upstream || l.complete === false) ? ""
+      : `<button class="act primary" onclick="addQuantModel(${jsArg(l.suggested_id || "")},${jsArg(l.path)},${jsArg(l.mmproj || "")})">Add to Models</button>`;
+    return `<tr><td class="mono">${esc(l.name)}${incomplete}</td>
+        <td class="num">${fmtB(bytes)}${shardNote}</td>
+        <td class="muted" style="font-size:11px">${esc(l.path)}${mmSub}</td>
+        <td style="text-align:right;white-space:nowrap">${action}
+          <button class="act danger" onclick="delLocal(${jsArg(l.path)},${l.shards > 1 ? "true" : "false"})">delete</button></td></tr>`;
+  }).join("");
+  const mmRows = mmprojs.map(l => `
+      <tr><td class="mono">${esc(l.name)} <span class="pill dim">projector</span></td>
+          <td class="num">${fmtB(l.size)}</td>
+          <td class="muted" style="font-size:11px">${esc(l.path)}</td>
+          <td style="text-align:right"><button class="act danger" onclick="delLocal(${jsArg(l.path)},false)">delete</button></td></tr>`).join("");
+  return banner + mainRows + mmRows;
+}
+async function delLocal(path, multi) {
+  const l = LOCAL.find(x => x.path === path);
+  const msg = multi && l
+    ? `Delete ${l.shards} shards (${fmtB(l.bytes)})?`
+    : "Delete " + path + " ?\n\nThis permanently removes the file from disk.";
+  if (!confirm(msg)) return;
+  try {
+    await api("/local-model?path=" + encodeURIComponent(path) + (multi ? "&shards=1" : ""), {method: "DELETE"});
+    toast("deleted"); loadLibrary();
+  } catch (e) { toast(e.message, true); }
 }
 async function hfSearch() {
   try {
     const r = await api("/hf/search?q=" + encodeURIComponent($("#hfq").value));
     $("#hfres tbody").innerHTML = r.map(m => `<tr>
-      <td class="mono" style="cursor:pointer" onclick="$('#hfq').value=${jsArg(m.id)};hfFiles()">${esc(m.id)}</td>
+      <td class="mono" style="cursor:pointer" onclick="$('#hfq').value=${jsArg(m.id)};hfQuants()">${esc(m.id)}</td>
       <td class="num muted">${fmtN(m.downloads)}↓</td></tr>`).join("")
       || `<tr><td class="muted">no repos matched</td></tr>`;
   } catch (e) { toast(e.message, true); }
@@ -4151,6 +3336,181 @@ async function hfFiles() {
       </tr>`).join("") || `<tr><td class="muted">no .gguf files in that repo</td></tr>`;
   } catch (e) { toast(e.message, true); }
 }
+// `repoOverride` is what the 10 s poll passes (the repo on screen, not
+// whatever has since been typed into the search box).
+async function hfQuants(repoOverride) {
+  const repo = String(repoOverride || $("#hfq").value || "").trim();
+  if (!repo) return;
+  try {
+    const data = await api("/hf/quants?repo=" + encodeURIComponent(repo));
+    // A poll re-render must not undo what the user did between ticks: the
+    // file lists they opened stay open and the projector they picked stays
+    // picked, even though every row is rebuilt from scratch.
+    const open = new Set($$("#hfres details").map((d, i) => d.open ? i : -1).filter(i => i >= 0));
+    const picked = {};
+    $$("#hfres select").forEach(s => { picked[s.id] = s.value; });
+    HFQ = data;
+    $("#hfres tbody").innerHTML = renderQuantRows(repo, HFQ);
+    $$("#hfres details").forEach((d, i) => { if (open.has(i)) d.open = true; });
+    $$("#hfres select").forEach(s => {
+      if (s.id in picked && Array.from(s.options).some(o => o.value === picked[s.id])) s.value = picked[s.id];
+    });
+  } catch (e) {
+    // A peer whose gateway predates /hf/quants answers 404 through the
+    // fleet proxy; the flat listing every gateway has is the honest
+    // degradation there, not a dead end.
+    if (/not found|\b404\b/i.test(e.message || "")) {
+      HFQ = null;
+      toast("this box's gateway has no quant view yet — showing the flat file list");
+      $("#hfq").value = repo;
+      return hfFiles();
+    }
+    toast(e.message, true);
+  }
+}
+// Pure: (repo, the /hf/quants payload) in, an HTML string out -- no reads of
+// HFQ or the DOM, so the node-vm check can drive it with a fixture instead of
+// a live page. One row per quant level (LM Studio style) rather than one per
+// file: the whole point of this view over the old flat file list.
+function renderQuantRows(repo, data) {
+  data = data || {};
+  const quants = data.quants || [];
+  const excluded = data.excluded || [];
+  const mi = data.model_info || {};
+  const upstreamOnly = !!data.upstream_only;
+  const totalFiles = quants.reduce((s, q) => s + ((q.files || []).length), 0);
+
+  const meta = [];
+  if (mi.params !== null && mi.params !== undefined) meta.push(fmtParams(mi.params));
+  if (mi.architecture) meta.push(mi.architecture);
+  if (mi.context_length !== null && mi.context_length !== undefined) meta.push("ctx " + fmtN(mi.context_length));
+  if (mi.pipeline_tag) meta.push(mi.pipeline_tag);
+  if (mi.downloads !== null && mi.downloads !== undefined) meta.push(fmtN(mi.downloads) + " downloads");
+
+  const excludedNote = excluded.length
+    ? `<div class="hint">skipped: ${excluded.map(x => esc(baseName(x.path) + " (" + x.reason + ")")).join("; ")}</div>`
+    : "";
+  const upstreamNote = upstreamOnly
+    ? `<div class="hint">this box is Ollama-managed — each quant below offers a copy-to-clipboard <span class="mono">ollama pull</span> instead of a download</div>`
+    : "";
+
+  const header = `<tr><td colspan="6">
+      <div><span class="mono">${esc(repo)}</span>${meta.length ? " · " + esc(meta.join(" · ")) : ""}</div>
+      <div class="sub">${quants.length} quant level${quants.length === 1 ? "" : "s"}
+        · ${totalFiles} file${totalFiles === 1 ? "" : "s"}
+        · <button class="act" onclick="hfFiles()">flat file list</button></div>
+      ${excludedNote}${upstreamNote}
+    </td></tr>`;
+
+  const body = quants.length
+    ? quants.map((q, i) => renderQuantRow(repo, q, i, upstreamOnly)).join("")
+    : `<tr><td colspan="6" class="muted">no GGUF files found for this repo</td></tr>`;
+  return header + body;
+}
+function renderQuantRow(repo, q, i, upstreamOnly) {
+  const files = q.files || [];
+  const fileCount = files.length === 1 ? "single file" : `${files.length} files`;
+
+  // disk_ok wins over the fit verdict itself -- a quant that would fit VRAM
+  // is still undownloadable with nowhere on disk to land it.
+  let fitPill = "";
+  if (q.disk_ok === false) fitPill = `<span class="pill no">no room on disk</span>`;
+  else if (q.fit === "vram") fitPill = `<span class="pill ok">fits VRAM</span>`;
+  else if (q.fit === "unified") fitPill = `<span class="pill ok">fits memory</span>`;
+  else if (q.fit === "spill") fitPill = `<span class="pill mid">spills to RAM</span>`;
+  else if (q.fit === "cpu") fitPill = `<span class="pill dim">CPU only</span>`;
+
+  let statusPill = "";
+  if (q.status === "done") statusPill = `<span class="pill ok">on disk</span>`;
+  else if (q.status === "downloading") {
+    const pct = q.bytes_total ? Math.round(q.bytes_done / q.bytes_total * 100) : 0;
+    statusPill = `<span class="pill mid">downloading ${pct}%</span>`;
+  } else if (q.status === "partial") {
+    statusPill = `<span class="pill mid">${q.done} of ${q.total} on disk</span>`;
+  }
+  // Never hide an incomplete-on-HF quant behind whatever local status it also
+  // has -- a set missing a shard upstream cannot ever finish, no matter how
+  // much of it is already on disk.
+  if (q.complete === false) {
+    statusPill += (statusPill ? " " : "")
+      + `<span class="pill no">incomplete on HF (${q.shards} of ${q.expected_shards} shards)</span>`;
+  }
+  // A root file and a subfolder re-cut sharing a basename would land on the
+  // same local file (dest flattens to the basename), so neither is offered.
+  if (q.clash_with) {
+    statusPill += (statusPill ? " " : "")
+      + `<span class="pill no" title="same file name as another quant of this repo — the two would overwrite each other on disk">name clash with ${esc(q.clash_with)}</span>`;
+  }
+
+  const mmSel = (q.mmproj_choices && q.mmproj_choices.length)
+    ? `<select id="hfq-mm-${i}">
+        ${q.mmproj_choices.map((m, mi) =>
+          `<option value="${esc(m.path)}" ${mi === 0 ? "selected" : ""}>${esc(baseName(m.path))} (${fmtB(m.size)})</option>`).join("")}
+        <option value="">no projector</option>
+      </select>`
+    : "";
+
+  // Order matters: a set HF is missing a shard of reads "done" the moment
+  // every file HF *does* offer is on disk (status counts the files that
+  // exist), yet it can never load -- so incomplete/clash are decided before
+  // status is even looked at. A stop button stays available regardless.
+  let action;
+  if (upstreamOnly) {
+    action = `<button class="act" onclick="copyOllamaPull(${jsArg(q.ollama_tag)})">copy ollama pull</button>`;
+  } else if (q.status === "downloading") {
+    action = `<button class="act" onclick="cancelPackage(${jsArg(repo)},${jsArg(q.label)})">stop</button>`;
+  } else if (q.complete === false || q.clash_with) {
+    action = "";
+  } else if (q.status === "done") {
+    // The gateway names the projector that is actually on disk (smallest
+    // first, the same order the <select> above defaults to). Nothing is
+    // guessed from the choices here: a record pointing at a projector nobody
+    // downloaded is a launch failure, not a vision model.
+    const mmprojDest = q.mmproj_dest || "";
+    action = `<button class="act primary" onclick="addQuantModel(${jsArg(q.suggested_id)},${jsArg(q.main_dest)},${jsArg(mmprojDest)})">Add to Models</button>`;
+  } else {
+    action = `<button class="act primary" title="queues all ${files.length} files" onclick="pullQuant(${i})">Download</button>`;
+  }
+
+  const details = `<details><summary>files</summary>${files.map(f => `
+      <div class="row" style="justify-content:space-between">
+        <span class="mono" style="font-size:12px">${esc(f.path)}</span>
+        <span>${fmtB(f.size)}
+          <button class="act" onclick="pull(${jsArg(repo)},${jsArg(f.path)})">pull</button></span>
+      </div>`).join("")}</details>`;
+
+  return `<tr>
+      <td><span class="mono" style="font-weight:bold">${esc(q.label)}</span> <span class="sub">${fileCount}</span></td>
+      <td class="num">${fmtB(q.bytes)}</td>
+      <td>${fitPill}</td>
+      <td>${statusPill}</td>
+      <td>${mmSel}</td>
+      <td style="text-align:right">${action}</td>
+    </tr>
+    <tr><td colspan="6">${details}</td></tr>`;
+}
+async function pullQuant(i) {
+  if (!HFQ || !HFQ.quants || !HFQ.quants[i]) return;
+  const q = HFQ.quants[i];
+  const repo = HFQ.repo;
+  const sel = $("#hfq-mm-" + i);
+  const mmproj = sel ? sel.value : "";
+  try {
+    await api("/download-package", {method: "POST",
+      body: {repo, label: q.label, files: q.files.map(f => f.path), mmproj}});
+    toast(`queued ${q.files.length} files for ${q.label}`);
+    loadJobs();
+    hfQuants();
+  } catch (e) { toast(e.message, true); }
+}
+async function cancelPackage(repo, pkg) {
+  await api("/jobs/cancel-package", {method: "POST", body: {repo, pkg}}).catch(e => toast(e.message, true));
+  loadJobs();
+}
+function copyOllamaPull(tag) {
+  navigator.clipboard.writeText("ollama pull " + tag).catch(() => {});
+  toast("copied: ollama pull " + tag);
+}
 async function pull(repo, filename) {
   try { await api("/download", {method: "POST", body: {repo, filename}});
     toast("download queued: " + filename); loadJobs(); }
@@ -4159,23 +3519,55 @@ async function pull(repo, filename) {
 async function loadJobs() {
   const j = await api("/jobs").catch(() => null);
   if (!j) return;
+  $("#jobs tbody").innerHTML = renderJobRows(j);
+  checkJobGroupsDone(j);
+}
+// Pure: rows in, an HTML string out. Rows sharing a repo+pkg fold into one
+// bar; a pkg === "" row (every download queued before this feature, and the
+// per-file "pull" escape hatch after it) renders through the untouched
+// original template so this refactor cannot regress it.
+function renderJobRows(rows) {
+  rows = rows || [];
+  if (!rows.length) return `<tr><td class="muted">no downloads yet</td></tr>`;
   const t = Date.now();
-  $("#jobs tbody").innerHTML = j.length ? j.slice(0, 12).map(x => {
-    const pct = x.bytes_total ? x.bytes_done / x.bytes_total * 100 : 0;
-    const cls = x.status === "done" ? "ok" : x.status === "error" ? "no" : "mid";
-    // Per-job rate, differenced against the previous poll of this same job.
-    let rate = "";
-    const prev = JOBRATE[x.id];
-    if (x.status === "downloading" && prev && t > prev.t) {
-      const bps = (x.bytes_done - prev.b) / ((t - prev.t) / 1000);
-      if (bps > 1024) {
-        const left = Math.max(0, x.bytes_total - x.bytes_done);
-        rate = ` · ${fmtR(bps)}${left ? " · ETA " + dur(left / bps) : ""}`;
-      }
+  const byKey = {};
+  rows.forEach(x => {
+    if (!x.pkg) return;
+    const key = x.repo + "::" + x.pkg;
+    (byKey[key] = byKey[key] || []).push(x);
+  });
+  // One item per group, positioned where the group's newest row sits (rows
+  // arrive newest-first) -- the rest of that group's rows are folded in
+  // without moving the group down the list to where an older member was.
+  const seen = new Set();
+  const items = [];
+  rows.forEach(x => {
+    if (!x.pkg) { items.push({row: x}); return; }
+    const key = x.repo + "::" + x.pkg;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({key, rows: byKey[key]});
+  });
+  return items.slice(0, 12)
+    .map(it => it.row ? renderJobRow(it.row, t) : renderJobGroup(it.key, it.rows, t))
+    .join("");
+}
+function renderJobRow(x, t) {
+  const pct = x.bytes_total ? x.bytes_done / x.bytes_total * 100 : 0;
+  const cls = x.status === "done" ? "ok" : x.status === "error" ? "no" : "mid";
+  // Per-job rate, differenced against the previous poll of this same job.
+  let rate = "";
+  const prev = JOBRATE[x.id];
+  if (x.status === "downloading" && prev && t > prev.t) {
+    const bps = (x.bytes_done - prev.b) / ((t - prev.t) / 1000);
+    if (bps > 1024) {
+      const left = Math.max(0, x.bytes_total - x.bytes_done);
+      rate = ` · ${fmtR(bps)}${left ? " · ETA " + dur(left / bps) : ""}`;
     }
-    if (x.status === "downloading") JOBRATE[x.id] = {t, b: x.bytes_done};
-    else delete JOBRATE[x.id];
-    return `<tr><td style="width:100%">
+  }
+  if (x.status === "downloading") JOBRATE[x.id] = {t, b: x.bytes_done};
+  else delete JOBRATE[x.id];
+  return `<tr><td style="width:100%">
         <div class="mono" style="font-size:12px">${esc(x.filename.split("/").pop())}</div>
         <div class="bar"><i style="width:${pct}%"></i></div>
         <div class="sub">${fmtB(x.bytes_done)} / ${fmtB(x.bytes_total)}${rate}
@@ -4184,9 +3576,94 @@ async function loadJobs() {
         <span class="pill ${cls}">${esc(x.status)}</span>
         ${x.status === "downloading" ? `<button class="act" onclick="cancelJob(${x.id})">stop</button>` : ""}
       </td></tr>`;
-  }).join("") : `<tr><td class="muted">no downloads yet</td></tr>`;
+}
+// Same rate-tracking idiom as renderJobRow, keyed by "repo::pkg" in the same
+// JOBRATE dict instead of by job id -- a package's rate is the sum of its
+// shards' throughput, not any one file's.
+function renderJobGroup(key, rows, t) {
+  const repo = rows[0].repo, pkg = rows[0].pkg;
+  const bytesDone = rows.reduce((s, r) => s + (r.bytes_done || 0), 0);
+  const bytesTotal = rows.reduce((s, r) => s + (r.bytes_total || 0), 0);
+  const doneCount = rows.filter(r => r.status === "done").length;
+  const anyError = rows.some(r => r.status === "error");
+  const anyActive = rows.some(r => r.status === "downloading" || r.status === "queued");
+  const allDone = rows.every(r => r.status === "done");
+  const allCancelled = rows.every(r => r.status === "cancelled");
+  const cls = allDone ? "ok" : anyError ? "no" : anyActive ? "mid" : allCancelled ? "dim" : "mid";
+  const label = allDone ? "done" : anyError ? "error" : anyActive ? "downloading" : allCancelled ? "cancelled" : "downloading";
+  const pct = bytesTotal ? bytesDone / bytesTotal * 100 : 0;
+
+  let rate = "";
+  const prev = JOBRATE[key];
+  if (anyActive && prev && t > prev.t) {
+    const bps = (bytesDone - prev.b) / ((t - prev.t) / 1000);
+    if (bps > 1024) {
+      const left = Math.max(0, bytesTotal - bytesDone);
+      rate = ` · ${fmtR(bps)}${left ? " · ETA " + dur(left / bps) : ""}`;
+    }
+  }
+  if (anyActive) JOBRATE[key] = {t, b: bytesDone};
+  else delete JOBRATE[key];
+
+  const mainRow = rows.find(r => r.role === "main");
+  const mmprojRow = rows.find(r => r.role === "mmproj");
+  const mainDest = mainRow ? mainRow.dest : "";
+  const mmprojDest = mmprojRow ? mmprojRow.dest : "";
+
+  let action = "";
+  if (allDone && mainDest) {
+    const local = LOCAL.find(l => l.path === mainDest);
+    const id = (local && local.suggested_id) || fallbackSlug(repo, pkg);
+    action = `<button class="act primary" onclick="addQuantModel(${jsArg(id)},${jsArg(mainDest)},${jsArg(mmprojDest)})">Add to Models</button>`;
+  } else if (allDone) {
+    // The main file never got a job row (it was already on disk when the
+    // package was queued, so download-package reported it instead of
+    // queuing it): nothing here knows its path, and staging a record with
+    // an empty one is worse than pointing at the rows that do know.
+    action = `<span class="muted">ready — add it from the quant row or On disk below</span>`;
+  } else if (anyActive) {
+    action = `<button class="act" onclick="cancelPackage(${jsArg(repo)},${jsArg(pkg)})">stop</button>`;
+  }
+
+  return `<tr><td style="width:100%">
+      <div class="mono" style="font-size:12px">${esc(pkg)} · ${esc(repo)}</div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="sub">${doneCount} of ${rows.length} files · ${fmtB(bytesDone)} / ${fmtB(bytesTotal)}${rate}</div>
+    </td><td style="text-align:right;white-space:nowrap">
+      <span class="pill ${cls}">${esc(label)}</span>
+      ${action}
+    </td></tr>`;
+}
+// The LOCAL match (suggested_id, set by the gateway from the repo/label) is
+// preferred; this only covers a group whose files have not shown up in a
+// /models refresh yet (id, main_dest) — repo name minus the "-GGUF" HF
+// convention, lowercased, anything outside a swap-config-safe id charset
+// collapsed to "-".
+function fallbackSlug(repo, pkg) {
+  const name = (repo.split("/").pop() || repo).replace(/-GGUF$/i, "");
+  return (name + "-" + pkg).toLowerCase().replace(/[^a-z0-9._:-]/g, "-");
 }
 const JOBRATE = {};
+const JOBGROUP_SEEN_DONE = new Set();
+// Fires loadLibrary() once per package the moment every one of its files
+// lands -- not on every 2s poll while it is still downloading -- so On-disk
+// and the Models-tab GGUF picker pick up a finished package without
+// hammering /models on every /jobs tick.
+function checkJobGroupsDone(rows) {
+  const groups = {};
+  (rows || []).forEach(x => {
+    if (!x.pkg) return;
+    const key = x.repo + "::" + x.pkg;
+    (groups[key] = groups[key] || []).push(x);
+  });
+  let refresh = false;
+  Object.keys(groups).forEach(key => {
+    const allDone = groups[key].every(r => r.status === "done");
+    if (allDone) { if (!JOBGROUP_SEEN_DONE.has(key)) { JOBGROUP_SEEN_DONE.add(key); refresh = true; } }
+    else JOBGROUP_SEEN_DONE.delete(key);
+  });
+  if (refresh) loadLibrary();
+}
 async function cancelJob(id) {
   await api(`/jobs/${id}/cancel`, {method: "POST"}).catch(e => toast(e.message, true));
   loadJobs();
@@ -4445,7 +3922,7 @@ async function loadAgents() {
     ? `${page.total.toLocaleString()} ${arch ? "archived profile(s)" : "key(s)"}` : "";
   $("#agpager").innerHTML = pager("agents", page.total, lim, "loadAgents");
   $("#agtab tbody").innerHTML =
-    `<tr><th>key</th><th>agent</th><th>models</th><th>prompt</th><th>state</th><th></th></tr>` +
+    `<tr><th>key</th><th>agent</th><th>models</th><th>policy</th><th>prompt</th><th>state</th><th></th></tr>` +
     (AGENTS.length ? AGENTS.map(a => {
       const p = a.profile;
       let models = "any";
@@ -4454,11 +3931,22 @@ async function loadAgents() {
           models = p.force_model ? "forced: " + p.force_model : (l.length ? l.join(", ") : "any");
         } catch {}
       }
+      let policy = "—";
+      if (p) {
+        try {
+          const pr = JSON.parse(p.prefer_hosts || "[]"), ex = JSON.parse(p.exclude_hosts || "[]");
+          const parts = [];
+          if (pr.length) parts.push("prefer: " + pr.join(", "));
+          if (ex.length) parts.push("exclude: " + ex.join(", "));
+          if (parts.length) policy = parts.join(" · ");
+        } catch {}
+      }
       return `<tr>
         <td>${esc(a.key_name)} <span class="mono muted" style="font-size:11px">${esc(a.prefix)}…</span>
           ${a.key_archived ? `<br><span class="pill arch">key archived too</span>` : ""}</td>
         <td>${p ? esc(p.name || "unnamed") : '<span class="muted">no profile</span>'}</td>
         <td class="mono" style="font-size:12px">${p ? esc(models) : "—"}</td>
+        <td class="mono" style="font-size:12px">${p ? esc(policy) : "—"}</td>
         <td class="muted" style="font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
           ${p ? esc((p.system_prompt || "").slice(0, 90)) : "—"}</td>
         <td>${!p ? "" : arch ? `<span class="pill arch">archived</span>`
@@ -4469,7 +3957,7 @@ async function loadAgents() {
           : `<button class="act" onclick="editAgent(${a.key_id})">${p ? "edit" : "create"}</button>`}</td>
       </tr>`;
     }).join("")
-      : `<tr><td class="muted" colspan="6">${arch ? "nothing archived"
+      : `<tr><td class="muted" colspan="7">${arch ? "nothing archived"
           : "no API keys yet — mint one on the API keys tab first"}</td></tr>`);
 }
 async function agentVerb(keyId, verb) {
@@ -4490,11 +3978,16 @@ function editAgent(keyId) {
   try { ov = JSON.parse(p.param_overrides || "{}"); } catch {}
   let allowed = [];
   try { allowed = JSON.parse(p.allowed_models || "[]"); } catch {}
+  let prefer = [], exclude = [];
+  try { prefer = JSON.parse(p.prefer_hosts || "[]"); } catch {}
+  try { exclude = JSON.parse(p.exclude_hosts || "[]"); } catch {}
   $("#agtitle").textContent = "Agent profile for key: " + (a ? a.key_name : keyId);
   $("#ag_name").value = p.name || "";
   $("#ag_on").value = p.enabled === 0 ? "0" : "1";
   $("#ag_sys").value = p.system_prompt || "";
   $("#ag_rules").value = p.rules || "";
+  $("#ag_prefer_hosts").value = prefer.join(", ");
+  $("#ag_exclude_hosts").value = exclude.join(", ");
   $("#ag_temp").value = ov.temperature ?? "";
   $("#ag_topp").value = ov.top_p ?? "";
   $("#ag_maxtok").value = ov.max_tokens ?? "";
@@ -4515,12 +4008,15 @@ async function saveAgent() {
   if ($("#ag_topp").value !== "") overrides.top_p = +$("#ag_topp").value;
   if ($("#ag_maxtok").value !== "") overrides.max_tokens = +$("#ag_maxtok").value;
   const allowed = $$("#ag_models input:checked").map(i => i.dataset.agModel);
+  const preferHosts = $("#ag_prefer_hosts").value.split(",").map(x => x.trim()).filter(Boolean);
+  const excludeHosts = $("#ag_exclude_hosts").value.split(",").map(x => x.trim()).filter(Boolean);
   try {
     await api("/agents/" + AGCUR, {method: "PUT", body: {
       enabled: $("#ag_on").value === "1",
       name: $("#ag_name").value, system_prompt: $("#ag_sys").value,
       rules: $("#ag_rules").value, allowed_models: allowed,
-      force_model: $("#ag_force").value, param_overrides: overrides}});
+      force_model: $("#ag_force").value, param_overrides: overrides,
+      prefer_hosts: preferHosts, exclude_hosts: excludeHosts}});
     toast("profile saved — takes effect on the key's next request");
     $("#ageditor").style.display = "none"; loadAgents();
   } catch (e) { toast(e.message, true); }
@@ -4703,6 +4199,11 @@ const HELP = {
     + "model &mdash; and <i>none</i> means the box loads nothing until asked. "
     + "Setting it restarts llama-swap, which loads the choice right away. The same "
     + "flag as the <b>warm</b> column on the Models tab."],
+  "projector": ["Vision projector <code>--mmproj</code>",
+    "The file that lets a vision model see images; without it the same weights load "
+    + "text-only. It belongs to the repo it shipped with, so the projectors beside this "
+    + "model's GGUF are listed first and picking different weights moves the projector "
+    + "with them. <b>no projector</b> serves the model text-only and saves its VRAM."],
   "warm standby": ["Warm standby",
     "<b>off</b>: loaded on first request, unloaded after its ttl. <b>startup</b>: "
     + "preloaded whenever the engine starts and kept for good (pair with ttl 0) "
@@ -4830,9 +4331,10 @@ const HELP = {
 
   // ---- library ----
   "hf query": ["Repo id or search phrase",
-    "<b>Search</b> takes a phrase and finds matching repos. <b>List files</b> takes an "
-    + "exact repo id (<code>org/name</code>) and lists that repo's GGUF files with sizes, "
-    + "ready to pull."],
+    "<b>Search</b> takes a phrase and finds matching repos. <b>Quants</b> takes an "
+    + "exact repo id (<code>org/name</code>) and shows one row per quant level — total "
+    + "size, whether it fits this box, what is already on disk — with one Download for "
+    + "every shard plus the vision projector. <b>Files</b> is the flat per-file list."],
 
   // ---- keys ----
   "keys:name": ["What this key is for",
@@ -4899,6 +4401,10 @@ const HELP = {
     "A request for any model not checked is refused with 403 at the gateway. Nothing checked "
     + "means every model on this host is allowed &mdash; the list is a restriction, not a "
     + "grant."],
+  "prefer/exclude hosts": ["Prefer / exclude hosts",
+    "Which fleet boxes this key's requests should land on first, and which to never use "
+    + "&mdash; same rule as the public demo's prefer/exclude, applied per key instead of "
+    + "globally. A saturated preferred box never jumps an idle non-preferred one."],
   "temperature": ["Default temperature",
     "Fills the sampler in only when the client leaves it unset; a client that sends its own "
     + "value wins. Blank leaves the model's own default alone."],
@@ -5085,263 +4591,6 @@ const HELP = {
     + "reason to reach for this. Everything the box serves stops until it is back; the "
     + "dashboard polls on its own and says so once it answers again, usually within a "
     + "minute or two."],
-
-  // ---- public (Fleet Pass) ----
-  "public:approve": ["Approve this request",
-    "Mints the key, e-mails it to the address on the request, and marks the row "
-    + "<code>issued</code>. There is no undo from here &mdash; revoke the key afterwards "
-    + "if it turns out to be wrong."],
-  "public:deny": ["Deny this request",
-    "Marks the row <code>denied</code> and, if a reason is given, e-mails it to the "
-    + "requester as a short note. No key is minted."],
-  "public:kind": ["Single worker or team",
-    "<b>single</b> is one model, at 5 requests/day and 2/hour by default. <b>team</b> is a "
-    + "primary plus 1&ndash;2 workers behind one key, at the lower team limits &mdash; the "
-    + "primary's own turns and the workers it spawns are never metered against either "
-    + "budget, only what the client itself sends."],
-  "public:models": ["Model(s) this key uses",
-    "A single key's one model id, or a team's primary &rarr; workers. These are catalogue "
-    + "<code>public_id</code>s, not fleet model ids &mdash; a fallback can still swap the "
-    + "model actually served without changing what is shown here."],
-  "public:ctx": ["Context cap",
-    "The token window this key is held to, chosen at request time and rounded down to a "
-    + "multiple of 1024. Enforced at the proxy on every request, not just at mint time."],
-  "public:used": ["Spend against this key's limits",
-    "Rolling day and hour windows, exactly like every other key on this gateway. Only "
-    + "client-facing requests count &mdash; a team's internal primary rounds and worker "
-    + "calls never do."],
-  "public:fallbacks": ["Times a different model answered",
-    "How often this key asked for one model and, because it was not resident (or the "
-    + "settings say to try harder), a same-class model answered instead. Every fallback "
-    + "reply carries a notice saying so, unless that notice is turned off below."],
-  "public:expires": ["Time to/since expiry",
-    "Fleet Pass keys expire automatically &mdash; 7 days after issue by default. "
-    + "<b>extend</b> below adds another full period from now; nothing renews itself."],
-  "public:status": ["Request status",
-    "<b>active</b> authenticates now. <b>expired</b> and <b>revoked</b> both 401 &mdash; "
-    + "expired on its own once the clock runs out, revoked the moment an admin acts. "
-    + "<b>pending</b> is waiting on a decision above; <b>denied</b> is terminal."],
-  "public:revoke": ["Revoke this key",
-    "Archives the underlying API key: it stops authenticating immediately, the same as "
-    + "revoking any other key on this gateway."],
-  "public:extend": ["Extend this key",
-    "Pushes <code>expires_at</code> another <code>key_days</code> out from where it "
-    + "currently stands &mdash; not from today, so extending early does not cost the "
-    + "remaining time."],
-  "public:resend": ["Resend the key",
-    "The raw key is never stored, only its hash, so it cannot simply be re-sent. This "
-    + "mints a <b>replacement</b> key on the same profile and expiry math, archives the "
-    + "old one, and e-mails the new one to the same address &mdash; the old key stops "
-    + "working the instant the new one exists."],
-  "public:issue by hand": ["Vouching or testing, not the normal path",
-    "Mints and e-mails a key exactly like an approval, but reads none of the eligibility, "
-    + "free-mail, or cap checks the public form enforces &mdash; the row it creates is "
-    + "tagged <code>source: manual</code> and <code>decided_by</code> your own address, so "
-    + "it is always distinguishable from an auto-issued one later."],
-  "public:issue workers": ["Sub-agent roster for this hand-issued team",
-    "Pick 1 or 2 &mdash; the same worker-eligible catalogue and the same team-size rule as "
-    + "the public request form, just without the eligibility gate in front of it."],
-  "public:on": ["Listed in the catalogue",
-    "Only enabled rows can be requested or resolved &mdash; turning one off does not touch "
-    + "keys already issued against it, it just stops new requests from choosing it."],
-  "public:public id": ["Public model id",
-    "What a client sends as <code>model</code>. Shared with the public site's request form and "
-    + "with every issued key &mdash; renaming it here breaks anything already pointed at "
-    + "the old id."],
-  "public:class": ["Architecture and size",
-    "<code>dense</code> models activate every parameter on every token; <code>moe</code> "
-    + "ones route to a smaller active slice &mdash; the second number, when there is one."],
-  "public:primary": ["May lead a team",
-    "Whether a public team's <b>primary</b> dropdown may offer this model. A model can be "
-    + "primary-eligible, worker-eligible, both, or neither; a single-worker key ignores "
-    + "both flags and may pick any enabled model."],
-  "public:worker": ["May join a team",
-    "Whether a public team's sub-agent checkboxes may offer this model."],
-  "public:ctx max": ["Context ceiling offered",
-    "The largest context a requester's slider can reach for this model. Kept at or below "
-    + "what the model was actually loaded with on its serving hosts &mdash; the warning "
-    + "pill below the field says when it is not."],
-  "public:ctx default": ["Context the slider starts at",
-    "Pre-selected value on the request form; the requester can still move the slider "
-    + "anywhere up to ctx max."],
-  "public:fleet ids": ["Per-host model ids",
-    "Comma-separated. These are the ordinary fleet model ids &mdash; the ones the Models "
-    + "tab configures &mdash; that this public id resolves to. A request for the public id "
-    + "routes to whichever of them the scorer likes best across the whole fleet."],
-  "public:live": ["Where this resolves right now",
-    "One line per fleet id: <span class='pill ok' style='font-size:10px'>resident</span> "
-    + "is loaded on an online host now, <span class='pill mid' style='font-size:10px'>available</span> "
-    + "is configured but not loaded, and neither means no online host can currently serve "
-    + "it at all."],
-  "public:source": ["Which list matched",
-    "<code>fortune500</code>, <code>forbes-private</code>, <code>denver-tech</code> and "
-    + "<code>gov</code> are the seeded lists; <code>custom</code> is anything added by hand "
-    + "or through import."],
-  "public:rank": ["List rank",
-    "The company's position on its source list, where the source publishes one (Fortune "
-    + "500, Forbes largest-private). Blank for rows with no such ranking."],
-  "public:mode": ["Allow or block",
-    "<b>allow</b> auto-issues a key to a matching address (subject to the usual caps). "
-    + "<b>block</b> rejects one outright, even if it would otherwise be unlisted-and-"
-    + "reviewed &mdash; block always wins over allow when both could match."],
-  "public:enabled": ["Row takes effect",
-    "A disabled row is kept but ignored during eligibility checks, as if it were not "
-    + "there &mdash; the quieter alternative to deleting it."],
-  "public:add model": ["Add a catalogue row",
-    "Asks for the handful of fields a new row must have (public id, fleet ids, arch, "
-    + "parameter counts) and creates it with primary off, worker on, and a 16k/8k context "
-    + "ceiling/default &mdash; adjust those in the table once it appears."],
-  "public:reseed models": ["Re-insert the seed catalogue",
-    "Inserts any of the 14 built-in models missing from this table. Rows already here, "
-    + "edited or not, are left exactly as they are."],
-  "public:add domain": ["Add one domain",
-    "Adds a single allow-listed domain with source <code>custom</code>. For more than one, "
-    + "use Import below instead."],
-  "public:reseed domains": ["Re-insert the seed domain lists",
-    "Inserts any seed domains (and the <code>.gov</code>/<code>.mil</code> suffix rules) "
-    + "missing from this table. Domains already here are left untouched, edits included."],
-  "public:import": ["Import a batch of domains",
-    "CSV or plain <code>domain,company</code> lines, header optional, tagged with the "
-    + "source picked for this import. Upserts &mdash; a domain already on the list is "
-    + "updated, not duplicated."],
-  "public:import csv or json": ["Rows to import",
-    "One <code>domain,company</code> pair per line (a header row is fine), or the same "
-    + "as JSON. Every row is tagged with the source below and upserted &mdash; already-"
-    + "listed domains are updated in place, not duplicated."],
-  "public:check an address": ["Address to test",
-    "Any email address. Runs it through the exact eligibility check a real request would "
-    + "hit, without creating a request, a key, or an event row."],
-  "public:check": ["Test an address",
-    "Runs the exact same eligibility check a real request would hit: free-mail and "
-    + "disposable providers first, then block rules, then allow rules by longest suffix "
-    + "match, then whatever <code>review unlisted</code> is set to."],
-  "public:event": ["What happened",
-    "One row per notable moment in the intake pipeline &mdash; a rejection, a rate limit, "
-    + "an approval, a fallback &mdash; whether or not it ever became a key."],
-  "public:save settings": ["Save these settings",
-    "Applies to every request from this moment on. Keys already issued keep the limits "
-    + "and prompts they were minted with; nothing here is retroactive."],
-  "public:send test mail": ["Send a test message",
-    "Exercises the real SMTP path end to end &mdash; the same transport, the same "
-    + "<code>mail from</code> &mdash; without touching any request or key. Useful right "
-    + "after changing <code>LLMSTACK_SMTP_*</code> in gateway.env."],
-  "public:single req/day": ["Single-key requests/day",
-    "Rolling 24-hour cap for a single-worker Fleet Pass key. Only client-facing requests "
-    + "count."],
-  "public:single req/hour": ["Single-key requests/hour",
-    "Rolling 1-hour cap alongside the daily one &mdash; the hourly limit is usually what a "
-    + "quick burst of testing actually hits first."],
-  "public:team req/day": ["Team-key requests/day",
-    "Rolling 24-hour cap on client-facing requests to a public team's key. The primary's "
-    + "own turns and every worker it spawns are free &mdash; only what the outside client "
-    + "sends counts."],
-  "public:team req/hour": ["Team-key requests/hour",
-    "Rolling 1-hour cap, same accounting as the daily one."],
-  "public:key days": ["Key lifetime (days)",
-    "How long a newly issued key lasts before it expires on its own. <b>extend</b> on the "
-    + "Issued keys table adds another period of this same length."],
-  "public:team workers": ["Max workers per team",
-    "Upper bound on how many sub-agents a public team's request form may check &mdash; "
-    + "the spec calls for 1 or 2."],
-  "public:team rounds": ["Max tool rounds per team",
-    "Passed straight through as the minted team's <code>max_rounds</code> &mdash; the same "
-    + "safety net the Teams tab explains: after this many spawn rounds, the primary's next "
-    + "reply is returned as-is."],
-  "public:max keys / domain": ["Live keys per domain",
-    "Once a domain has this many non-expired, non-revoked keys outstanding, a new request "
-    + "from that domain is refused with <code>domain_cap</code> until one ages out."],
-  "public:max live keys": ["Live keys, fleet-wide",
-    "A hard ceiling across every domain combined. Past this, new requests are refused with "
-    + "<code>global_cap</code> regardless of whose domain they are on."],
-  "public:ip req/day": ["Requests per IP/day",
-    "How many <code>/public/api/request</code> attempts one source IP may make in a "
-    + "rolling day before <code>ip_limit</code> &mdash; the first defense against a script "
-    + "hammering the form."],
-  "public:live keys / email": ["Live keys per address",
-    "How many keys one address may hold at once &mdash; <b>3</b> by default, so an "
-    + "employer who mislaid the mail can ask again instead of waiting out the expiry. "
-    + "Past it, a request gets <code>already_active</code>. Revoked, archived and "
-    + "expired keys are not live and free their slot immediately; a request still "
-    + "<code>pending</code> is counted with the live ones (it is a key waiting to be "
-    + "minted) and gets <code>already_pending</code> at the limit. Compared on the "
-    + "canonical address, so <code>jane+2@</code> is still <code>jane@</code>. "
-    + "<b>0</b> turns the per-address limit off entirely."],
-  "public:review unlisted": ["Unlisted address handling",
-    "<b>yes</b>: an address on no list is queued <code>pending</code> and you decide by "
-    + "hand above. <b>no</b>: it is rejected outright with <code>not_listed</code>, and "
-    + "the Pending table stays empty by design."],
-  "public:fallback when": ["When a fallback is offered",
-    "<code>not_resident</code> tries a same-class substitute whenever the requested model "
-    + "is not currently loaded anywhere online &mdash; the most forgiving. "
-    + "<code>unreachable</code> only when no host can serve it at all. <code>never</code> "
-    + "turns fallback off; the normal cold-load or 404 path runs instead."],
-  "public:fallback tolerance": ["How different a substitute may be",
-    "Maximum fractional difference in active parameters between the requested model and "
-    + "its stand-in, e.g. 0.5 allows anything from half to double the active-parameter "
-    + "count. Candidates are further narrowed to the same architecture and role."],
-  "public:fallback notice": ["Disclose fallbacks to clients",
-    "When on, a substituted reply gets the notice text below prepended to its content (or "
-    + "as a leading SSE chunk when streaming), plus an <code>X-Fleet-Fallback</code> header "
-    + "and an <code>x_fleet</code> JSON field either way. Turning it off removes only the "
-    + "visible text &mdash; the header and field still appear."],
-  "public:notice text": ["Fallback notice template",
-    "Rendered with <code>{requested} {served} {arch} {active}</code> and prepended to the "
-    + "reply when a fallback serves it and the notice above is on."],
-  "public:team prompt": ["Default team system prompt",
-    "Injected ahead of the client's messages on every public team minted from this "
-    + "moment on &mdash; the mission, not the mechanics; the gateway adds its own "
-    + "paragraph about <code>spawn_subagents</code>. Existing teams keep whatever prompt "
-    + "they were minted with."],
-  "public:worker prompt": ["Default worker prompt",
-    "What every spawned sub-agent on a new public team starts from. Workers see only this "
-    + "and their one task, never the conversation."],
-  "public:mail from": ["SMTP envelope sender",
-    "Overrides <code>LLMSTACK_SMTP_FROM</code> for Fleet Pass mail specifically. Leave "
-    + "blank to use the environment default."],
-  "public:reply-to": ["Reply-To header",
-    "Where a reply to the key e-mail goes &mdash; useful when mail is sent from an "
-    + "unmonitored address like <code>API@example.org</code>."],
-  "public:admin notify": ["Pending-request notifications",
-    "Who gets mailed when a request lands in review. Defaults to the first address in "
-    + "<code>LLMSTACK_ADMIN_EMAILS</code> when left blank."],
-  "public:email subject": ["Key e-mail subject",
-    "Rendered with <code>{days}</code> and the other template fields, same as the body "
-    + "templates below."],
-  "public:email intro": ["Key e-mail: intro",
-    "What this is and why they are getting it, before the key block. Rendered with "
-    + "<code>{email} {kind} {key} {base_url} {models} {ctx} {expires} {limits} {days}</code>."],
-  "public:email setup": ["Key e-mail: setup",
-    "curl / SDK / client instructions after the key block. Same template fields as the "
-    + "intro."],
-  "public:email disclaimer": ["Key e-mail: disclaimer",
-    "Hobby-hardware caveats, the confidentiality note, and the expiry reminder, sent at "
-    + "the end of every key e-mail."],
-  "public:base url": ["Base URL clients are told to use",
-    "Defaults to <code>PUBLIC_API_URL</code> when left blank. Only affects what the e-mail "
-    + "says &mdash; not where the proxy itself listens."],
-  "public:auto-issue": ["Auto-issue for connected services",
-    "Lets a service you run mint Fleet Pass keys through <code>POST /admin/api/public/keys/auto</code> "
-    + "(admin token). Off refuses every such call with 403; keys already out stay valid until they "
-    + "expire or you revoke them in the table above."],
-  "public:auto-issue model": ["The model every auto-issued key is locked to",
-    "A single-worker key on this catalogue model, exactly like a hand-issued one. The service may ask "
-    + "for a different enabled model per call, but never for a disabled one."],
-  "public:auto-issue ctx": ["Context window stamped on auto-issued keys",
-    "Rounded down to the 1024 grid and never above what the model's hosts can serve &mdash; the "
-    + "service is not told the ceilings, so its ask is clamped rather than refused."],
-  "public:daily cap": ["Auto-issued keys per rolling 24 hours",
-    "Across every connected service. A runaway caller gets 429s, not a drained key budget; the "
-    + "global <b>max live keys</b> under Limits still applies on top."],
-  "public:setup text": ["What the service hands on with the key",
-    "Rendered with <code>{base_url} {key} {model} {expires} {limits}</code> and returned as "
-    + "<code>setup_text</code> in the mint response. The service places it as-is (in a cover letter, a "
-    + "message), so keep it short and keep the User-Agent note &mdash; the CDN blocks the official "
-    + "SDKs' default agent."],
-  "public:box aliases": ["Why the public page never says a real hostname",
-    "<code>Box N</code> is assigned the first time a host is seen and persisted, so it never "
-    + "reshuffles when peers come and go &mdash; the public overview, the models list, and "
-    + "every Fleet Pass e-mail use only this alias, never the hostname, IP, OS, or engine "
-    + "version. This admin-only table is the one place that maps an alias back to a real box."],
 };
 
 // Labels carry their own asides -- "force model (optional)", "GTT size (GiB)".
@@ -5520,6 +4769,12 @@ setInterval(() => { if ($("#overview").classList.contains("on")) loadStatus(); }
 setInterval(() => { if ($("#home").classList.contains("on")) loadActive(); }, 5000);
 setInterval(() => { if ($("#fleetjobs").classList.contains("on")) loadFleetJobs(); }, 3000);
 setInterval(() => { if ($("#library").classList.contains("on")) loadJobs(); }, 2000);
+// Cached 60s server-side (_hf_gguf_tree / _hf_model_info), so this just keeps
+// a quant row's status/progress pills in step with the Downloads panel above
+// it without re-hitting HF on every tick. Stops on a hidden browser tab (not
+// just an unselected dashboard section) since a background tab is the one
+// case setInterval keeps firing for no one to see.
+setInterval(() => { if ($("#library").classList.contains("on") && HFQ && !document.hidden) hfQuants(HFQ.repo); }, 10000);
 setInterval(() => { if ($("#optimize").classList.contains("on")) loadBench(); }, 4000);
 setInterval(() => { if ($("#logs").classList.contains("on") && $("#logauto").checked) loadLogs(); }, 5000);
 setInterval(loadFleet, 30000);

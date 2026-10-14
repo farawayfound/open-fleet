@@ -13,6 +13,17 @@ import app as gw  # conftest has set the env and sys.path by the time this loads
 AUTO = "/admin/api/public/keys/auto"
 
 
+def _days_out(expires_at: str) -> int:
+    """Whole days between now and an ISO expiry, rounded to the nearest day so
+    the few milliseconds the request itself takes cannot flip the answer."""
+    from datetime import datetime, timezone
+
+    when = datetime.fromisoformat(expires_at)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return round((when - datetime.now(timezone.utc)).total_seconds() / 86400)
+
+
 def _mint(client, admin_headers, **body):
     payload = {"service": "demo-app", "ref": "042-acme", "company": "Acme"}
     payload.update(body)
@@ -30,15 +41,15 @@ class TestMint:
         assert body["service"] == "demo-app" and body["ref"] == "042-acme"
         # The tab's defaults, not anything the caller said.
         s = gw.get_public_settings()
-        assert body["model"] == s["auto_issue_model"] == "qwen3.8-27b"
-        assert body["model_name"] == "Qwen 3.8 27B"
+        assert body["model"] == s["auto_issue_model"] == "qwen3.8-flash-next"
+        assert body["model_name"] == "Qwen 3.8 Flash-Next"
         assert body["limit_day"] == s["single_rpd"] and body["limit_hour"] == s["single_rph"]
         assert body["base_url"] == "https://api.example.test/v1"
         assert body["expires_date"] and body["expires_at"].startswith(body["expires_date"])
         assert body["warm_url"].startswith("https://api.example.test/public/warm/")
         # The setup text is the tab's template rendered with this key's facts.
         assert body["key"] in body["setup_text"]
-        assert "qwen3.8-27b" in body["setup_text"]
+        assert "qwen3.8-flash-next" in body["setup_text"]
         assert body["expires_date"] in body["setup_text"]
 
         row = gw.db_query("SELECT * FROM public_keys WHERE id=?", (body["id"],))[0]
@@ -49,7 +60,7 @@ class TestMint:
         assert row["decided_by"] == "auto:demo-app"
         # A real Fleet Pass key underneath: pinned to the model, budgeted, expiring.
         agent = gw.db_query("SELECT * FROM agents WHERE key_id=?", (row["key_id"],))[0]
-        assert agent["force_model"] == "qwen3.8-27b"
+        assert agent["force_model"] == "qwen3.8-flash-next"
         key = gw.db_query("SELECT * FROM api_keys WHERE id=?", (row["key_id"],))[0]
         assert key["max_rpd"] == s["single_rpd"] and key["max_rph"] == s["single_rph"]
         assert key["expires_at"] == body["expires_at"]
@@ -71,7 +82,7 @@ class TestMint:
     def test_ctx_is_clamped_to_the_model_ceiling_not_refused(self, client, admin_headers, fake_fleet):
         r = _mint(client, admin_headers, ctx=99999999)
         assert r.status_code == 200, r.text
-        assert r.json()["ctx"] <= 131072  # peer1's ceiling for the 27B in the fake fleet
+        assert r.json()["ctx"] <= 262144  # peer1's ceiling for Flash-Next in the fake fleet
         assert r.json()["ctx"] % 1024 == 0
         r = _mint(client, admin_headers, ctx=100)
         assert r.status_code == 200 and r.json()["ctx"] == 1024
@@ -79,6 +90,75 @@ class TestMint:
     def test_uses_the_tab_ctx_by_default(self, client, admin_headers, fake_fleet):
         client.put("/admin/api/public/settings", headers=admin_headers, json={"auto_issue_ctx": 8192})
         assert _mint(client, admin_headers).json()["ctx"] == 8192
+
+    def test_setup_text_is_the_short_form(self, client, admin_headers, fake_fleet):
+        """The block goes into a cover letter a person reads, so it stays
+        short: no client-configuration aside on the context window, and no
+        User-Agent instruction (the CDN rule that needed one is gone)."""
+        body = _mint(client, admin_headers).json()
+        text = body["setup_text"]
+        assert "Cline calls it Context Window Size" not in text
+        assert "cannot be read from the server" not in text
+        assert "User-Agent" not in text
+        # What it must still carry.
+        assert body["key"] in text and "Base URL:" in text
+        assert "Context window: " + str(body["ctx"]) + " tokens." in text
+        assert "Expires " + body["expires_date"] in text
+
+    def test_expiry_defaults_to_key_days(self, client, admin_headers, fake_fleet):
+        """auto_issue_days ships as 0 -- the shared public expiry -- so a hub
+        that never opens the new control keeps minting exactly as before."""
+        client.put("/admin/api/public/settings", headers=admin_headers,
+                   json={"key_days": 7, "auto_issue_days": 0})
+        body = _mint(client, admin_headers).json()
+        key = gw.db_query("SELECT expires_at FROM api_keys WHERE key_hash=?",
+                          (gw.hash_key(body["key"]),))[0]
+        assert _days_out(key["expires_at"]) == 7
+
+    def test_auto_issue_days_overrides_key_days_for_this_route_only(
+        self, client, admin_headers, fake_fleet
+    ):
+        """The whole point of a separate setting: a key written into a cover
+        letter outlives the week a self-service requester needs, without
+        moving the public request flow's own expiry."""
+        client.put("/admin/api/public/settings", headers=admin_headers,
+                   json={"key_days": 7, "auto_issue_days": 45})
+        body = _mint(client, admin_headers).json()
+        key = gw.db_query("SELECT expires_at FROM api_keys WHERE key_hash=?",
+                          (gw.hash_key(body["key"]),))[0]
+        assert _days_out(key["expires_at"]) == 45
+        # ...and the shared setting is untouched, so a public request still
+        # gets its week.
+        s = client.get("/admin/api/public/settings", headers=admin_headers).json()
+        assert s["key_days"] == 7
+
+    def test_a_caller_may_ask_for_its_own_lifetime(self, client, admin_headers, fake_fleet):
+        client.put("/admin/api/public/settings", headers=admin_headers,
+                   json={"key_days": 7, "auto_issue_days": 45})
+        body = _mint(client, admin_headers, days=10).json()
+        key = gw.db_query("SELECT expires_at FROM api_keys WHERE key_hash=?",
+                          (gw.hash_key(body["key"]),))[0]
+        assert _days_out(key["expires_at"]) == 10
+
+    def test_a_caller_cannot_mint_an_immortal_key(self, client, admin_headers, fake_fleet):
+        body = _mint(client, admin_headers, days=99999).json()
+        key = gw.db_query("SELECT expires_at FROM api_keys WHERE key_hash=?",
+                          (gw.hash_key(body["key"]),))[0]
+        assert _days_out(key["expires_at"]) == 365
+        # Junk in the field falls back rather than 500ing.
+        body = _mint(client, admin_headers, ref="junk", days="soon").json()
+        key = gw.db_query("SELECT expires_at FROM api_keys WHERE key_hash=?",
+                          (gw.hash_key(body["key"]),))[0]
+        assert _days_out(key["expires_at"]) == 7
+
+    def test_the_rendered_expiry_follows_the_override(self, client, admin_headers, fake_fleet):
+        """{expires} is read off the key's own row, so the letter quotes the
+        date that will actually apply rather than the shared setting's."""
+        client.put("/admin/api/public/settings", headers=admin_headers,
+                   json={"key_days": 7, "auto_issue_days": 30})
+        body = _mint(client, admin_headers).json()
+        assert _days_out(body["expires_at"]) == 30
+        assert body["expires_date"] in body["setup_text"]
 
     def test_setup_text_states_the_context_window(self, client, admin_headers, fake_fleet):
         """The setup block a service pastes into a document carries the
@@ -113,7 +193,7 @@ class TestMint:
         raw = _mint(client, admin_headers).json()["key"]
         r = client.get("/v1/models", headers={"Authorization": "Bearer " + raw})
         assert r.status_code == 200, r.text
-        assert [m["id"] for m in r.json()["data"]] == ["qwen3.8-27b"]
+        assert [m["id"] for m in r.json()["data"]] == ["qwen3.8-flash-next"]
         # Restricted to the public surface, like every Fleet Pass key.
         r = client.get("/api/tags", headers={"Authorization": "Bearer " + raw})
         assert r.status_code == 403
@@ -164,18 +244,111 @@ class TestSettingsAndStatus:
     def test_defaults_and_round_trip(self, client, admin_headers):
         s = client.get("/admin/api/public/settings", headers=admin_headers).json()
         assert s["auto_issue_enabled"] is True
-        assert s["auto_issue_model"] == "qwen3.8-27b"
-        assert s["auto_issue_ctx"] == 16384 and s["auto_issue_daily_cap"] == 20
+        assert s["auto_issue_model"] == "qwen3.8-flash-next"
+        # As large as the model is served with, clamped at mint -- not a
+        # cautious middle that runs out inside one file-reading turn.
+        assert s["auto_issue_ctx"] == 262144 and s["auto_issue_daily_cap"] == 20
         assert "{key}" in s["auto_issue_setup_text"] and "{base_url}" in s["auto_issue_setup_text"]
+        # 0 is "use key_days", which is what this behaved as before the
+        # setting existed -- so the shipped default changes nothing.
+        assert s["auto_issue_days"] == 0
         r = client.put(
             "/admin/api/public/settings", headers=admin_headers,
             json={"auto_issue_model": "gemma4-31b-qat", "auto_issue_daily_cap": 5000,
+                  "auto_issue_days": 900,
                   "auto_issue_setup_text": "key {key} on {base_url}"},
         )
         s = r.json()
         assert s["auto_issue_model"] == "gemma4-31b-qat"
         assert s["auto_issue_daily_cap"] == 1000  # bounds-clamped
+        assert s["auto_issue_days"] == 365  # bounds-clamped too
         assert s["auto_issue_setup_text"] == "key {key} on {base_url}"
+
+    def test_a_hub_still_on_the_old_shipped_defaults_is_migrated(
+        self, client, admin_headers
+    ):
+        """The settings row is merged OVER the code defaults, so changing a
+        default reaches nobody who has ever saved the tab -- which is every
+        real hub. A stored value still byte-identical to the default it
+        replaced was never a choice, and moves."""
+        gw.db_exec(
+            "INSERT INTO settings(key,value) VALUES ('public',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (gw.json.dumps({
+                "auto_issue_model": gw._SUPERSEDED_PUBLIC_DEFAULTS["auto_issue_model"],
+                "auto_issue_setup_text": gw._SUPERSEDED_PUBLIC_DEFAULTS["auto_issue_setup_text"],
+                # ...alongside something the operator really did choose, which
+                # must survive untouched.
+                "auto_issue_daily_cap": 33,
+            }),),
+        )
+        s = client.get("/admin/api/public/settings", headers=admin_headers).json()
+        assert s["auto_issue_model"] == "qwen3.8-flash-next"
+        assert "Cline calls it Context Window Size" not in s["auto_issue_setup_text"]
+        assert "User-Agent" not in s["auto_issue_setup_text"]
+        assert s["auto_issue_daily_cap"] == 33
+
+    def test_choosing_the_old_model_again_sticks(self, client, admin_headers):
+        """The migration runs ONCE, which is what makes the old value
+        choosable again. qwen3.8-27b is still a listed, enabled catalogue
+        model; an operator may well want auto-issue back on it. A read-time
+        rule that reverted anything equal to the old default would make that
+        setting unsaveable forever -- the PUT would succeed, its own response
+        would report Flash-Next, and the dropdown would snap back."""
+        # First read migrates and marks.
+        client.get("/admin/api/public/settings", headers=admin_headers)
+        # Now the operator deliberately picks the old model.
+        r = client.put("/admin/api/public/settings", headers=admin_headers,
+                       json={"auto_issue_model": "qwen3.8-27b"})
+        assert r.json()["auto_issue_model"] == "qwen3.8-27b"
+        # ...and it is still there on the next read, and the one after.
+        for _ in range(2):
+            s = client.get("/admin/api/public/settings", headers=admin_headers).json()
+            assert s["auto_issue_model"] == "qwen3.8-27b"
+        # The mint honours it too -- the settings are what it reads.
+        a = client.get("/admin/api/public/auto", headers=admin_headers).json()
+        assert a["model"] == "qwen3.8-27b"
+
+    def test_the_migration_marks_itself_and_does_not_re_fire(self, client, admin_headers):
+        """A hub with nothing stored still gets marked, so a later save of the
+        old value is a choice rather than something to undo."""
+        client.get("/admin/api/public/settings", headers=admin_headers)
+        raw = gw._public_settings_raw()
+        assert raw.get(gw._SUPERSEDED_MIGRATION_KEY) == gw._SUPERSEDED_MIGRATION_AT
+        # The marker is invisible to the API: it is not in DEFAULT_PUBLIC_SETTINGS,
+        # so neither a GET nor a PUT can surface or clear it.
+        s = client.get("/admin/api/public/settings", headers=admin_headers).json()
+        assert gw._SUPERSEDED_MIGRATION_KEY not in s
+        client.put("/admin/api/public/settings", headers=admin_headers,
+                   json={gw._SUPERSEDED_MIGRATION_KEY: None, "auto_issue_daily_cap": 9})
+        assert gw._public_settings_raw().get(gw._SUPERSEDED_MIGRATION_KEY) == gw._SUPERSEDED_MIGRATION_AT
+
+    def test_a_deliberate_choice_is_never_clobbered(self, client, admin_headers):
+        """The other half: only a byte-identical old default moves, and only
+        on the one migrating read. Anything an operator typed stays."""
+        gw.db_exec(
+            "INSERT INTO settings(key,value) VALUES ('public',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (gw.json.dumps({
+                "auto_issue_model": "gemma4-31b-qat",
+                "auto_issue_setup_text": "just {key} on {base_url}",
+            }),),
+        )
+        s = client.get("/admin/api/public/settings", headers=admin_headers).json()
+        assert s["auto_issue_model"] == "gemma4-31b-qat"
+        assert s["auto_issue_setup_text"] == "just {key} on {base_url}"
+        # Even a one-character edit of the old default counts as a choice.
+        gw.db_exec(
+            "INSERT INTO settings(key,value) VALUES ('public',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (gw.json.dumps({
+                "auto_issue_setup_text":
+                    gw._SUPERSEDED_PUBLIC_DEFAULTS["auto_issue_setup_text"] + " Enjoy.",
+            }),),
+        )
+        s = client.get("/admin/api/public/settings", headers=admin_headers).json()
+        assert s["auto_issue_setup_text"].endswith(" Enjoy.")
+        assert "User-Agent" in s["auto_issue_setup_text"]
 
     def test_setup_text_with_a_stray_brace_falls_back_to_the_template(
         self, client, admin_headers, fake_fleet
@@ -208,7 +381,8 @@ class TestSettingsAndStatus:
 
     def test_status_reports_counts_and_the_tab(self, client, admin_headers, fake_fleet):
         a = client.get("/admin/api/public/auto", headers=admin_headers).json()
-        assert a["enabled"] is True and a["model"] == "qwen3.8-27b" and a["model_name"] == "Qwen 3.8 27B"
+        assert a["enabled"] is True and a["model"] == "qwen3.8-flash-next"
+        assert a["model_name"] == "Qwen 3.8 Flash-Next"
         assert a["model_enabled"] is True
         assert a["issued_today"] == 0 and a["live"] == 0 and a["by_service"] == []
         assert a["endpoint"] == "/admin/api/public/keys/auto"
@@ -236,3 +410,261 @@ class TestSettingsAndStatus:
         assert client.get("/admin/api/public/keys?source=auto:demo-app", headers=admin_headers).json()["total"] == 1
         found = client.get("/admin/api/public/keys?q=042-acme", headers=admin_headers).json()
         assert found["total"] == 1 and found["items"][0]["source"] == "auto:demo-app"
+
+
+RESIZE = "/admin/api/public/keys/resize-ctx"
+
+
+class TestResizeCtx:
+    """Raising the window on keys that are already out there.
+
+    The tab's `auto_issue_ctx` decides the NEXT key; this decides the ones
+    already sitting in somebody's cover letter. Raise-only, clamped per key
+    to its own model's ceiling.
+    """
+
+    def _ctx_of(self, body):
+        row = gw.db_query("SELECT ctx, key_id, kind FROM public_keys WHERE id=?", (body["id"],))[0]
+        agent = gw.db_query("SELECT ctx_limit FROM agents WHERE key_id=?", (row["key_id"],))[0]
+        return int(row["ctx"]), int(agent["ctx_limit"])
+
+    def test_raises_row_and_enforced_limit_together(self, client, admin_headers, fake_fleet):
+        body = _mint(client, admin_headers, ctx=8192).json()
+        assert self._ctx_of(body) == (8192, 8192)
+        r = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536})
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert out["updated"] == 1 and out["scanned"] == 1 and out["target"] == 65536
+        assert out["keys"][0]["from"] == 8192 and out["keys"][0]["to"] == 65536
+        # public_keys.ctx is what /v1/models reports; agents.ctx_limit is what
+        # apply_ctx_limit() actually holds a request to. Both, or neither.
+        assert self._ctx_of(body) == (65536, 65536)
+
+    def test_clamped_per_key_to_its_own_model(self, client, admin_headers, fake_fleet):
+        """peer1 serves Flash-Next -- the auto-issue default -- at 262144 in
+        the fake fleet, so an ask above that is capped rather than promised."""
+        body = _mint(client, admin_headers, ctx=8192).json()
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 1048576}).json()
+        assert out["keys"][0]["to"] == 262144
+        assert self._ctx_of(body) == (262144, 262144)
+
+    def test_never_lowers(self, client, admin_headers, fake_fleet):
+        body = _mint(client, admin_headers, ctx=65536).json()
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 8192}).json()
+        assert out["updated"] == 0 and out["skipped"] == 1 and out["keys"] == []
+        assert self._ctx_of(body) == (65536, 65536)
+
+    def test_dry_run_reports_without_writing(self, client, admin_headers, fake_fleet):
+        body = _mint(client, admin_headers, ctx=8192).json()
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536, "dry_run": True}).json()
+        assert out["dry_run"] is True and out["updated"] == 1
+        assert self._ctx_of(body) == (8192, 8192)
+
+    def test_defaults_to_the_tab_setting(self, client, admin_headers, fake_fleet):
+        body = _mint(client, admin_headers, ctx=8192).json()
+        client.put("/admin/api/public/settings", headers=admin_headers, json={"auto_issue_ctx": 32768})
+        out = client.post(RESIZE, headers=admin_headers, json={}).json()
+        assert out["target"] == 32768
+        assert self._ctx_of(body) == (32768, 32768)
+
+    def test_skips_revoked_and_expired_keys(self, client, admin_headers, fake_fleet):
+        live = _mint(client, admin_headers, ref="live", ctx=8192).json()
+        dead = _mint(client, admin_headers, ref="dead", ctx=8192).json()
+        client.post(f"/admin/api/public/keys/{dead['id']}/revoke", headers=admin_headers)
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert out["scanned"] == 1 and [k["id"] for k in out["keys"]] == [live["id"]]
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (dead["id"],))[0]["ctx"] == 8192
+
+    def test_scope_auto_leaves_self_requested_keys_alone(self, client, admin_headers, fake_fleet):
+        """Somebody who picked their own window on the public form did choose
+        it; only the figure this gateway chose on a service's behalf is ours
+        to widen unasked."""
+        auto = _mint(client, admin_headers, ctx=8192).json()
+        manual = client.post(
+            "/admin/api/public/keys", headers=admin_headers,
+            json={"email": "friend@gmail.com", "kind": "single", "model": "qwen3.8-27b", "ctx": 8192},
+        ).json()
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert out["scanned"] == 1 and [k["id"] for k in out["keys"]] == [auto["id"]]
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (manual["id"],))[0]["ctx"] == 8192
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536, "scope": "all"}).json()
+        assert out["updated"] == 1 and out["keys"][0]["id"] == manual["id"]
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (manual["id"],))[0]["ctx"] == 65536
+
+    def test_raises_the_derived_max_tokens_floor_with_it(self, client, admin_headers, fake_fleet):
+        """max_tokens is min(4096, ctx // 2) at mint, so a key minted small
+        carries a small completion cap that has to move too."""
+        import json as _json
+        body = _mint(client, admin_headers, ctx=4096).json()
+        row = gw.db_query("SELECT key_id FROM public_keys WHERE id=?", (body["id"],))[0]
+        before = _json.loads(gw.db_query(
+            "SELECT param_overrides FROM agents WHERE key_id=?", (row["key_id"],))[0]["param_overrides"])
+        assert before["max_tokens"] == 2048
+        client.post(RESIZE, headers=admin_headers, json={"ctx": 65536})
+        after = _json.loads(gw.db_query(
+            "SELECT param_overrides FROM agents WHERE key_id=?", (row["key_id"],))[0]["param_overrides"])
+        assert after["max_tokens"] == 4096
+
+    def test_rejects_an_out_of_bounds_window(self, client, admin_headers, fake_fleet):
+        assert client.post(RESIZE, headers=admin_headers, json={"ctx": 12}).status_code == 400
+        assert client.post(RESIZE, headers=admin_headers, json={"ctx": 99999999}).status_code == 400
+        assert client.post(RESIZE, headers=admin_headers, json={"ctx": "wide"}).status_code == 400
+
+    def test_needs_the_admin_token(self, client, fake_fleet):
+        assert client.post(RESIZE, json={"ctx": 65536}).status_code in (401, 403)
+
+    def test_a_key_whose_profile_is_archived_is_left_alone_and_reported(self, client, admin_headers, fake_fleet):
+        """DELETE /admin/api/agents/{key_id} is an ordinary admin action. Once
+        the profile is archived get_agent() returns nothing and the key
+        enforces NO window, so raising its advertised number would be
+        advertising a window nothing holds. Left exactly as it was, and said
+        so -- not counted as moved, and not silently skipped either."""
+        body = _mint(client, admin_headers, ctx=8192).json()
+        row = gw.db_query("SELECT key_id FROM public_keys WHERE id=?", (body["id"],))[0]
+        assert client.delete(f"/admin/api/agents/{row['key_id']}", headers=admin_headers).status_code == 200
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert out["updated"] == 0 and out["keys"] == []
+        assert [u["id"] for u in out["unsynced"]] == [body["id"]]
+        assert out["unsynced"][0]["reason"] == "no_live_profile" and out["unsynced"][0]["ctx"] == 8192
+        # ...and says which kind of profile to restore: the tab differs.
+        assert out["unsynced"][0]["kind"] == "single"
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (body["id"],))[0]["ctx"] == 8192
+        # Restoring the profile brings it back onto the sweep's path, and THEN
+        # both sides move together.
+        assert client.post(f"/admin/api/agents/{row['key_id']}/restore", headers=admin_headers).status_code == 200
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert out["updated"] == 1 and out["unsynced"] == []
+        assert self._ctx_of(body) == (65536, 65536)
+
+    def test_a_profile_archived_between_the_read_and_the_write_is_still_left_alone(
+        self, client, admin_headers, fake_fleet, monkeypatch
+    ):
+        """The TOCTOU the review demonstrated: the profile is read before the
+        lock, and an archive can land in the gap. With the enforced side
+        already ahead (so only the advertised number would move, and the
+        ctx_limit UPDATE's rowcount guard never runs), the liveness check
+        inside the lock is the only thing standing between the sweep and a
+        raised advertised window on a key that enforces nothing."""
+        body = _mint(client, admin_headers, ctx=8192).json()
+        key_id = gw.db_query("SELECT key_id FROM public_keys WHERE id=?", (body["id"],))[0]["key_id"]
+        gw.db_update("UPDATE agents SET ctx_limit=65536 WHERE key_id=?", (key_id,))
+        real_db_query = gw.db_query
+        fired = []
+
+        def spy(sql, args=()):
+            out = real_db_query(sql, args)
+            if sql.startswith("SELECT ctx_limit, param_overrides FROM agents") and tuple(args) == (key_id,) and not fired:
+                fired.append(True)
+                # The ordinary archive route, landing right after the read.
+                assert gw.db_update(
+                    "UPDATE agents SET archived_at=? WHERE key_id=? AND archived_at IS NULL",
+                    (gw.now(), key_id)) == 1
+            return out
+
+        monkeypatch.setattr(gw, "db_query", spy)
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 32768}).json()
+        assert fired, "the interleaving did not happen -- the probe missed the read"
+        assert out["updated"] == 0 and [u["id"] for u in out["unsynced"]] == [body["id"]]
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (body["id"],))[0]["ctx"] == 8192
+
+    def _disable_agent_via_the_tab(self, client, admin_headers, key_id):
+        """What the Agents tab's enabled switch does: PUT the profile back
+        with enabled=false. The route clears archived_at on every save, so
+        disabled-but-not-archived is an ordinary, reachable state."""
+        row = gw.db_query("SELECT * FROM agents WHERE key_id=?", (key_id,))[0]
+        import json as _json
+        r = client.put(f"/admin/api/agents/{key_id}", headers=admin_headers, json={
+            "enabled": False, "name": row["name"], "system_prompt": row["system_prompt"] or "",
+            "rules": row["rules"] or "", "allowed_models": _json.loads(row["allowed_models"] or "[]"),
+            "force_model": row["force_model"] or "", "param_overrides": _json.loads(row["param_overrides"] or "{}"),
+        })
+        assert r.status_code == 200, r.text
+        assert gw.get_agent(key_id) is None, "the request path must not see a disabled profile"
+
+    def test_a_disabled_profile_is_no_live_profile_to_the_sweep_either(self, client, admin_headers, fake_fleet):
+        """The request path's "live" is enabled=1 AND archived_at IS NULL. A
+        profile the tab has disabled enforces nothing, exactly like an
+        archived one, so the sweep must not size the key by it."""
+        body = _mint(client, admin_headers, ctx=8192).json()
+        key_id = gw.db_query("SELECT key_id FROM public_keys WHERE id=?", (body["id"],))[0]["key_id"]
+        self._disable_agent_via_the_tab(client, admin_headers, key_id)
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert out["updated"] == 0 and out["unsynced"][0]["reason"] == "no_live_profile"
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (body["id"],))[0]["ctx"] == 8192
+        assert gw.db_query("SELECT ctx_limit FROM agents WHERE key_id=?", (key_id,))[0]["ctx_limit"] == 8192
+
+    def test_an_enabled_team_beside_a_disabled_agent_is_sized_as_the_team(self, client, admin_headers, fake_fleet):
+        """Request-path precedence, exactly: get_team() wins when it is
+        live, and a disabled agent row beside it is not a second live
+        profile -- it is nothing. Sized as a team, not refused as dual."""
+        body = _mint(client, admin_headers, ctx=8192).json()
+        key_id = gw.db_query("SELECT key_id FROM public_keys WHERE id=?", (body["id"],))[0]["key_id"]
+        self._disable_agent_via_the_tab(client, admin_headers, key_id)
+        gw.db_exec(
+            "INSERT INTO teams(key_id,enabled,name,primary_model,worker_models,max_workers,"
+            "max_rounds,system_prompt,worker_prompt,ctx_limit,updated_at) VALUES (?,1,?,?,?,?,?,?,?,?,?)",
+            (key_id, "crew", "qwen3.8-27b", "[]", 1, 2, "", "", 8192, gw.now()),
+        )
+        assert gw.get_team(key_id) is not None
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert out["updated"] == 1 and out["unsynced"] == [] and out["keys"][0]["profile"] == "teams"
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (body["id"],))[0]["ctx"] == 65536
+        assert gw.db_query("SELECT ctx_limit FROM teams WHERE key_id=?", (key_id,))[0]["ctx_limit"] == 65536
+        # The disabled agent row is nobody's business here.
+        assert gw.db_query("SELECT ctx_limit FROM agents WHERE key_id=?", (key_id,))[0]["ctx_limit"] == 8192
+
+    def test_a_key_with_two_live_profiles_is_reported_not_guessed(self, client, admin_headers, fake_fleet):
+        """public_keys.kind is frozen at mint and nothing keeps it in step
+        with the profile tables. A key that somehow carries a live agents
+        AND a live teams row is a state the sweep cannot size honestly
+        (the request path would take the team), so it is named and left."""
+        body = _mint(client, admin_headers, ctx=8192).json()
+        key_id = gw.db_query("SELECT key_id FROM public_keys WHERE id=?", (body["id"],))[0]["key_id"]
+        gw.db_exec(
+            "INSERT INTO teams(key_id,enabled,name,primary_model,worker_models,max_workers,"
+            "max_rounds,system_prompt,worker_prompt,ctx_limit,updated_at) VALUES (?,1,?,?,?,?,?,?,?,?,?)",
+            (key_id, "stray", "qwen3.8-27b", "[]", 1, 2, "", "", 8192, gw.now()),
+        )
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert out["updated"] == 0 and out["unsynced"][0]["reason"] == "dual_profile"
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (body["id"],))[0]["ctx"] == 8192
+        assert gw.db_query("SELECT ctx_limit FROM agents WHERE key_id=?", (key_id,))[0]["ctx_limit"] == 8192
+        assert gw.db_query("SELECT ctx_limit FROM teams WHERE key_id=?", (key_id,))[0]["ctx_limit"] == 8192
+
+    def test_a_desynced_pair_converges_upward(self, client, admin_headers, fake_fleet):
+        """Each side is raise-only on its own. A profile someone hand-lowered
+        is raised with the rest; an advertised number that is already ahead
+        stays put while the enforced side catches up -- never one side cut
+        down to meet the other."""
+        low = _mint(client, admin_headers, ref="low-profile", ctx=8192).json()
+        krow = gw.db_query("SELECT key_id FROM public_keys WHERE id=?", (low["id"],))[0]
+        gw.db_update("UPDATE agents SET ctx_limit=4096 WHERE key_id=?", (krow["key_id"],))
+        ahead = _mint(client, admin_headers, ref="pub-ahead", ctx=8192).json()
+        gw.db_update("UPDATE public_keys SET ctx=65536 WHERE id=?", (ahead["id"],))
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert out["updated"] == 2
+        by_id = {k["id"]: k for k in out["keys"]}
+        assert by_id[low["id"]]["enforced_from"] == 4096 and by_id[low["id"]]["enforced_to"] == 65536
+        assert by_id[ahead["id"]]["from"] == 65536 and by_id[ahead["id"]]["enforced_from"] == 8192
+        assert self._ctx_of(low) == (65536, 65536)
+        assert self._ctx_of(ahead) == (65536, 65536)
+
+    def test_a_date_only_expiry_counts_as_live_through_that_day(self, client, admin_headers, fake_fleet):
+        """The Keys tab stores a date-only expiry (YYYY-MM-DD) that every
+        other liveness check in this file reads as the end of that day. The
+        sweep uses the same definition, so a key expiring tonight is still
+        moved this afternoon, and one that expired yesterday is not."""
+        from datetime import datetime, timedelta, timezone
+        today = datetime.now(timezone.utc).date()
+        live = _mint(client, admin_headers, ref="expires-tonight", ctx=8192).json()
+        gone = _mint(client, admin_headers, ref="expired-yesterday", ctx=8192).json()
+        for body, day in ((live, today), (gone, today - timedelta(days=1))):
+            kid = gw.db_query("SELECT key_id FROM public_keys WHERE id=?", (body["id"],))[0]["key_id"]
+            gw.db_update("UPDATE api_keys SET expires_at=? WHERE id=?", (day.isoformat(), kid))
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert [k["id"] for k in out["keys"]] == [live["id"]]
+        assert gw.db_query("SELECT ctx FROM public_keys WHERE id=?", (gone["id"],))[0]["ctx"] == 8192
+
+    def test_response_shape_is_stable(self, client, admin_headers, fake_fleet):
+        out = client.post(RESIZE, headers=admin_headers, json={"ctx": 65536}).json()
+        assert set(out) == {"target", "scope", "dry_run", "scanned", "updated", "skipped", "keys", "unsynced"}

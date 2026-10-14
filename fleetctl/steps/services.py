@@ -14,12 +14,132 @@ interchangeable and the differences are load-bearing:
   schtasks    ONSTART, as SYSTEM, so the gateway is up before anyone logs in.
               Deliberately NOT a per-user task: a SYSTEM task cannot depend
               on anything inside a user profile, and gpu-desktop-1's did until the
-              profile was renamed out from under it.
+              profile was renamed out from under it. Plus a five-minute
+              keepalive, the same shape as the Macs' -- see KEEPALIVE_MINUTES.
 """
 from __future__ import annotations
 
+import os
+import re
+import xml.etree.ElementTree as ET
+
 from .. import shapes
 from . import BLOCKED, DRIFT, MISSING, OK, Check, Step
+
+# How often Task Scheduler is asked to start a task that is not running.
+#
+# It exists because "restart on failure" does not do what its name says.
+# gpu-laptop-5's gateway exited at 03:28 on 2026-09-27 -- the laptop was in
+# Modern Standby, the network dropped, uvicorn's accept loop died with
+# WinError 64 and the self-watchdog called os._exit(1), which is its job --
+# and the task carried RestartCount 99. Nothing started it again, asleep or
+# awake; the box read offline until someone looked.
+#
+# Measured the same day, on the same machine, with two throwaway tasks:
+#
+#   RestartCount 3, one minute apart, action exits 1
+#       ran once. Never restarted. RestartCount answers a task that could not
+#       be LAUNCHED; an action that ran and returned non-zero has, as far as
+#       Task Scheduler is concerned, finished.
+#   repeat every minute, MultipleInstances IgnoreNew, action exits 1 after 150 s
+#       started 12:44:21. The 12:45:21 and 12:46:21 repetitions were refused
+#       (0x800710E0) because it was running. It exited at 12:46:51 and the
+#       12:47:21 repetition started it again. Never two copies.
+#
+# So the supervisor on Windows is the repetition, as `*/5 * * * *` is on the
+# Macs. While the gateway is up it costs nothing: Task Scheduler consults its
+# own table and declines, and no process is created. RestartCount stays,
+# for the failure it does cover.
+#
+# What it costs is the old way of stopping one. A keepalive cannot tell a
+# crash from somebody ending the task on purpose, and on a laptop the owner
+# also works at, "on purpose" is the ordinary case. So the off switch is the
+# task's own: DISABLED. A disabled task has no trigger that fires, and
+# nothing here enables one, starts one, or touches one -- see DISABLED below.
+KEEPALIVE_MINUTES = 5
+
+# What every fleet task carries, set on the settings the task ALREADY has
+# rather than on a fresh set. A fresh one would put back every default the
+# owner had changed, `Enabled` among them. IgnoreNew is what makes the
+# keepalive safe: without it a repetition would start a second gateway
+# beside the first.
+_TASK_SETTINGS = (
+    "$s = $task.Settings; "
+    "$s.DisallowStartIfOnBatteries = $false; "
+    "$s.StopIfGoingOnBatteries = $false; "
+    "$s.StartWhenAvailable = $true; "
+    "$s.MultipleInstances = 'IgnoreNew'; "
+    "$s.RestartCount = 99; $s.RestartInterval = 'PT1M'; "
+    "$s.ExecutionTimeLimit = 'PT0S'")
+
+# The two triggers a fleet task must have, each added only if the task has
+# nothing of its kind. -Trigger REPLACES the whole collection, so the ones
+# already there are read back and passed in again: a trigger somebody added
+# by hand is theirs, and a hardening pass that quietly dropped it would be
+# this tool deciding what runs on a box it was only asked to keep alive.
+#
+# No -RepetitionDuration: on Windows 10 1607 and later its absence means
+# "indefinitely". -At is midnight today, already in the past, so the
+# repetition is live the moment the task is saved.
+_TASK_TRIGGERS = (
+    "$t = @($task.Triggers); "
+    "if (-not ($t | Where-Object { $_.Enabled -and $_.CimClass.CimClassName "
+    "-eq 'MSFT_TaskBootTrigger' })) { $t += New-ScheduledTaskTrigger -AtStartup }; "
+    "if (-not ($t | Where-Object { $_.Enabled -and $_.Repetition -and "
+    "$_.Repetition.Interval })) "
+    "{ $t += New-ScheduledTaskTrigger -Once -At (Get-Date).Date "
+    "-RepetitionInterval (New-TimeSpan -Minutes " + str(KEEPALIVE_MINUTES) + ") }")
+
+ABSENT, OPAQUE, BARE, KEPT = "absent", "opaque", "bare", "kept"
+# There, and switched off by whoever owns the box. Not drift and not work:
+# the one state in which the right thing to do is nothing.
+DISABLED = "disabled"
+
+
+def _local(tag: str) -> str:
+    """`{namespace}Repetition` -> `Repetition`. Task XML has a default
+    namespace, and which one is Microsoft's to change."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _child(node, name: str):
+    return next((c for c in node if _local(c.tag) == name), None)
+
+
+def _text(node, name: str, default: str = "") -> str:
+    hit = _child(node, name) if node is not None else None
+    return (hit.text or "").strip() if hit is not None else default
+
+
+def _read_task(xml: str) -> tuple[bool, bool, str] | None:
+    """(enabled, has a live keepalive, instance policy), or None if this is
+    not task XML.
+
+    Read as a document, not searched as text. A flat search for a
+    repetition is satisfied by one inside a trigger somebody has DISABLED,
+    and by RestartOnFailure's own <Interval> if the pattern is ever
+    loosened -- and either answer reports a task that will never come back
+    as one that will. Any interval counts: how often is an operator's to
+    change, and a task that repeats has its keepalive.
+    """
+    body = re.sub(r"^\s*<\?xml[^>]*\?>", "", xml or "").strip()
+    if not body:
+        return None
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return None
+    settings = _child(root, "Settings")
+    enabled = _text(settings, "Enabled", "true").lower() != "false"
+    policy = _text(settings, "MultipleInstancesPolicy", "IgnoreNew")
+    live = False
+    triggers = _child(root, "Triggers")
+    for trigger in (triggers if triggers is not None else ()):
+        if _text(trigger, "Enabled", "true").lower() == "false":
+            continue
+        if _text(_child(trigger, "Repetition"), "Interval"):
+            live = True
+    return enabled, live, policy
 
 SYSTEMD_GATEWAY = """\
 [Unit]
@@ -172,6 +292,91 @@ class Services(Step):
                                             "run-llama-swap.cmd")
         return out
 
+    @staticmethod
+    def _task_state(ctx, name: str) -> tuple[str, str]:
+        """(ABSENT | OPAQUE | BARE | KEPT | DISABLED, why).
+
+        Five answers, because each wants something different done. ABSENT is
+        created. BARE -- there, and without its keepalive -- is given one
+        and otherwise left exactly as it is, running instance included.
+        OPAQUE is a task this account may not read, and nothing is decided
+        about a task nobody has looked at. DISABLED is a task its owner has
+        switched off, and is left off: not hardened, not started.
+        """
+        r = ctx.probe(["schtasks", "/Query", "/TN", name, "/XML"])
+        if r is None:
+            return OPAQUE, "schtasks did not answer"
+        text = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            # A hardened task is INVISIBLE, not absent. apu-tablet-2's tasks
+            # carry an ACL that refuses a non-elevated query, and reading
+            # that as "missing" is how a verify reports a perfectly good box
+            # as unprovisioned -- and how the apply that followed would
+            # delete and recreate a running task. Same distinction
+            # deploy-gateway.sh draws between a box that is offline and one
+            # that refused our ssh key.
+            if "access is denied" in text.lower():
+                return OPAQUE, "access is denied"
+            return ABSENT, ""
+        task = _read_task(r.stdout or "")
+        if task is None:
+            # It answered, and not with anything that can be read. Deciding
+            # it has no keepalive would re-harden it on every run; deciding
+            # it has one would be a guess.
+            return OPAQUE, "schtasks answered with something that is not task XML"
+        enabled, live, policy = task
+        if not enabled:
+            return DISABLED, "switched off on this box"
+        if not live:
+            return BARE, "no keepalive trigger"
+        if policy.lower() != "ignorenew":
+            # A repetition without IgnoreNew is a second gateway every five
+            # minutes, each one failing to bind :8080 behind the first.
+            return BARE, f"keepalive with MultipleInstances {policy}"
+        return KEPT, ""
+
+    @staticmethod
+    def _harden(ctx, name: str) -> bool:
+        """Settings and triggers onto a task that exists. Never stops it.
+
+        Set-ScheduledTask replaces the definition and leaves the running
+        instance alone -- measured, not assumed: a task given a new trigger
+        set 57 s into a 150 s run finished that run on time. That is what
+        lets this reach a box whose gateway is serving.
+
+        Reported when it fails. This call used to be `check=False` and
+        nothing else, and check() only asked whether the task EXISTED, so a
+        hardening that never took was invisible for the life of the box.
+        """
+        script = (f"$ErrorActionPreference = 'Stop'; "
+                  f"$task = Get-ScheduledTask -TaskName '{name}'; "
+                  f"{_TASK_SETTINGS}; {_TASK_TRIGGERS}; "
+                  f"Set-ScheduledTask -TaskName '{name}' -Trigger $t "
+                  f"-Settings $s | Out-Null")
+        # Windows PowerShell's own module path, stated. Started from a pwsh 7
+        # shell it inherits one it cannot use -- the reason acl_strangers()
+        # gives its child a clean environment, and the same child.
+        modules = (os.environ.get("ProgramFiles", r"C:\Program Files")
+                   + r"\WindowsPowerShell\Modules;"
+                   + os.environ.get("SystemRoot", r"C:\Windows")
+                   + r"\System32\WindowsPowerShell\v1.0\Modules")
+        r = ctx.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                     script], system=True, check=False,
+                    env={"PSModulePath": modules})
+        if r is not None and r.returncode != 0:
+            # What it SAID, which is the top: PowerShell names the fault and
+            # then spends six lines pointing at where in the command it was.
+            said = []
+            for line in ((r.stderr or "") + (r.stdout or "")).splitlines():
+                if line.lstrip().startswith(("At ", "+")):
+                    break
+                if line.strip():
+                    said.append(line.strip())
+            ctx.note(f"could not set the keepalive on {name} "
+                     f"(exit {r.returncode}): " + " ".join(said)[:300])
+            return False
+        return True
+
     # ------------------------------------------------------------------ check
     def check(self, ctx) -> Check:
         mech = ctx.plan["platform"]["service"]
@@ -201,24 +406,21 @@ class Services(Step):
                          todo)
 
         if mech == "schtasks":
-            todo, opaque = [], []
+            todo, opaque, bare, off = [], [], [], []
             for name in self._tasks(ctx):
-                r = ctx.probe(["schtasks", "/Query", "/TN", name])
-                if r is None:
+                state, why = self._task_state(ctx, name)
+                if state == OPAQUE:
                     opaque.append(name)
-                elif r.returncode == 0:
-                    continue
-                elif "access is denied" in ((r.stderr or "") + (r.stdout or "")).lower():
-                    # A hardened task is INVISIBLE, not absent. apu-tablet-2's
-                    # tasks carry an ACL that refuses a non-elevated query, and
-                    # reading that as "missing" is how a verify reports a
-                    # perfectly good box as unprovisioned -- and how the apply
-                    # that followed would delete and recreate a running task.
-                    # Same distinction deploy-gateway.sh draws between a box
-                    # that is offline and one that refused our ssh key.
-                    opaque.append(name)
-                else:
-                    todo.append(f"create SYSTEM task {name} (ONSTART)")
+                elif state == DISABLED:
+                    off.append(name)
+                elif state == ABSENT:
+                    todo.append(f"create SYSTEM task {name} (ONSTART, and "
+                                f"every {KEEPALIVE_MINUTES} min if it is not "
+                                f"running)")
+                elif state == BARE:
+                    bare.append(name)
+                    todo.append(f"give {name} its keepalive ({why}); a "
+                                f"running {name} is not stopped")
             if opaque:
                 return Check(BLOCKED,
                              f"cannot read {', '.join(opaque)} without elevation "
@@ -226,8 +428,20 @@ class Services(Step):
                              f"not the same answer as not found)",
                              todo)
             if not todo:
-                return Check(OK, f"{len(self._tasks(ctx))} scheduled task(s) present")
-            return Check(MISSING, f"{len(todo)} task(s) to create", todo)
+                if off:
+                    # Said, because a run that ends `ok` over a gateway that
+                    # is not running should say why it is content.
+                    return Check(OK, f"{', '.join(off)} switched off on this "
+                                     f"box by its owner -- left off "
+                                     f"(Enable-ScheduledTask to bring back)")
+                return Check(OK, f"{len(self._tasks(ctx))} scheduled task(s) "
+                                 f"present, each with its keepalive")
+            if len(bare) == len(todo):
+                return Check(DRIFT, f"{len(bare)} task(s) with nothing to start "
+                                    f"them again after an exit", todo)
+            return Check(MISSING, f"{len(todo) - len(bare)} task(s) to create"
+                         + (f", {len(bare)} to give a keepalive" if bare else ""),
+                         todo)
 
         return Check(BLOCKED, f"no supervisor here (service manager: {mech!r}) -- "
                               f"nothing will start this gateway at boot")
@@ -259,36 +473,50 @@ class Services(Step):
             ctx.run(["crontab", "-"], input_text=text)
             ctx.did(f"installed {len(want)} crontab line(s)")
         elif mech == "schtasks":
-            # Only the tasks check() found absent. Recreating every task
-            # because ONE was missing meant that enabling llama-swap on a
-            # working Windows peer stopped and deleted its running
-            # llm-gateway task as a side effect. A task that answers /Query
-            # is left exactly as it is.
-            created = []
+            # Only the tasks check() found absent are created. Recreating
+            # every task because ONE was missing meant that enabling
+            # llama-swap on a working Windows peer stopped and deleted its
+            # running llm-gateway task as a side effect. A task that is
+            # there is never ended and never deleted: the most that happens
+            # to it is a keepalive it did not have.
+            touched = []
             for name, cmd in self._tasks(ctx).items():
-                r = ctx.probe(["schtasks", "/Query", "/TN", name])
-                if r is not None and r.returncode == 0:
+                state, _ = self._task_state(ctx, name)
+                if state in (KEPT, OPAQUE, DISABLED):
                     continue
-                created.append(name)
-                ctx.run(["schtasks", "/End", "/TN", name], system=True, check=False)
-                ctx.run(["schtasks", "/Delete", "/TN", name, "/F"],
-                        system=True, check=False)
-                ctx.run(["schtasks", "/Create", "/TN", name, "/TR", f'"{cmd}"',
-                         "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"],
-                        system=True)
-                # StartWhenAvailable so a missed trigger is still honoured, no
-                # execution time limit (a service is not a job to be killed
-                # after three days), and a relaunch if the action fails.
-                ctx.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                         f"$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
-                         f"-DontStopIfGoingOnBatteries -StartWhenAvailable "
-                         f"-MultipleInstances IgnoreNew -RestartCount 3 "
-                         f"-RestartInterval (New-TimeSpan -Minutes 1) "
-                         f"-ExecutionTimeLimit ([TimeSpan]::Zero); "
-                         f"Set-ScheduledTask -TaskName '{name}' -Settings $s | Out-Null"],
-                        system=True, check=False)
-                ctx.did(f"scheduled task {name} (ONSTART, SYSTEM)")
-            for name in reversed(created):
+                touched.append(name)
+                if state == ABSENT:
+                    ctx.run(["schtasks", "/End", "/TN", name], system=True,
+                            check=False)
+                    ctx.run(["schtasks", "/Delete", "/TN", name, "/F"],
+                            system=True, check=False)
+                    ctx.run(["schtasks", "/Create", "/TN", name, "/TR",
+                             f'"{cmd}"', "/SC", "ONSTART", "/RU", "SYSTEM",
+                             "/RL", "HIGHEST", "/F"], system=True)
+                # StartWhenAvailable so a trigger missed while the box slept
+                # is honoured when it wakes, no execution time limit (a
+                # service is not a job to be killed after three days), both
+                # battery flags off (unplugging a laptop must not stop its
+                # gateway), and the keepalive -- see KEEPALIVE_MINUTES for
+                # why RestartCount alone was never enough.
+                kept = self._harden(ctx, name)
+                if state == ABSENT and kept:
+                    ctx.did(f"scheduled task {name} (ONSTART + every "
+                            f"{KEEPALIVE_MINUTES} min, SYSTEM)")
+                elif state == ABSENT:
+                    # Created, and it will start at boot -- and that is all.
+                    # Saying "every 5 min" here would be the silent failure
+                    # this step was rewritten to end; the note says why.
+                    ctx.did(f"scheduled task {name} (ONSTART, SYSTEM) -- "
+                            f"WITHOUT its keepalive")
+                elif kept:
+                    ctx.did(f"{name}: keepalive added, every "
+                            f"{KEEPALIVE_MINUTES} min; nothing was stopped")
+            # Started now, not at the next repetition: the health step that
+            # follows waits thirty seconds, not five minutes. On a task that
+            # is already running this is refused by IgnoreNew and changes
+            # nothing.
+            for name in reversed(touched):
                 ctx.run(["schtasks", "/Run", "/TN", name], system=True, check=False)
 
 
