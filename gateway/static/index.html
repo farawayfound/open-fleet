@@ -466,7 +466,8 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
   </div>
   <div class="spacer"></div>
   <div class="grid g2">
-    <div class="card"><h3>Services</h3><table id="svc"><tbody></tbody></table></div>
+    <div class="card"><h3>Services</h3><table id="svc"><tbody></tbody></table>
+      <div id="voicebox"></div></div>
     <div class="card"><h3>Loaded models</h3>
       <table id="running"><tbody></tbody></table>
       <div class="spacer"></div>
@@ -939,6 +940,7 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <select id="logunit" data-help="log unit" style="width:auto" onchange="loadLogs()">
         <option>llama-swap</option><option>llm-gateway</option>
         <option>cloudflared</option><option>tailscaled</option>
+        <option>llm-voice</option><option>gpu-laptop-1-voice-guard</option>
       </select>
       <button class="act" onclick="loadLogs()">Refresh</button>
       <label class="row" data-help="log auto" style="gap:5px"><input type="checkbox"
@@ -1989,8 +1991,9 @@ async function loadStatus() {
     : "";
   $("#svc tbody").innerHTML = avRow + Object.entries(s.services || {}).map(([k, v]) =>
     `<tr><td>${esc(k)}</td><td style="text-align:right">
-      <span class="pill ${v === "active" ? "ok" : v === "not installed" ? "" : "no"}"
-        >${esc(v)}</span></td></tr>`).join("");
+      <span class="pill ${v === "active" ? "ok" : v === "paused" ? "mid"
+        : v === "not installed" ? "" : "no"}">${esc(v)}</span></td></tr>`).join("");
+  loadVoice(s.services);
   const run = s.models_running || [];
   // The context each resident model actually got. A model can be loaded and
   // still be the wrong shape for the job it is doing, and this is the number
@@ -2360,6 +2363,46 @@ function fillPick(sel, opts, keep) {
 async function svcAction(a, u) {
   try { const r = await api(`/service/${a}/${u}`, {method: "POST"});
     toast(`${a} ${u}: rc=${r.rc}`); setTimeout(loadStatus, 1500); }
+  catch (e) { toast(e.message, true); }
+}
+
+// The voice node (gpu-laptop-1's llm-voice): shown under Services on a box that
+// carries it, with Pause and Resume. A pause holds through reboots and
+// redeploys until Resume (see voice_report() in app.py).
+async function loadVoice(services) {
+  const box = $("#voicebox");
+  if (!services || !("llm-voice" in services)) { box.innerHTML = ""; return; }
+  let v;
+  try { v = await api("/voice"); } catch (e) { box.innerHTML = ""; return; }
+  const unit = (v.units || {})["llm-voice"] || "down";
+  const state = v.paused ? `<span class="pill mid">paused</span>`
+    : unit === "active" ? `<span class="pill ${v.ready ? "ok" : "mid"}">${v.ready ? "ready" : "loading"}</span>`
+    : `<span class="pill no">${esc(unit)}</span>`;
+  const note = v.paused
+    ? "paused" + (v.paused_since ? " since " + esc(v.paused_since) : "")
+      + (v.paused_by ? " by " + esc(v.paused_by) : "") + " — Athena replies in text meanwhile"
+    : v.loading_error ? esc(v.loading_error) : "speech-to-text and text-to-speech for Athena";
+  box.innerHTML = `<div class="spacer"></div>
+    <div class="row" style="justify-content:space-between">
+      <span>voice node${v.live_session ? ' <span class="pill arch">live call</span>' : ""}
+        <div class="muted" style="font-size:11px">${note}</div></span>
+      <span>${state}
+        <button class="act" onclick="voiceAction(${jsArg(v.paused ? "resume" : "pause")}, ${v.live_session ? "true" : "false"})"
+          >${v.paused ? "Resume" : "Pause"}</button></span>
+    </div>`;
+}
+async function voiceAction(a, live) {
+  let body = {};
+  if (a === "pause") {
+    const ask = live
+      ? "A live voice call is on, and pausing ends it. Pause the voice node anyway?"
+      : "Pause the voice node? It stays stopped, through reboots and redeploys, until you resume it.";
+    if (!confirm(ask)) return;
+    if (live) body = {force: true};
+  }
+  try { await api(`/voice/${a}`, {method: "POST", body});
+    toast(a === "pause" ? "voice node paused" : "voice node starting — models take a minute to load");
+    setTimeout(loadStatus, 1500); }
   catch (e) { toast(e.message, true); }
 }
 

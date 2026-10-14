@@ -2661,21 +2661,127 @@ def service_states() -> dict[str, str]:
         units = (kind, *units)
     if platform.system() == "Linux" and shutil.which("systemctl"):
         try:
-            states = _systemd_states(units)
+            states = _systemd_states((*units, *VOICE_UNITS))
         except Exception:  # noqa: BLE001 -- fall through to the process probe
             states = {}
         if states:
+            # The voice node's units are listed where this box carries them
+            # (gpu-laptop-1) and nowhere else -- the guard is what says so: apu-box-1
+            # still has a retired, disabled llm-voice.service of its own.
+            carried = states.get(VOICE_GUARD) not in (None, "not installed", "unknown")
+            for u in VOICE_UNITS:
+                if not carried or states.get(u) == "not installed":
+                    states.pop(u, None)
+            if states.get(VOICE_UNIT) in ("inactive", "failed") and voice_paused() is not None:
+                states[VOICE_UNIT] = "paused"
             # A piece can be up here without systemd holding it up: cpu-box-1 has
             # ollama.service masked and an ollama serving anyway. Where the unit
             # says there is nothing running, believe the process table over it --
             # but leave a "failed" unit red, because that is worth seeing.
             quiet = [u for u, v in states.items()
-                     if v in ("not installed", "inactive")]
+                     if u in units and v in ("not installed", "inactive")]
             states.update(
                 {u: v for u, v in _process_states(quiet).items() if v == "active"}
             )
             return states
     return _process_states(units)
+
+
+# --------------------------------------------------------------------------
+# the voice node: visible on the dashboard, and pausable
+# --------------------------------------------------------------------------
+# hosts/gpu-laptop-1/voice puts three units beside the gateway: llm-voice (the
+# STT/TTS node on :8600), gpu-laptop-1-voice-guard and gpu-laptop-1-power. All three
+# show where they exist; llm-voice can be paused and resumed. A pause is a
+# marker file and then a stop -- the unit's ConditionPathExists=! on the
+# marker is what keeps it down through a reboot, the guard's Wants= and a
+# redeploy, none of which a bare `systemctl stop` survives. The guard and
+# the power unit are shown, never stopped: a stopped guard leaves a stale
+# verdict, and a stale verdict reads as "unavailable" (availability()).
+VOICE_UNIT = "llm-voice"
+VOICE_GUARD = "gpu-laptop-1-voice-guard"
+VOICE_UNITS = (VOICE_UNIT, VOICE_GUARD, "gpu-laptop-1-power")
+VOICE_PAUSED = STATE / "voice.paused"
+VOICE_ENV = ETC / "voice.env"
+
+
+def voice_paused() -> dict | None:
+    """The pause marker's record ({since, by}), or None when not paused. An
+    unreadable or hand-made marker still means paused -- the unit agrees."""
+    try:
+        raw = VOICE_PAUSED.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"since": None, "by": None}
+    try:
+        rec = json.loads(raw)
+    except json.JSONDecodeError:
+        rec = None
+    return rec if isinstance(rec, dict) else {"since": None, "by": None}
+
+
+def voice_base() -> str:
+    """http://<bind>:<port> of the voice node, from its env file. Those two
+    values only: the same file holds the node's API key, never read here."""
+    got: dict[str, str] = {}
+    try:
+        for line in VOICE_ENV.read_text(encoding="utf-8").splitlines():
+            k, sep, v = line.partition("=")
+            if sep and k.strip() in ("VOICE_BIND", "VOICE_PORT"):
+                got[k.strip()] = v.strip().strip('"')
+    except OSError:
+        return ""
+    if not (got.get("VOICE_BIND") and got.get("VOICE_PORT")):
+        return ""
+    return "http://" + got["VOICE_BIND"] + ":" + got["VOICE_PORT"]
+
+
+def voice_units() -> dict[str, str]:
+    """Each installed voice unit's state; {} on a box without the voice node."""
+    if platform.system() != "Linux" or not shutil.which("systemctl"):
+        return {}
+    try:
+        states = _systemd_states(VOICE_UNITS)
+    except Exception:  # noqa: BLE001
+        return {}
+    # Both the node and its guard: apu-box-1 still carries a retired llm-voice
+    # unit, and Resume must never start that one.
+    if any(states.get(u) in ("not installed", "unknown") for u in (VOICE_UNIT, VOICE_GUARD)):
+        return {}
+    return {u: s for u, s in states.items() if s != "not installed"}
+
+
+async def voice_health(base: str) -> dict:
+    """The voice node's own /health (stt/tts readiness, live session), or {}."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0, trust_env=False) as c:
+            r = await c.get(base + "/health")
+        body = r.json() if r.status_code == 200 else None
+    except Exception:  # noqa: BLE001 -- a node mid-start answers nothing yet
+        body = None
+    return body if isinstance(body, dict) else {}
+
+
+async def voice_report() -> dict | None:
+    """What the Voice card shows, or None on a box without the voice node."""
+    units = await asyncio.to_thread(voice_units)
+    if not units:
+        return None
+    paused = voice_paused()
+    base = voice_base()
+    health = (await voice_health(base)
+              if base and units.get(VOICE_UNIT) == "active" else {})
+    return {
+        "units": units,
+        "paused": paused is not None,
+        "paused_since": (paused or {}).get("since"),
+        "paused_by": (paused or {}).get("by"),
+        "ready": bool((health.get("stt") or {}).get("ready")
+                      and (health.get("tts") or {}).get("ready")),
+        "live_session": bool((health.get("session") or {}).get("live")),
+        "loading_error": health.get("loading_error"),
+    }
 
 
 _avail_cache: dict[str, Any] = {"t": 0.0, "state": None}
@@ -5496,6 +5602,10 @@ async def health() -> dict:
     if av["gated"]:
         out["available"] = av["available"]
         out["availability_reason"] = av["reason"]
+    # Only while paused: the hub's box-health watch reads it, so a voice node
+    # paused on purpose is not paged as an outage.
+    if VOICE_PAUSED.exists():
+        out["voice_paused"] = True
     return out
 
 
@@ -17016,6 +17126,68 @@ async def api_swap_config(admin: dict = Depends(require_admin)) -> str:
     return render_swap_config(load_models())
 
 
+@app.get("/admin/api/voice")
+async def api_voice(admin: dict = Depends(require_admin)) -> dict:
+    rep = await voice_report()
+    if rep is None:
+        raise HTTPException(404, "no voice node on this box")
+    return rep
+
+
+@app.post("/admin/api/voice/pause")
+async def api_voice_pause(request: Request, admin: dict = Depends(require_admin)) -> dict:
+    """Stop the voice node and keep it stopped until Resume. A live call is
+    refused unless the body says {"force": true}: pausing ends it, silently,
+    for whoever is on it."""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 -- an empty body is a plain pause
+        payload = {}
+    force = isinstance(payload, dict) and payload.get("force") is True
+    rep = await voice_report()
+    if rep is None:
+        raise HTTPException(404, "no voice node on this box")
+    # Paused and stopped is done. Paused but RUNNING (a unit installed before
+    # its ConditionPathExists, then rebooted) is stopped again.
+    if rep["paused"] and rep["units"].get(VOICE_UNIT) != "active":
+        return {**rep, "already": True}
+    if rep["live_session"] and not force:
+        raise HTTPException(409, "a live voice call is on, and pausing ends it -- "
+                                 "send {\"force\": true} to pause anyway")
+    # The marker first: from this moment nothing restarts the unit, not even
+    # the guard's Wants= between the two steps. "by" only when it is a person:
+    # through the hub's proxy this box sees the hub's admin token, not who.
+    who = admin.get("email") if admin.get("via") == "cf-access" else ""
+    write_atomic(VOICE_PAUSED, json.dumps({"since": now(), "by": who or ""}))
+    code, out = await asyncio.to_thread(systemctl, "stop", VOICE_UNIT + ".service")
+    if code != 0:
+        VOICE_PAUSED.unlink(missing_ok=True)
+        raise HTTPException(502, "could not stop " + VOICE_UNIT + " (" + out[:300]
+                                 + ") -- is the voice grant in /etc/sudoers.d/llmstack-fleet? "
+                                 "A gateway deploy re-runs hosts/linux/grants.sh")
+    log.info("voice: %s paused by %s", VOICE_UNIT, admin.get("email"))
+    return await voice_report() or {}
+
+
+@app.post("/admin/api/voice/resume")
+async def api_voice_resume(admin: dict = Depends(require_admin)) -> dict:
+    if not await asyncio.to_thread(voice_units):
+        raise HTTPException(404, "no voice node on this box")
+    # The marker goes first, or the unit's ConditionPathExists would skip the
+    # start (and systemctl would still say 0).
+    held = VOICE_PAUSED.read_text(encoding="utf-8") if VOICE_PAUSED.exists() else None
+    VOICE_PAUSED.unlink(missing_ok=True)
+    code, out = await asyncio.to_thread(systemctl, "start", VOICE_UNIT + ".service")
+    if code != 0:
+        if held is not None:
+            write_atomic(VOICE_PAUSED, held)     # still paused, not "down" to the hub
+        raise HTTPException(502, "could not start " + VOICE_UNIT + " (" + out[:300]
+                                 + ") -- is the voice grant in /etc/sudoers.d/llmstack-fleet? "
+                                 "A gateway deploy re-runs hosts/linux/grants.sh")
+    log.info("voice: %s resumed by %s", VOICE_UNIT, admin.get("email"))
+    return await voice_report() or {}
+
+
 @app.post("/admin/api/service/{action}/{unit}")
 async def api_service(action: str, unit: str, admin: dict = Depends(require_admin)) -> dict:
     if action not in ("restart", "start", "stop"):
@@ -18525,7 +18697,7 @@ def _tail_file(path: Path, lines: int, block: int = 65536) -> str:
 async def api_logs(
     unit: str = "llama-swap", lines: int = 300, admin: dict = Depends(require_admin)
 ) -> str:
-    if unit not in ("llama-swap", "llm-gateway", "cloudflared", "tailscaled"):
+    if unit not in ("llama-swap", "llm-gateway", "cloudflared", "tailscaled", *VOICE_UNITS):
         raise HTTPException(400, "unit not managed here")
     lines = max(10, min(lines, 2000))
     if platform.system() == "Windows":
