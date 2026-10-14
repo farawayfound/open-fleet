@@ -267,6 +267,54 @@ class Ctx:
         except OSError as exc:
             return None, f"unreadable: {exc.strerror or exc}"
 
+    def owned_by(self, user: str, p: str | Path, *, recursive: bool = False,
+                 limit: int = 20000) -> list[str]:
+        """The paths at `p` -- and, with `recursive`, under it -- that `user` owns.
+
+        Plan-space paths, so a report names what the box will show rather
+        than where a sandbox put it. [] means "none that I can see": the
+        path is absent, the account does not exist yet, or this is Windows,
+        which has no uid to compare. A caller asking "is anything here the
+        service account's that must not be" can take that as clean -- the
+        directory step is what says a directory is missing.
+
+        Symlinks are not followed below `p` (the link's own owner is the
+        question), but `p` itself is: a bin/ that is a link to somebody
+        else's directory is that directory's exposure.
+        """
+        if self.family == "windows":
+            return []
+        try:
+            import pwd
+            uid = pwd.getpwnam(user).pw_uid
+        except (ImportError, KeyError):
+            return []
+        base = self.path(p)
+        shown = str(p).rstrip("/") or "/"
+        hits: list[str] = []
+        try:
+            if base.stat().st_uid == uid:
+                hits.append(shown)
+        except OSError:
+            return hits
+        if not recursive:
+            return hits
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(base):
+            rel = os.path.relpath(dirpath, base)
+            for name in (*dirnames, *filenames):
+                seen += 1
+                if seen > limit:
+                    return hits
+                try:
+                    if os.lstat(os.path.join(dirpath, name)).st_uid != uid:
+                        continue
+                except OSError:
+                    continue
+                inside = name if rel == "." else f"{rel}/{name}"
+                hits.append(f"{shown}/{inside}".replace(os.sep, "/"))
+        return hits
+
     def write(self, p: str | Path, text: str, *, mode: int = 0o644,
               newline: str = "\n", encoding: str = "utf-8") -> bool:
         """Write only if the content differs. Returns whether it changed.

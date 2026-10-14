@@ -137,6 +137,129 @@ systemd and no fake apt, so they report `sandboxed` and record what they would
 have done. A sandbox that silently reported success for a step it never ran
 would be worse than no sandbox.
 
+## A boot-time CPU/GPU power cap (Linux)
+
+```yaml
+power:
+  gpu_sclk_max_mhz: 2500   # caps the GPU's peak graphics clock, MHz
+  cpu_boost: false         # cpufreq/boost off
+  cpu_max_mhz: 2500        # ceiling on every cpufreq policy's scaling_max_freq
+```
+
+Three independent `host.yml` keys, Linux only, each a no-op when unset -- a
+box with no `power:` section at all is untouched, and the fleet's other
+Linux boxes stay that way by default. They exist because apu-box-1 froze twice
+on 2026-09-18 under heavy GPU load with its CPU worker threads busy-polling
+alongside it (measured afterwards under the same load: package Tctl
+104-107 °C on stock settings while the dashboard's GPU sensor read
+57-93 °C); the full
+incident, every setting that was benchmarked and soaked, and why these
+values were chosen are in
+[`hosts/apu-box-1/README.md`](../hosts/apu-box-1/README.md#known-hardware-notes).
+
+None of the three is a kernel cmdline token the way `sizing.gtt_gib` is --
+`power_dpm_force_performance_level` + `pp_od_clk_voltage` and
+`cpufreq/boost` are live sysfs writes, active immediately or not at all, and
+LOST on every reboot. `fleetctl apply`'s `power-cap` step installs a small
+root helper (`gateway/bin/llmstack-powercap`) and a systemd oneshot,
+`llmstack-powercap.service`, that reapplies them at every boot -- ordered
+`Before=llama-swap.service` (never `Requires=`, so a knob this box's
+hardware cannot honour is never a reason llama-swap fails to start), waiting
+a bounded interval for the GPU device to appear, and picking the AMD card
+explicitly rather than assuming `card0`. `check()` reads the same helper's
+`status` verb to report wanted vs. active, the way `gpu-cap` does for the
+GTT window -- except a sysfs write is synchronous, so there is no "staged,
+pending reboot" state here, only active or not.
+
+## A keepalive for the Windows tasks
+
+The Windows supervisor was one trigger, *at startup*, and a setting called
+"restart on failure". On 2026-09-27 gpu-laptop-5's gateway exited at 03:28 --
+the laptop was in Modern Standby, the network dropped, uvicorn's accept loop
+died with `WinError 64`, and the gateway's self-watchdog ended the process on
+purpose so that the supervisor would start a fresh one. The task carried
+`RestartCount 99`. Nothing started it again, asleep or awake, and the box read
+offline until somebody looked nine hours later.
+
+Measured on that machine the same day, with two throwaway tasks:
+
+| task | what it did |
+|---|---|
+| `RestartCount 3`, one minute apart; the action exits 1 at once | ran once, at 12:44:21. Never again. |
+| repeats every minute, `MultipleInstances IgnoreNew`; the action exits 1 after 150 s | started 12:44:21. The 12:45:21 and 12:46:21 repetitions were refused (`0x800710E0`) because it was running. It exited at 12:46:51, and the 12:47:21 repetition started it again. |
+
+"Restart on failure" answers a task that could not be *launched*. An action
+that ran and returned non-zero has, as far as Task Scheduler is concerned,
+finished. So every Windows gateway in the fleet had a watchdog that exits and
+a supervisor that does not notice, and the ones that never showed it are the
+ones that never sleep.
+
+Each task now has two triggers: at startup, and every five minutes. It is the
+shape the Macs have had all along (`@reboot` plus `*/5 * * * *`), and
+`IgnoreNew` is what makes it safe -- a repetition that finds the task running
+is declined inside Task Scheduler, and no process is created. On a healthy
+box the keepalive costs nothing at all.
+
+```
+fleetctl apply --only services        # elevated
+  drift   services         2 task(s) with nothing to start them again after an exit
+            . give llm-gateway its keepalive (no keepalive trigger); a running llm-gateway is not stopped
+            . give llama-swap its keepalive (no keepalive trigger); a running llama-swap is not stopped
+    llm-gateway: keepalive added, every 5 min; nothing was stopped
+    llama-swap: keepalive added, every 5 min; nothing was stopped
+```
+
+Three things make that safe to run on a box that is serving:
+
+- **A task that is there is never ended and never deleted.** The trigger is
+  added with `Set-ScheduledTask`, which changes the definition and leaves the
+  running instance alone. Also measured: a task given a new trigger set 57 s
+  into a 150 s run finished that run on time.
+- **The triggers it already has are kept.** `-Trigger` replaces the whole
+  collection, so what is there is read back and passed in again, and each of
+  the two is added only if the task has nothing of its kind. Run against a
+  task with one trigger of its own, the first pass left it with two and the
+  second pass changed nothing.
+- **A task with its keepalive is not touched.** `check()` reads the task's XML
+  for a repetition; when both tasks have one, `apply` issues no command of any
+  kind.
+- **A task that cannot be read is not decided about.** Unelevated, a SYSTEM
+  task answers *Access is denied*, and that is `blocked`, as it was.
+
+The call that sets all this used to be `check=False` and nothing else, and
+`check()` only asked whether the task existed, so a hardening that never took
+was invisible for the life of the box. It is reported now, and the re-check
+after `apply` fails the run if the keepalive is not there.
+
+Boxes provisioned by the per-host installers have the startup trigger only.
+`fleetctl apply --only services`, elevated, on each is the whole fix.
+
+### What it costs: ending a task no longer stops it
+
+A keepalive cannot tell a crash from somebody ending the task on purpose.
+Before, `schtasks /End` kept a gateway off until the next boot. Now Task
+Scheduler starts it again within five minutes. On a server that is the point.
+On a laptop its owner also works at, it would be the fleet taking the machine
+back.
+
+So the off switch is the task's own, and everything here respects it:
+
+```powershell
+# off: nothing of the fleet's runs, and nothing starts it
+"llm-gateway", "llama-swap" | ForEach-Object { Disable-ScheduledTask -TaskName $_; Stop-ScheduledTask -TaskName $_ }
+
+# on again
+"llama-swap", "llm-gateway" | ForEach-Object { Enable-ScheduledTask -TaskName $_; Start-ScheduledTask -TaskName $_ }
+```
+
+A disabled task has no trigger that fires. `fleetctl` reports it as
+*switched off on this box by its owner -- left off* and does not enable it,
+harden it or start it, even to give it a keepalive it lacks. The hardening
+changes the settings the task already has rather than writing a fresh set, so
+`Enabled` is never one of the things it touches. `deploy-gateway.sh` asks the
+same question first and reports the box as *switched off*, green, without
+deploying.
+
 ## What testing it found
 
 Every one of these was in the repo already, or was written and then caught.
@@ -372,7 +495,7 @@ useful part, because six of the thirteen entries predate any of this:
 
 ```
 retarget   apu-box-1      http://apu-box-1:8080          <- name
-retarget   gpu-laptop-1    http://192.168.1.144:8080   <- lan
+retarget   gpu-laptop-1    http://192.168.0.x:8080     <- lan
 retarget   server-1    http://server-1:8080        <- name
 retarget   cpu-box-1     http://cpu-box-1:8080         <- name
 retarget   mac-desktop-1     http://mac-desktop:8080        <- name
@@ -380,7 +503,9 @@ retarget   mini-pc-1      http://mini-pc-1:8080       <- name
 retarget   gpu-desktop-1       http://gpu-desktop-1:8080           <- name
 ```
 
-Seven of thirteen addressed by a bare name or a DHCP lease. They all worked,
+Seven of thirteen addressed by a bare name or a DHCP lease (gpu-laptop-1's is
+written `192.168.0.x` above: the real one lapsed during the 2026-10-09 outage
+and a printer took it, which is the argument in one line). They all worked,
 which is exactly the problem — the hub shares a LAN with those boxes, so the
 names resolved and the lease was current. The 2026-08-26 power cut had
 already shown what happens when that stops being true: new leases on the way

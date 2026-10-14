@@ -1,11 +1,12 @@
 {
   "format": 1,
-  "private_sha": "9f0b000c5ad3ccef966c2c1f110fcef46a168d43",
-  "exported_at": "2026-09-07T02:39:57+00:00",
-  "files": 91,
+  "private_sha": "e2512eb63312579f89b42817c259223320e222a0",
+  "exported_at": "2026-10-14T18:13:07+00:00",
+  "files": 118,
   "overlay_files": 15,
   "executable": [
     "gateway/bin/llmstack-gpuconf",
+    "gateway/bin/llmstack-powercap",
     "hosts/linux/grants.sh",
     "install.sh"
   ]

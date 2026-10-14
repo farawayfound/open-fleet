@@ -74,6 +74,12 @@ def _fresh_public_state(client):
     gw.db_exec("DELETE FROM settings WHERE key=?", (gw.FLEET_ROUTING_KEY,))
     gw._specs_cache.update(stamp=None, specs=None, gen=-1)
     gw._manual_load.clear()
+    # "Not in use" is remembered across restarts on purpose. Left behind by
+    # one test it would silently switch off the warm-up and sync loops that
+    # every later test assumes are running.
+    gw.db_exec("DELETE FROM settings WHERE key=?", (gw.STANDBY_KEY,))
+    gw._standby.update(loaded=False, standby=False, since="", heard=0.0)
+    gw._standby_status.update(t=0.0, payload=None)
     yield
 
 
@@ -92,8 +98,13 @@ def fake_fleet(monkeypatch):
     """A small, fully offline fake fleet: no real HTTP ever leaves the
     process. `gemma4-31b-qat` is resident locally; `gemma-4-26b`/
     `gemma4:26b` (the two fleet ids behind gemma4-26b-a4b) are only
-    *available* (present, not resident) locally; `qwen3.8-27b` is resident
-    on a peer; `nemotron3-super-120b`'s fleet id is not served anywhere.
+    *available* (present, not resident) locally; `qwen3.8-27b` and
+    `qwen3.8-flash-next` are resident on a peer; `nemotron3-super-120b`'s
+    fleet id is not served anywhere.
+
+    Flash-Next is here because it is the SHIPPED `auto_issue_model`: a fake
+    fleet that could not serve the default would leave the default untested,
+    since the mint refuses a model no box in the fleet reports serving.
 
     Each (host, model) pair also carries the context ceiling that box would
     serve it with -- deliberately uneven, because a flat number is exactly
@@ -104,6 +115,7 @@ def fake_fleet(monkeypatch):
         "gemma4:26b": [""],
         "qwen3.6-35b": [""],
         "qwen3.8-27b": ["peer1"],
+        "qwen3.8-flash-next": ["peer1"],
     }
     cap = {(c, m): 1 for m, cs in cands.items() for c in cs}
     ctx = {
@@ -112,8 +124,10 @@ def fake_fleet(monkeypatch):
         ("", "gemma4:26b"): 16384,
         ("", "qwen3.6-35b"): 8192,
         ("peer1", "qwen3.8-27b"): 131072,
+        ("peer1", "qwen3.8-flash-next"): 262144,
     }
-    running = {gw.HOST_NAME: {"gemma4-31b-qat"}, "peer1": {"qwen3.8-27b"}}
+    running = {gw.HOST_NAME: {"gemma4-31b-qat"},
+               "peer1": {"qwen3.8-27b", "qwen3.8-flash-next"}}
     gw._routes_cache.update(t=time.time(), map={m: cs[0] for m, cs in cands.items()},
                             cands=cands, cap=cap, running=running, ctx=ctx,
                             reachable={gw.HOST_NAME, "peer1"})

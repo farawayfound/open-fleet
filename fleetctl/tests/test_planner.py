@@ -358,6 +358,73 @@ class TestValidation:
         assert planner.validate(plan) == []
 
 
+class TestPowerSchema:
+    """The power: section -- unset is a true no-op, each key is independent,
+    and a box with no host.yml power: entries at all is untouched."""
+
+    def test_unset_by_default_on_every_box(self, linux_facts, empty_repo):
+        plan, _ = build(linux_facts, empty_repo)
+        assert plan["power"] == {"gpu_sclk_max_mhz": None, "cpu_boost": None,
+                                 "cpu_max_mhz": None}
+
+    def test_unset_power_is_not_written_to_host_yml(self, linux_facts, empty_repo,
+                                                    tmp_path):
+        plan, prov = build(linux_facts, empty_repo)
+        text = planner.write(plan, tmp_path / "host.yml", prov)
+        assert "power" not in hostfile.load(tmp_path / "host.yml")
+        assert "power" not in text
+
+    def test_host_yml_sets_one_knob_and_leaves_the_others_alone(
+            self, linux_facts, empty_repo):
+        (empty_repo / "hosts" / "testbox").mkdir(parents=True)
+        (empty_repo / "hosts" / "testbox" / "host.yml").write_text(
+            "host:\n  name: testbox\n  role: peer\n"
+            "platform:\n  os: linux\n  service: systemd\n"
+            "power:\n  cpu_boost: false\n",
+            encoding="utf-8")
+        plan, _ = build(linux_facts, empty_repo)
+        assert plan["power"]["cpu_boost"] is False
+        assert plan["power"]["gpu_sclk_max_mhz"] is None
+        assert plan["power"]["cpu_max_mhz"] is None
+
+    def test_all_three_knobs_round_trip_through_a_written_file(
+            self, linux_facts, empty_repo, tmp_path):
+        plan, prov = build(linux_facts, empty_repo)
+        plan["power"] = {"gpu_sclk_max_mhz": 2500, "cpu_boost": False,
+                         "cpu_max_mhz": 2000}
+        target = empty_repo / "hosts" / "testbox" / "host.yml"
+        planner.write(plan, target, prov)
+        doc = hostfile.load(target)
+        assert doc["power"] == {"gpu_sclk_max_mhz": 2500, "cpu_boost": False,
+                                "cpu_max_mhz": 2000}
+        again, _ = build(linux_facts, empty_repo)
+        assert again["power"] == plan["power"]
+
+    def test_a_string_where_an_int_is_wanted_is_a_validation_problem(
+            self, linux_facts, empty_repo):
+        plan, _ = build(linux_facts, empty_repo)
+        plan["power"]["gpu_sclk_max_mhz"] = "2500"
+        problems = planner.validate(plan)
+        assert any("power.gpu_sclk_max_mhz" in p for p in problems)
+
+    def test_an_int_where_a_bool_is_wanted_is_a_validation_problem(
+            self, linux_facts, empty_repo):
+        plan, _ = build(linux_facts, empty_repo)
+        plan["power"]["cpu_boost"] = 1
+        problems = planner.validate(plan)
+        assert any("power.cpu_boost" in p for p in problems)
+
+    def test_the_generated_file_explains_each_knob(self, linux_facts, empty_repo,
+                                                    tmp_path):
+        plan, prov = build(linux_facts, empty_repo)
+        plan["power"] = {"gpu_sclk_max_mhz": 2500, "cpu_boost": False,
+                         "cpu_max_mhz": 2000}
+        text = planner.write(plan, tmp_path / "host.yml", prov)
+        assert "OD_RANGE" in text            # gpu_sclk_max_mhz's comment
+        assert "cpufreq/boost=0" in text     # cpu_boost's comment
+        assert "cpuinfo_max_freq" in text    # cpu_max_mhz's comment
+
+
 class TestWriting:
     def test_only_what_the_lower_layers_will_not_supply_again(
             self, linux_facts, empty_repo, tmp_path):

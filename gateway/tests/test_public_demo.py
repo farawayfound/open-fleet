@@ -25,6 +25,8 @@ def _isolate_routing():
     gw._host_cooldown.clear()
     gw._silent_answer.clear()
     gw._host_last_used.clear()
+    gw._overflow_demoted.clear()
+    gw._pressure_events.clear()
     yield
     gw._routes_cache.clear()
     gw._routes_cache.update(snapshot)
@@ -32,6 +34,8 @@ def _isolate_routing():
     gw._host_cooldown.clear()
     gw._silent_answer.clear()
     gw._host_last_used.clear()
+    gw._overflow_demoted.clear()
+    gw._pressure_events.clear()
 
 
 @pytest.fixture
@@ -171,6 +175,73 @@ class TestHostPolicy:
         assert s["demo_prefer_hosts"] == ["mac-desktop-1", "mini-pc-1"]
         assert s["demo_exclude_hosts"] == []
         assert s["demo_ip_rph"] == 5 and s["demo_max_tokens"] == 512
+
+
+# ---------------------------------------------------------------------------
+# agent_host_policy: the same host policy, scoped to one key's agent profile
+# instead of the public demo's settings. Mirrors TestHostPolicy 1:1 -- the
+# two share one core (_host_policy) and must never silently diverge.
+# ---------------------------------------------------------------------------
+
+class TestAgentHostPolicy:
+    def test_excluded_hosts_are_dropped_and_preferred_move_first(self):
+        targets = [("mac-laptop-1", "a"), ("mac-desktop-1", "a"), ("gpu-laptop-1", "b"), ("apu-box-1", "a")]
+        out = gw.agent_host_policy(targets, ["gpu-laptop-1"], ["apu-box-1", "mac-laptop-1"])
+        assert out == [("gpu-laptop-1", "b"), ("mac-desktop-1", "a")]
+
+    def test_the_scorer_order_survives_within_a_band(self):
+        targets = [("mac-desktop-1", "a"), ("cpu-box-1", "a"), ("mini-pc-1", "a")]
+        assert gw.agent_host_policy(targets, [], []) == targets
+
+    def test_the_hub_itself_is_matched_by_its_own_name(self):
+        out = gw.agent_host_policy([("", "a"), ("p", "a")], [], [gw.HOST_NAME.lower()])
+        assert out == [("p", "a")]
+
+    def test_a_saturated_preferred_host_does_not_beat_a_free_one(self):
+        # Same requirement as demo_host_policy's own saturation case:
+        # preference is a tiebreak among equally-free (or equally-saturated)
+        # boxes, never an override of availability.
+        gw._routes_cache["cap"] = {("gpu-laptop-1", "b"): 1, ("mac-desktop-1", "a"): 1}
+        gw._inflight["gpu-laptop-1"] = 1  # busy >= slots(1): saturated
+        targets = [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+        out = gw.agent_host_policy(targets, ["gpu-laptop-1"], [])
+        assert out == [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+
+    def test_preference_still_breaks_a_tie_among_equally_free_hosts(self):
+        gw._routes_cache["cap"] = {("gpu-laptop-1", "b"): 1, ("mac-desktop-1", "a"): 1}
+        targets = [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+        out = gw.agent_host_policy(targets, ["gpu-laptop-1"], [])
+        assert out == [("gpu-laptop-1", "b"), ("mac-desktop-1", "a")]
+
+    def test_empty_prefer_and_exclude_is_a_true_no_op(self):
+        # The short-circuit specific to agent_host_policy's own signature
+        # (demo_host_policy has no equivalent -- its settings dict is always
+        # walked): both lists empty must return the identical list object,
+        # not merely an equal one, proving no needless sort/copy happened.
+        targets = [("mac-desktop-1", "a"), ("gpu-laptop-1", "b")]
+        assert gw.agent_host_policy(targets, [], []) is targets
+
+    def test_overflow_demoted_preferred_host_does_not_get_an_availability_pass(self):
+        # correction (6): _host_policy's shared core sorts on
+        # _effectively_saturated(), not the bare _host_saturated() -- a box
+        # the scorer just overflow-demoted (see _score_host_model_pairs/
+        # _overflow_demoted) reads as literally free under _host_saturated()
+        # alone, which would let an agent's own `prefer` resurrect it ahead
+        # of a genuinely-available box on availability grounds alone (bit
+        # 0 vs 1, decided before preference is even consulted). With the fix
+        # the demoted box's bit reads 1 (not free) while the merely-free box
+        # still reads 0, so it sorts behind even though it is preferred and
+        # the other box is not.
+        gw._routes_cache["cap"] = {("fastbox", "a"): 1, ("slowbox", "b"): 1}
+        gw._overflow_demoted[("slowbox", "b")] = gw.time.time()
+        assert gw._host_saturated("slowbox", "b") is False  # free by itself
+        assert gw._host_saturated("fastbox", "a") is False  # also genuinely free
+        assert gw._effectively_saturated("slowbox", "b") is True  # but demoted
+        assert gw._effectively_saturated("fastbox", "a") is False
+        targets = [("slowbox", "b"), ("fastbox", "a")]
+        out = gw.agent_host_policy(targets, ["slowbox"], [])
+        assert out == [("fastbox", "a"), ("slowbox", "b")], \
+            "prefer must not resurrect a demoted box past a box that is not demoted"
 
 
 class TestThinkStripper:

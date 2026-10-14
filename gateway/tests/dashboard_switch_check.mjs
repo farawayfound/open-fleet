@@ -1,62 +1,14 @@
 // Render the dashboard's machine grid outside a browser.
 //
-// The page's whole script block is evaluated in a vm with a DOM stub thin
-// enough to be obvious and thick enough for renderMachines(): everything it
-// touches is a querySelector, an innerHTML assignment or an event listener
-// that never fires. Then the grid is rendered from hand-built overview rows
-// -- online, offline, killswitched, reserve, hub, self -- and the resulting
-// HTML is asserted on. Catches exactly what a syntax check cannot: a template
-// that throws on a null status, a pill on the wrong card.
-import fs from "node:fs";
-import path from "node:path";
+// The page's whole script block is evaluated by dashboard_page.mjs (the shared
+// harness); this file drives what that gives back. The grid is rendered from
+// hand-built overview rows -- online, offline, killswitched, reserve, hub,
+// self -- and the resulting HTML is asserted on. Catches exactly what a syntax
+// check cannot: a template that throws on a null status, a pill on the wrong
+// card.
 import vm from "node:vm";
-import {fileURLToPath} from "node:url";
 
-// Resolved from this file, never written out: an absolute path here would
-// carry a developer's home directory into the public export, which denylists
-// it. gateway/tests/ -> gateway/static/index.html.
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PAGE = path.join(HERE, "..", "static", "index.html");
-const html = fs.readFileSync(PAGE, "utf8");
-const src = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
-
-const sink = {};                       // selector -> last innerHTML written
-const el = (sel) => ({
-  set innerHTML(v) { sink[sel] = v; },
-  get innerHTML() { return sink[sel] || ""; },
-  set textContent(v) { sink[sel + ":text"] = v; },
-  get textContent() { return sink[sel + ":text"] || ""; },
-  classList: {add() {}, remove() {}, contains: () => false, toggle() {}},
-  setAttribute() {}, getAttribute: () => null, removeAttribute() {},
-  addEventListener() {}, appendChild() {}, insertBefore() {}, remove() {},
-  querySelector: () => null, querySelectorAll: () => [],
-  style: {}, dataset: {}, closest: () => null, focus() {}, scrollTo() {},
-});
-const doc = {
-  querySelector: (s) => el(s),
-  querySelectorAll: () => [],
-  getElementById: (s) => el("#" + s),
-  createElement: () => el("<new>"),
-  addEventListener() {}, body: el("body"), documentElement: el("html"),
-  cookie: "", hidden: false,
-};
-const ctx = {
-  document: doc, window: {addEventListener() {}, location: {search: "", hash: ""}},
-  location: {search: "", hash: "", pathname: "/"},
-  localStorage: {getItem: () => null, setItem() {}, removeItem() {}},
-  fetch: async () => { throw new Error("no network in this harness"); },
-  console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
-  requestAnimationFrame: () => 0, navigator: {clipboard: {writeText: async () => {}}},
-  EventSource: class { addEventListener() {} close() {} },
-  Intl, Date, Math, JSON, URLSearchParams, URL, TextEncoder, TextDecoder,
-  Promise, Error, Array, Object, Map, Set, RegExp, String, Number, Boolean,
-  AbortController, Headers: class {}, FormData: class {}, Blob: class {},
-  addEventListener() {}, removeEventListener() {}, matchMedia: () => ({matches: false,
-    addEventListener() {}}), getComputedStyle: () => ({}), alert() {}, confirm: () => true,
-};
-ctx.globalThis = ctx;
-vm.createContext(ctx);
-vm.runInContext(src, ctx, {filename: "index.html<script>"});
+import {ctx, sink, html, src} from "./dashboard_page.mjs";
 
 const spec = (over = {}) => ({cpu: "CPU", gpu: "GPU", ram_gb: 128, vram_gb: 96,
                              mem_bw_gbs: 256, gpu_tflops: 40, ...over});
@@ -308,41 +260,52 @@ ok(toasts.length === 2 && toasts[1].bad && toasts[1].m.includes("boom"),
    "a failed load says why, loudly");
 
 // ---------------------------------------------------------------------------
-// The Public tab's vertical sub-nav. A nav entry whose pane does not exist
-// (or a pane no entry points at) is a section that cannot be reached at all
-// -- which is how the auto-issue card spent its first day invisible, buried
-// mid-scroll behind seven other subjects. This is a static read of the markup
-// and the script: a selector stub cannot tell you the two lists agree.
+// The Public tab is gone (2026-09-17): its whole surface -- Fleet Pass keys,
+// employers, auto-issue, the public settings -- is now the CareerOps admin's
+// own Public page, driven through the same /admin/api/public/* routes this
+// gateway still serves. What the dashboard kept is the one thing the Teams
+// and API-keys tables borrow, so check it is still here rather than checking
+// the sub-nav that left with the tab.
 // ---------------------------------------------------------------------------
-const pub = html.slice(html.indexOf('<section id="public">'),
-                       html.indexOf("<!-- ================= CONFIGURATIONS"));
-const entries = [...pub.matchAll(/data-p="([a-z]+)"/g)].map((m) => m[1]);
-const panes = [...pub.matchAll(/id="pub-([a-z]+)"/g)].map((m) => m[1]);
-const declared = JSON.parse(
-  (src.match(/const PUB_PANES = (\[[\s\S]*?\])/) || [])[1].replace(/\s+/g, " "));
+ok(!html.includes('<section id="public">'), "the Public section is gone");
+ok(!html.includes('data-t="public"'), "...and so is its nav button");
+ok(!/\bFLEET_TABS\s*=\s*new Set\([^)]*"public"/.test(src),
+   "...and the tab registry no longer names it");
+ok(/async function publicKeyIds\(/.test(src),
+   "publicKeyIds() stayed -- the Teams and API-keys tables badge a profile "
+   + "'fleet-pass' from it, and it is the only piece of the tab they used");
+ok((src.match(/await publicKeyIds\(\)/g) || []).length === 2,
+   "both of its callers are still calling it");
 
-ok(entries.length === 8, `8 sub-nav entries, got ${entries.length}`);
-ok(JSON.stringify(entries) === JSON.stringify(panes),
-   `every entry has its pane, in order -- nav ${JSON.stringify(entries)} `
-   + `vs panes ${JSON.stringify(panes)}`);
-ok(JSON.stringify(declared) === JSON.stringify(panes),
-   `PUB_PANES matches the markup -- declared ${JSON.stringify(declared)}`);
-ok(entries.includes("auto"), "auto-issue is reachable from the sub-nav");
-ok((pub.match(/class="pane on"/g) || []).length === 1, "exactly one pane starts open");
-ok(pub.includes('<div class="subnav" id="pubnav"'),
-   "the sub-nav is a div -- showTab() drives every `nav button` on the page as a "
-   + "top-level tab, so a <nav> here would fight it for the .on class");
-ok(pub.includes('role="tablist"') && (pub.match(/role="tabpanel"/g) || []).length === 8,
-   "tablist, and one tabpanel per pane");
-
-// And it runs: an unknown pane falls back rather than leaving the tab blank.
-ok(typeof ctx.showPubPane === "function", "showPubPane is defined");
-try {
-  ctx.showPubPane("auto");
-  ctx.showPubPane("nonsense-pane");
-} catch (e) {
-  fail.push("showPubPane threw: " + e.message);
-}
+// ---------------------------------------------------------------------------
+// A node whose model runs on a device attached to its box (`hw: "spec"`):
+// the gateway's live telemetry is the PC under it -- 11 GB, an iGPU, its NIC
+// -- and none of that may be drawn as the node. The sheet is the node.
+// ---------------------------------------------------------------------------
+const pcStatus = {
+  host: {cpu_count: 12, cpu_percent: 40, mem: {total: 11.4e9, used: 9e9},
+         gpu: [{vram_total: 2e9, vram_used: 1e9, busy_percent: 80}],
+         net: {interfaces: [{name: "Wi-Fi", wireless: true, rx_rate: 1e6, tx_rate: 1e6}]}},
+  models_running: [{id: "glm-4.7-flash", state: "ready"}],
+};
+const npuBox = {name: "npu-box", kind: "peer", online: true, routed: false,
+  specs: {cpu: "12-core ARMv9.2", gpu: "dNPU (48 GB) + G720", ram_gb: 32, vram_gb: 48,
+          npu_tops: 190, cpu_cores: 12, hw: "spec", reserve: true},
+  status: pcStatus};
+const GiB = vm.runInContext("GB", ctx);
+const npuRes = ctx.hostRes(npuBox);
+ok(npuRes.ramT === 32 * GiB && npuRes.vramT === 48 * GiB,
+   "a spec-hw node's memory is its sheet's, not the PC's");
+ok(npuRes.ramU === 0 && npuRes.vramU === 0 && npuRes.coresU === 0 && npuRes.tf === 0,
+   "...and none of the PC's load is counted as the node's, nor any GPU TFLOPS");
+ok(npuRes.cores === 12, "its cores come from the sheet");
+ctx.renderMachines([npuBox]);
+const npuCard = sink["#machines"];
+ok(npuCard.includes("NPU compute") && npuCard.includes("190 TOPS"), "the card shows NPU compute");
+ok(npuCard.includes("NPU memory"), "...and calls the 48 GB NPU memory, not VRAM");
+ok(!npuCard.includes("Wi-Fi") && !npuCard.includes("threads"),
+   "...and shows neither the PC's network nor its threads");
+ok(npuCard.includes(">not in use</span>"), "a node registered Not in use says so");
 
 if (fail.length) { console.error("FAIL:\n - " + fail.join("\n - ")); process.exit(1); }
 console.log(`ok — ${cards.length} cards, all assertions passed`);

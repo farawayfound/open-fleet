@@ -35,7 +35,7 @@ Write-Output ("before: Disallow=" + $was.DisallowStartIfOnBatteries +
 
 $t.Settings.DisallowStartIfOnBatteries = $false
 $t.Settings.StopIfGoingOnBatteries     = $false
-$t.Settings.RestartCount               = 3
+$t.Settings.RestartCount               = 99
 $t.Settings.RestartInterval            = "PT1M"
 $t.Settings.ExecutionTimeLimit         = "PT0S"
 Set-ScheduledTask -InputObject $t | Out-Null
