@@ -474,6 +474,19 @@ MIGRATIONS = (
     # queued before this shipped, and every existing INSERT still writes that
     # default -- a single-file /download call is not a package.
     "ALTER TABLE jobs ADD COLUMN pkg TEXT NOT NULL DEFAULT ''",
+    # Per-key model access: a JSON list of model ids and routing-class words,
+    # '[]' meaning every model. NOT NULL DEFAULT '[]' so every key minted
+    # before this shipped reads as unrestricted, which is what it was.
+    "ALTER TABLE api_keys ADD COLUMN allowed_models TEXT NOT NULL DEFAULT '[]'",
+    # Sub-agents from the API-keys form ("max parallel workers"): the most
+    # distinct OTHER nodes a team's workers may run on. NULL is no cap at all,
+    # which is what every team made before this shipped had, so none of them
+    # changes. 0 means this node only.
+    "ALTER TABLE teams ADD COLUMN max_worker_nodes INTEGER",
+    # The routing class that form picked for the workers, '' for a team made
+    # anywhere else (the Teams tab, Fleet Pass). It marks the row as the one
+    # the keys form owns -- and exempts that class from the key's model list.
+    "ALTER TABLE teams ADD COLUMN worker_class TEXT NOT NULL DEFAULT ''",
 )
 
 _db_lock = threading.Lock()
@@ -830,6 +843,72 @@ def _norm_expiry(v: Any) -> str | None:
         raise HTTPException(400, "bad expires_at: " + s) from exc
 
 
+MAX_KEY_MODELS = 128
+
+
+def _norm_model_list(v: Any) -> list[str]:
+    """A key's model list as it will be stored: stripped, deduped in order,
+    empties dropped. None and [] both mean "every model". Anything that is not
+    a plain list of short single-token ids is a 400 -- this is an access list,
+    and a half-understood one must not be saved as if it were the whole one."""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise HTTPException(400, "allowed_models must be a list of model ids")
+    out: dict[str, None] = {}   # an ordered set: dedupe without losing order
+    for item in v:
+        if not isinstance(item, str):
+            raise HTTPException(400, "allowed_models must be a list of model ids")
+        s = item.strip()
+        if not s:
+            continue
+        if len(s) > 128 or re.search(r"[\s\x00-\x1f\x7f]", s):
+            raise HTTPException(
+                400, "bad model id in allowed_models: " + repr(s[:40]))
+        out[s] = None
+        if len(out) > MAX_KEY_MODELS:
+            raise HTTPException(
+                400, "allowed_models holds at most " + str(MAX_KEY_MODELS) + " entries")
+    return list(out)
+
+
+MAX_WORKER_NODES = 32
+
+
+def _norm_worker_nodes(v: Any) -> int | None:
+    """The keys form's "max parallel workers": None (absent, null or blank) is
+    off -- no sub-agents, a plain key -- and a whole number 0..32 is on, 0
+    meaning this node only. Not _norm_limit: that reads 0 as "unlimited", and
+    here 0 is a real setting. Anything else is a 400, since a half-understood
+    value saved as "off" would hand out a key that silently lacks what the
+    admin asked for."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    n = None
+    if isinstance(v, (int, str)) and not isinstance(v, bool):   # True is not 1 here
+        try:
+            n = int(v)
+        except ValueError:
+            pass   # n stays None and is refused below, with the rule spelled out
+    if n is None or not 0 <= n <= MAX_WORKER_NODES:
+        raise HTTPException(400, "max_worker_nodes must be blank (off) or a "
+                                 "whole number 0.." + str(MAX_WORKER_NODES))
+    return n
+
+
+def _norm_worker_class(v: Any) -> str:
+    """The routing class a key's workers use: blank is "fast", anything else
+    must be a class routing knows (fleet_roles, which includes the operator's
+    own). Checked against the live table, not the shipped one."""
+    name = str(v if v is not None else "").strip() or "fast"
+    known = fleet_roles()
+    if name not in known:
+        raise HTTPException(
+            400, "unknown worker class '" + name[:40] + "' (known classes: "
+            + ", ".join(sorted(known)) + ")")
+    return name
+
+
 def mint_key(
     name: str,
     expires_at: str | None = None,
@@ -837,11 +916,13 @@ def mint_key(
     max_tpd: int | None = None,
     max_total_tokens: int | None = None,
     max_rph: int | None = None,
+    allowed_models: list[str] | None = None,
 ) -> tuple[str, dict]:
     raw = KEY_PREFIX + secrets.token_hex(24)
     kid = db_exec(
         "INSERT INTO api_keys(name, key_hash, prefix, created_at, expires_at,"
-        " max_rpd, max_tpd, max_total_tokens) VALUES (?,?,?,?,?,?,?,?)",
+        " max_rpd, max_tpd, max_total_tokens, allowed_models)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
         (
             name,
             hash_key(raw),
@@ -851,6 +932,7 @@ def mint_key(
             max_rpd,
             max_tpd,
             max_total_tokens,
+            json.dumps(allowed_models or []),
         ),
     )
     if max_rph:
@@ -995,6 +1077,236 @@ def require_api_key(request: Request) -> dict:
 
     db_exec("UPDATE api_keys SET last_used_at=? WHERE id=?", (now(), key["id"]))
     return key
+
+
+# --------------------------------------------------------------------------
+# per-key model access  (api_keys.allowed_models)
+# --------------------------------------------------------------------------
+#
+# [] means every model, which is also what every key minted before the column
+# existed reads as. A non-empty list restricts the key to those ids plus the
+# routing classes (FLEET_ROLES words) it can reach:
+#   * a class word IN the list grants that class's whole ladder;
+#   * a class word NOT in the list is still callable when its ladder shares a
+#     model with the list, but it routes only to the shared members;
+#   * a class that shares nothing with the list is refused.
+# It is enforced on the gateway that authenticated the client. Keys live in
+# each node's own database and a peer only ever sees the hub's `hub-<host>`
+# key, which carries no list -- so a peer could not apply a client's
+# restriction even if it tried, and the hub's own key stays unrestricted.
+
+# What a list that cannot be read turns into. It names no real model, so the
+# key is refused everything: an unreadable access list must fail closed, not
+# be read as "no list".
+KEY_MODELS_UNREADABLE = "\x00unreadable"
+
+# Key ids whose unreadable list has been reported. The gate asks for a key's
+# list several times per request, so reporting each time would bury the one
+# line that matters; a key that reads fine again is forgotten, so breaking
+# again is reported again.
+_unreadable_logged: set[Any] = set()
+
+
+def _stored_models(raw: Any) -> list[str] | None:
+    """The list held in api_keys.allowed_models, or None when it is not a JSON
+    list of strings."""
+    try:
+        listed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    ok = isinstance(listed, list) and all(isinstance(m, str) for m in listed)
+    return listed if ok else None
+
+
+def key_allowed_models(key: dict) -> list[str] | None:
+    """None when the key may use every model, else the models it is limited
+    to. An unreadable stored list comes back as one that matches nothing."""
+    raw = key.get("allowed_models")
+    if raw is None:
+        return None   # a key row read before the column existed
+    listed = _stored_models(raw)
+    kid = key.get("id")
+    if listed is None:
+        if kid not in _unreadable_logged:
+            _unreadable_logged.add(kid)
+            log.error("api key %s: allowed_models is unreadable; refusing it "
+                      "every model until an admin saves a new list", kid)
+        return [KEY_MODELS_UNREADABLE]
+    _unreadable_logged.discard(kid)
+    return listed or None
+
+
+def _local_ids() -> dict[str, str]:
+    """This box's models.json as name -> canonical id, from ONE read: the
+    first record to claim a name wins, as in resolve_model_id. The gate
+    resolves a local alias for every name it compares, and resolve_model_id
+    reads and parses the file each time -- a read per ladder member per check,
+    on the event loop. Each entry point below takes this once."""
+    ids: dict[str, str] = {}
+    for rec in load_models():
+        rid = str(rec.get("id", ""))
+        for name in (rid, *(rec.get("aliases") or [])):
+            ids.setdefault(name, rid)
+    return ids
+
+
+def _resolve_local(local: dict[str, str], name: str) -> str:
+    """resolve_model_id() against a _local_ids() map."""
+    name = name.strip()
+    return local.get(name, name)
+
+
+def _model_names(name: str, local: dict[str, str], peers: bool = True) -> set[str]:
+    """Every name `name` goes by, so a list entry and a request meet whichever
+    spelling each used: the name itself, this box's models.json alias target,
+    the fleet's canonical id for an old spelling, a peer's alias, and -- for a
+    public catalogue id -- the fleet ids that row is served as.
+
+    `peers=False` leaves a peer's alias rows out. A request name is read
+    through them (a client may ask for the name a box answers to), but a list
+    entry must not be: a row any peer reports would then list its target,
+    which no entry names."""
+    names = {name, _resolve_local(local, name)}
+    row = public_catalogue()["by_public"].get(name)
+    if row is not None:
+        names.update(_row_fleet_ids(row))
+    for (host, served), canon in _routes_cache.get("alias", {}).items():
+        if (peers or not host) and served in names:
+            names.add(canon)
+    return names | {SPELLING_TO_CANONICAL.get(n, n) for n in names}
+
+
+def _expand_allowed(allowed: list[str], local: dict[str, str]) -> set[str]:
+    """Every name the list reaches. A class word stands for its ladder, not for
+    a model called that, so a local alias row named like a class does not
+    widen what the word grants."""
+    reach: set[str] = set()
+    roles = fleet_roles()   # the classes as routing uses them, not the shipped ones
+    for entry in allowed:
+        for member in roles.get(entry, (entry,)):
+            reach |= _model_names(member, local, peers=False)
+    return reach
+
+
+def _check_model(allowed: list[str], reach: set[str], model: str,
+                 local: dict[str, str]) -> tuple[bool, tuple[str, ...] | None, str]:
+    """(ok, ladder, reason) for one requested model against an expanded list.
+    `ladder` is non-None only for a class word that is allowed through some of
+    its members: routing must then consider just those."""
+    hint = ""
+    if KEY_MODELS_UNREADABLE in allowed:
+        hint = " (its stored model list is unreadable)"
+    elif not model:
+        hint = " (the request must name one of the models it may use)"
+    why = "model '" + model + "' is not allowed for this key" + hint
+    if KEY_MODELS_UNREADABLE in allowed:
+        # Before any matching, not through it: a request can spell the marker
+        # itself (a model named "\u0000unreadable"), and the list would then
+        # appear to contain what was asked for.
+        return False, None, why
+    roles = fleet_roles()
+    if model in roles:
+        if model in allowed:
+            return True, None, ""
+        ladder = tuple(m for m in roles[model] if _model_names(m, local) & reach)
+        return (True, ladder, "") if ladder else (False, None, why)
+    row = public_catalogue()["by_public"].get(model)
+    if row is not None:
+        # One name for weights served under several fleet ids: callable when
+        # listed, or when every id it can be routed to is allowed.
+        fids = _row_fleet_ids(row)
+        ok = model in allowed or (
+            bool(fids) and all(_model_names(f, local) & reach for f in fids))
+        return (True, None, "") if ok else (False, None, why)
+    ok = bool(model) and bool(_model_names(model, local) & reach)
+    return (True, None, "") if ok else (False, None, why)
+
+
+def key_model_gate(key: dict, model: str) -> tuple[bool, tuple[str, ...] | None, str]:
+    """May `key` ask for `model`? Unrestricted keys always may. See _check_model
+    for what `ladder` means."""
+    allowed = key_allowed_models(key)
+    if allowed is None:
+        return True, None, ""
+    local = _local_ids()
+    return _check_model(allowed, _expand_allowed(allowed, local), model, local)
+
+
+def key_filter_models(key: dict, names: list[str]) -> list[str]:
+    """The names a restricted key may see in a listing; the list expanded once
+    rather than per name."""
+    allowed = key_allowed_models(key)
+    if allowed is None:
+        return list(names)
+    local = _local_ids()
+    reach = _expand_allowed(allowed, local)
+    return [n for n in names if _check_model(allowed, reach, n, local)[0]]
+
+
+def _target_names(host: str, fid: str, local: dict[str, str]) -> set[str]:
+    """What the box `host` means by `fid`, as names an expanded list can hold.
+    Per box, where _model_names pools every box's meaning of a word: the gate
+    judges the NAME a client asked for, but routing then fans that name out --
+    over every fleet id a catalogue row claims, and over every box that serves
+    the word, though boxes may mean different weights by it (alias_conflicts).
+    Whichever box is picked, it is its weights the key spends. A box that
+    reported no canonical id for the name serves it as itself, and this box
+    answers through its own models.json.
+
+    A peer's served word counts as itself too: a list that names the word names
+    what that box answers to it, which _expand_allowed (taking no peer's alias
+    row) cannot say for it."""
+    canon = (_routes_cache.get("alias", {}).get((host, fid))
+             or (fid if host else _resolve_local(local, fid)))
+    names = {canon, SPELLING_TO_CANONICAL.get(canon, canon)}
+    return names | {fid} if host else names
+
+
+def key_filter_targets(key: dict, targets: list[tuple[str, str]],
+                       ) -> list[tuple[str, str]]:
+    """The (host, fleet id) pairs `key` may be served by: key_model_gate has
+    already passed the name asked for, this keeps routing inside the list. An
+    unrestricted key's pairs are untouched; a key whose list is unreadable
+    keeps none."""
+    allowed = key_allowed_models(key)
+    if allowed is None:
+        return list(targets)
+    if KEY_MODELS_UNREADABLE in allowed:
+        return []
+    local = _local_ids()
+    reach = _expand_allowed(allowed, local)
+    return [t for t in targets if _target_names(*t, local) & reach]
+
+
+def pin_model_field(key: dict, payload: dict) -> bool:
+    """For a restricted key, leave `payload` holding exactly one "model" field,
+    the one the gate read. True when the key is restricted, which tells the
+    caller to send this dict, re-serialised (that also collapses a repeated
+    "model"), rather than the bytes it received. The gate reads the body with
+    Python's json, which keeps the LAST of a repeated key and matches the name
+    exactly -- but the engines behind the gateway parse the same bytes their
+    own way (llama-swap's gjson takes the FIRST repeat, Go's encoding/json
+    ignores key case), so {"model":"forbidden","model":"allowed"} or
+    {"model":"allowed","Model":"forbidden"} would pass here and be served as
+    the forbidden model there."""
+    if key_allowed_models(key) is None:
+        return False
+    for name in [k for k in payload if k != "model" and k.lower() == "model"]:
+        del payload[name]
+    return True
+
+
+def _refuse_model(key: dict, model: str, endpoint: str, stream: bool,
+                  started: float, reason: str, metered: bool = True) -> JSONResponse:
+    """The 403 for a model the key may not use, in the flat OpenAI error shape
+    and metered first -- the usage row is the audit line for the refusal."""
+    if metered:
+        record_usage(key, model, endpoint, stream, 403, None, None,
+                     int((time.time() - started) * 1000))
+    return JSONResponse(
+        {"error": {"message": reason, "type": "invalid_request_error",
+                   "code": "model_not_allowed"}},
+        status_code=403)
 
 
 # --------------------------------------------------------------------------
@@ -1705,6 +2017,91 @@ FLEET_ROLES: dict[str, tuple[str, ...]] = {
     "nemotron": ("nemotron3-super-120b", "nemotron3.5-lightning-30b",
                  "nemotron-3-nano:4b", "nemotron-mini:4b"),
 }
+
+# The operator's edits to the ladders above, made on the Routing tab without a
+# deploy: a built-in's ladder replaced, a node list that restricts which boxes
+# may play a class, and classes of the operator's own. They live in the
+# settings table (key below) on the box whose dashboard saved them -- the hub,
+# the only box that routes fleet-wide -- and are never pushed to peers, which
+# go on routing their own direct traffic on the shipped ladders. Same scope as
+# the Configurations tab's fleet_routing. Shape:
+#   {"classes": {"fast": {"models": [...],        # [] = the shipped ladder
+#                         "nodes": ["server-1"]}, # [] = every box holding one
+#                "notes": {"models": [...], "nodes": []}}}   # a custom class
+ROLES_KEY = "fleet_roles"
+
+# Bumped by set_role_config(); fleet_roles() rebuilds whenever the cache is
+# behind it, so a save is live on the very next request.
+_roles_gen = 0
+_roles_cache: dict[str, Any] = {"gen": -1, "roles": {}, "nodes": {}}
+
+
+def get_role_config() -> dict:
+    """The stored classes, or {} before the first save. A row that does not
+    parse is logged and read as empty: routing carries on with the shipped
+    ladders, but not silently -- edits that stopped applying must leave a
+    trace, or the next person is left wondering why `fast` went back."""
+    rows = db_query("SELECT value FROM settings WHERE key=?", (ROLES_KEY,))
+    if not rows:
+        return {}
+    try:
+        cfg = json.loads(rows[0]["value"])
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("classes", {}), dict):
+            raise ValueError("expected {\"classes\": {name: {...}}}")
+    except ValueError:
+        log.exception("settings row %r is unreadable; routing classes are "
+                      "back on the shipped ladders", ROLES_KEY)
+        return {}
+    return cfg
+
+
+def set_role_config(cfg: dict) -> None:
+    global _roles_gen
+    db_exec(
+        "INSERT INTO settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (ROLES_KEY, json.dumps(cfg)),
+    )
+    _roles_gen += 1
+    # As the fleet-config PUT does: the Routing tab reads the routing table
+    # right after saving, and that read should show the fleet as it is now,
+    # not as it was up to 30 s ago.
+    _routes_cache["t"] = 0.0
+    _known_ctx_cache["t"] = 0.0
+
+
+def fleet_roles() -> dict[str, tuple[str, ...]]:
+    """Every routing class and its ladder (canonical ids, best first) as
+    routing uses them now: the shipped FLEET_ROLES, a built-in whose saved
+    list is non-empty replaced by it, and the operator's own classes added.
+
+    Cached until set_role_config() moves the generation. The scorer asks
+    role_index() once per candidate while it sorts, and a database read for
+    each would make every request pay for a tab almost nobody has open."""
+    gen = _roles_gen
+    if _roles_cache["gen"] != gen:
+        roles = dict(FLEET_ROLES)
+        nodes: dict[str, frozenset[str]] = {}
+        for name, entry in (get_role_config().get("classes") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            raw = entry.get("models")
+            models = tuple(m for m in raw if isinstance(m, str)) \
+                if isinstance(raw, list) else ()
+            if models:
+                roles[name] = models
+            hosts = frozenset(clean_host_list(entry.get("nodes")))
+            if hosts:
+                nodes[name] = hosts
+        _roles_cache.update(gen=gen, roles=roles, nodes=nodes)
+    return _roles_cache["roles"]
+
+
+def role_nodes(role: str) -> frozenset[str] | None:
+    """The boxes (lower-cased) allowed to play `role`, or None when it is not
+    restricted and every box that holds a member may."""
+    fleet_roles()
+    return _roles_cache["nodes"].get(role)
 
 
 def converge_model_names(models: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -2661,21 +3058,127 @@ def service_states() -> dict[str, str]:
         units = (kind, *units)
     if platform.system() == "Linux" and shutil.which("systemctl"):
         try:
-            states = _systemd_states(units)
+            states = _systemd_states((*units, *VOICE_UNITS))
         except Exception:  # noqa: BLE001 -- fall through to the process probe
             states = {}
         if states:
+            # The voice node's units are listed where this box carries them
+            # (gpu-laptop-1) and nowhere else -- the guard is what says so: apu-box-1
+            # still has a retired, disabled llm-voice.service of its own.
+            carried = states.get(VOICE_GUARD) not in (None, "not installed", "unknown")
+            for u in VOICE_UNITS:
+                if not carried or states.get(u) == "not installed":
+                    states.pop(u, None)
+            if states.get(VOICE_UNIT) in ("inactive", "failed") and voice_paused() is not None:
+                states[VOICE_UNIT] = "paused"
             # A piece can be up here without systemd holding it up: cpu-box-1 has
             # ollama.service masked and an ollama serving anyway. Where the unit
             # says there is nothing running, believe the process table over it --
             # but leave a "failed" unit red, because that is worth seeing.
             quiet = [u for u, v in states.items()
-                     if v in ("not installed", "inactive")]
+                     if u in units and v in ("not installed", "inactive")]
             states.update(
                 {u: v for u, v in _process_states(quiet).items() if v == "active"}
             )
             return states
     return _process_states(units)
+
+
+# --------------------------------------------------------------------------
+# the voice node: visible on the dashboard, and pausable
+# --------------------------------------------------------------------------
+# hosts/gpu-laptop-1/voice puts three units beside the gateway: llm-voice (the
+# STT/TTS node on :8600), gpu-laptop-1-voice-guard and gpu-laptop-1-power. All three
+# show where they exist; llm-voice can be paused and resumed. A pause is a
+# marker file and then a stop -- the unit's ConditionPathExists=! on the
+# marker is what keeps it down through a reboot, the guard's Wants= and a
+# redeploy, none of which a bare `systemctl stop` survives. The guard and
+# the power unit are shown, never stopped: a stopped guard leaves a stale
+# verdict, and a stale verdict reads as "unavailable" (availability()).
+VOICE_UNIT = "llm-voice"
+VOICE_GUARD = "gpu-laptop-1-voice-guard"
+VOICE_UNITS = (VOICE_UNIT, VOICE_GUARD, "gpu-laptop-1-power")
+VOICE_PAUSED = STATE / "voice.paused"
+VOICE_ENV = ETC / "voice.env"
+
+
+def voice_paused() -> dict | None:
+    """The pause marker's record ({since, by}), or None when not paused. An
+    unreadable or hand-made marker still means paused -- the unit agrees."""
+    try:
+        raw = VOICE_PAUSED.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"since": None, "by": None}
+    try:
+        rec = json.loads(raw)
+    except json.JSONDecodeError:
+        rec = None
+    return rec if isinstance(rec, dict) else {"since": None, "by": None}
+
+
+def voice_base() -> str:
+    """http://<bind>:<port> of the voice node, from its env file. Those two
+    values only: the same file holds the node's API key, never read here."""
+    got: dict[str, str] = {}
+    try:
+        for line in VOICE_ENV.read_text(encoding="utf-8").splitlines():
+            k, sep, v = line.partition("=")
+            if sep and k.strip() in ("VOICE_BIND", "VOICE_PORT"):
+                got[k.strip()] = v.strip().strip('"')
+    except OSError:
+        return ""
+    if not (got.get("VOICE_BIND") and got.get("VOICE_PORT")):
+        return ""
+    return "http://" + got["VOICE_BIND"] + ":" + got["VOICE_PORT"]
+
+
+def voice_units() -> dict[str, str]:
+    """Each installed voice unit's state; {} on a box without the voice node."""
+    if platform.system() != "Linux" or not shutil.which("systemctl"):
+        return {}
+    try:
+        states = _systemd_states(VOICE_UNITS)
+    except Exception:  # noqa: BLE001
+        return {}
+    # Both the node and its guard: apu-box-1 still carries a retired llm-voice
+    # unit, and Resume must never start that one.
+    if any(states.get(u) in ("not installed", "unknown") for u in (VOICE_UNIT, VOICE_GUARD)):
+        return {}
+    return {u: s for u, s in states.items() if s != "not installed"}
+
+
+async def voice_health(base: str) -> dict:
+    """The voice node's own /health (stt/tts readiness, live session), or {}."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0, trust_env=False) as c:
+            r = await c.get(base + "/health")
+        body = r.json() if r.status_code == 200 else None
+    except Exception:  # noqa: BLE001 -- a node mid-start answers nothing yet
+        body = None
+    return body if isinstance(body, dict) else {}
+
+
+async def voice_report() -> dict | None:
+    """What the Voice card shows, or None on a box without the voice node."""
+    units = await asyncio.to_thread(voice_units)
+    if not units:
+        return None
+    paused = voice_paused()
+    base = voice_base()
+    health = (await voice_health(base)
+              if base and units.get(VOICE_UNIT) == "active" else {})
+    return {
+        "units": units,
+        "paused": paused is not None,
+        "paused_since": (paused or {}).get("since"),
+        "paused_by": (paused or {}).get("by"),
+        "ready": bool((health.get("stt") or {}).get("ready")
+                      and (health.get("tts") or {}).get("ready")),
+        "live_session": bool((health.get("session") or {}).get("live")),
+        "loading_error": health.get("loading_error"),
+    }
 
 
 _avail_cache: dict[str, Any] = {"t": 0.0, "state": None}
@@ -5496,6 +5999,10 @@ async def health() -> dict:
     if av["gated"]:
         out["available"] = av["available"]
         out["availability_reason"] = av["reason"]
+    # Only while paused: the hub's box-health watch reads it, so a voice node
+    # paused on purpose is not paged as an outage.
+    if VOICE_PAUSED.exists():
+        out["voice_paused"] = True
     return out
 
 
@@ -7460,6 +7967,7 @@ def alias_conflicts() -> list[dict]:
     check"."""
     cands = _routes_cache.get("cands", {})
     alias = _routes_cache.get("alias", {})
+    roles = fleet_roles()
     out = []
     for name, hosts in sorted(cands.items()):
         if len(hosts) < 2:
@@ -7467,7 +7975,7 @@ def alias_conflicts() -> list[dict]:
         # A fleet role is answered by policy before any box's row of that
         # name is consulted, so boxes disagreeing about it changes nothing
         # a request can see. The roles endpoint lists those rows instead.
-        if name in FLEET_ROLES:
+        if name in roles:
             continue
         by_target: dict[str, list[str]] = {}
         unknown = []
@@ -7557,13 +8065,14 @@ def split_models() -> list[dict]:
 def role_index(role: str, cand: str, name: str) -> int:
     """Where the model a box serves as `name` sits on the role's ladder --
     0 for the best -- and one past the end when it is not on it."""
-    ladder = FLEET_ROLES.get(role, ())
+    ladder = fleet_roles().get(role, ())
     canon = _routes_cache.get("alias", {}).get((cand, name)) or name
     canon = SPELLING_TO_CANONICAL.get(canon, canon)
     return ladder.index(canon) if canon in ladder else len(ladder)
 
 
-def role_pairs(role: str) -> list[tuple[str, str]]:
+def role_pairs(role: str, ladder: tuple[str, ...] | None = None,
+               ) -> list[tuple[str, str]]:
     """(host, fleet id) for a fleet role: the best model for it ON EACH BOX.
 
     Per box, the first ladder entry it holds in its own memory
@@ -7573,16 +8082,30 @@ def role_pairs(role: str) -> list[tuple[str, str]]:
     box serves the model: a peer that still knows the weights only by an old
     spelling is addressed by it, since the proxy sends the name the box
     answers to. The caller ranks the pairs with _score_host_model_pairs like
-    any other candidates. Requires a fresh _routes_cache."""
-    ladder = FLEET_ROLES.get(role)
+    any other candidates. A class the operator limited to some boxes offers
+    only those: this is the one place that is decided, so a request, a batch,
+    /v1/models and the roles endpoint all agree on who plays it. Requires a
+    fresh _routes_cache.
+
+    `ladder` narrows the role to some of its members, for a key whose model
+    list reaches only those (key_model_gate): the boxes then offer the best of
+    THESE they hold, and a box holding none is not a candidate. An empty
+    ladder yields no pairs rather than falling back to the whole role."""
+    if ladder is None:
+        ladder = fleet_roles().get(role)
     if not ladder:
         return []
+    only = role_nodes(role)
     cands = _routes_cache.get("cands", {})
     alias = _routes_cache.get("alias", {})
     running = _routes_cache.get("running", {})
     held: dict[str, dict[str, str]] = {}   # host -> canonical id -> served name
     for name, hosts in cands.items():
         for h in hosts:
+            # This box is '' here, as in every table keyed by host and name;
+            # the saved list spells it HOST_NAME, lower-cased like the rest.
+            if only is not None and (h or HOST_NAME).lower() not in only:
+                continue
             canon = alias.get((h, name)) or name
             canon = SPELLING_TO_CANONICAL.get(canon, canon)
             if canon not in ladder:
@@ -7679,6 +8202,7 @@ async def fleet_model_list() -> list[dict]:
     weights three times under three spellings."""
     routes = await model_routes()
     peer_can = _routes_cache.get("alias", {})
+    roles = fleet_roles()
     canonical: dict[str, str] = {}
     for rec in load_models():
         if rec.get("enabled", True) and rec.get("id"):
@@ -7692,7 +8216,7 @@ async def fleet_model_list() -> list[dict]:
         # report what its `fast` row means is not something resolve_targets()
         # would route to, and a listing must not promise what a request
         # cannot get. Roles are listed below, from what can really play them.
-        if (host and m not in canonical and m not in FLEET_ROLES
+        if (host and m not in canonical and m not in roles
                 and peer_can.get((host, m), m) == m):
             canonical.setdefault(m, host)
     seen, out = set(), []
@@ -7710,7 +8234,7 @@ async def fleet_model_list() -> list[dict]:
         )
     # A fleet role is callable like a model and listed like one, as long as
     # something in the fleet can play it right now.
-    for role in FLEET_ROLES:
+    for role in roles:
         if role not in seen and role_pairs(role):
             seen.add(role)
             out.append({"id": role, "object": "model", "owned_by": "fleet-role",
@@ -7916,6 +8440,8 @@ async def openai_proxy(path: str, request: Request):
                                                 "type": "context_limit"}},
                                 status_code=413)
                 model = str(payload.get("model", ""))
+                if pin_model_field(key, payload):
+                    mutated = True
                 if decision:
                     # A decision is answered whole: nothing is generated, so
                     # there is nothing to stream and no usage frame to ask
@@ -7941,6 +8467,22 @@ async def openai_proxy(path: str, request: Request):
                     body = json.dumps(payload).encode()
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
+
+    # The key's own model list (api_keys.allowed_models), checked once here for
+    # every path that reaches an engine -- ahead of the listing and of routing,
+    # and for team keys too: the team branch above only takes chat completions
+    # and gates its own primary and roster. It sits after the body parse, not
+    # inside it, because a body that cannot be read (a multipart upload, broken
+    # or non-object JSON, no body at all) leaves `model` empty and the engine
+    # may still read a model out of it: for a restricted key a request that
+    # names none is refused. A bare GET names none by design; GET
+    # /v1/models/<id> names the id it asks about.
+    asked = model or (path[len("models/"):] if path.startswith("models/") else "")
+    model_ladder: tuple[str, ...] | None = None
+    if asked or request.method not in ("GET", "HEAD", "OPTIONS"):
+        allowed_here, model_ladder, why = key_model_gate(key, asked)
+        if not allowed_here:
+            return _refuse_model(key, asked, endpoint, stream, started, why)
 
     # Set by a hub forwarding a request it has already listed as active, so
     # the fleet view shows one job rather than the same work twice. Dropped
@@ -8018,6 +8560,10 @@ async def openai_proxy(path: str, request: Request):
             fleet_list.append({"id": pid, "object": "model",
                                "owned_by": "fleet-pass", "created": 0})
             seen.add(pid)
+        # A restricted key sees only what it could call: a listing that
+        # advertised models the next request would refuse is a bug report.
+        shown = set(key_filter_models(key, [m["id"] for m in fleet_list]))
+        fleet_list = [m for m in fleet_list if m["id"] in shown]
         return JSONResponse({"object": "list",
                             "data": sorted(fleet_list, key=lambda m: m["id"])})
 
@@ -8064,15 +8610,29 @@ async def openai_proxy(path: str, request: Request):
                             if agent else []
                     except json.JSONDecodeError:
                         agent_allowed = []
-                    if not agent_allowed or resolve_model_id(candidate) in agent_allowed:
+                    # The key's own model list is held to the same rule.
+                    if ((not agent_allowed
+                            or resolve_model_id(candidate) in agent_allowed)
+                            and key_model_gate(key, candidate)[0]):
                         served_model = candidate
                         fallback = {"requested": model, "served": served_model}
         try:
             targets = await resolve_targets(
                 served_model, role="primary", prompt_tokens=prompt_est,
-                gen_tokens=gen_est, need_ctx=prompt_est + gen_est)
+                gen_tokens=gen_est, need_ctx=prompt_est + gen_est,
+                ladder=model_ladder)
         except Exception:  # noqa: BLE001 -- routing is best-effort
             targets = []
+        if targets:
+            # The gate passed the NAME; routing fanned it out, and a restricted
+            # key is served only by boxes whose weights its list reaches.
+            kept = key_filter_targets(key, targets)
+            if not kept:
+                return _refuse_model(
+                    key, model, endpoint, stream, started,
+                    "model '" + model + "' is not allowed for this key (no box "
+                    "serves it as a model on the key's list)")
+            targets = kept
         if agent and len(targets) > 1:
             # Order matters: this runs BEFORE the ctx_limit resort below, not
             # after. Both are stable sorts, so the LAST one applied dominates
@@ -8107,7 +8667,8 @@ async def openai_proxy(path: str, request: Request):
                         + served_model + "'",
                         "type": "invalid_request_error",
                         "param": "model",
-                        "available": [m["id"] for m in await fleet_model_list()],
+                        "available": key_filter_models(
+                            key, [m["id"] for m in await fleet_model_list()]),
                     }
                 },
                 status_code=404,
@@ -8939,6 +9500,26 @@ def _ollama_usage(obj: dict) -> dict | None:
     return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
 
 
+def _native_listing_for(key: dict, raw_out: bytes) -> bytes | None:
+    """Ollama's /api/tags or /api/ps body as `key` may see it: untouched for an
+    unrestricted key, else only the entries it may use. None when the body is
+    not a listing this can read -- a restricted key is not handed what could
+    not be checked."""
+    if key_allowed_models(key) is None:
+        return raw_out
+    try:
+        listing = json.loads(raw_out)
+        entries = listing["models"] or []
+        names = [str(e.get("model") or e.get("name") or "") for e in entries]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    # By what this box means by each name, not the fleet's pooled reading of
+    # it: these are the entries of THIS box's engine.
+    keep = {n for _host, n in key_filter_targets(key, [("", n) for n in names])}
+    listing["models"] = [e for e, n in zip(entries, names) if n in keep]
+    return json.dumps(listing).encode()
+
+
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "DELETE", "HEAD"])
 async def native_proxy(path: str, request: Request):
     key = require_api_key(request)
@@ -9012,6 +9593,8 @@ async def native_proxy(path: str, request: Request):
                     payload = apply_agent(agent, payload)
                     body = json.dumps(payload).encode()
                 model = str(payload.get("model", ""))
+                if pin_model_field(key, payload):
+                    body = json.dumps(payload).encode()
                 # Native Ollama shape, same rule as /v1: the fleet's canonical
                 # id goes to the engine as the tag it knows.
                 tag = (await upstream_alias_pairs()).get(model)
@@ -9020,6 +9603,31 @@ async def native_proxy(path: str, request: Request):
                     body = json.dumps(payload).encode()
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
+
+    # The key's own model list (api_keys.allowed_models): every verb that
+    # names a model, including `show`, which is unmetered. Native requests run
+    # on this box's engine and are never routed through a ladder, so a class
+    # word that the key reaches only in part cannot be narrowed here and is
+    # refused with the rest. An unreadable body names no model, and a
+    # restricted key is refused that too.
+    verb = path.split("/")[0]
+    if verb in METERED_NATIVE + ("show",):
+        permitted, ladder, why = key_model_gate(key, model)
+        if permitted and ladder is not None:
+            permitted = False
+            why = ("model '" + model + "' is not allowed for this key (the "
+                   "native API cannot narrow a routing class to the models it "
+                   "may use)")
+        elif permitted and not key_filter_targets(key, [("", model)]):
+            # The gate judged the NAME against every box's meaning of it (a
+            # peer's alias counts); this runs on THIS box's engine, so what
+            # this box means by the name is what has to be on the list.
+            permitted = False
+            why = ("model '" + model + "' is not allowed for this key (this "
+                   "box serves that name as a model off its list)")
+        if not permitted:
+            return _refuse_model(key, model, endpoint, stream, started, why,
+                                 metered=metered)
 
     hop = {"host", "content-length", "connection", "authorization",
            "x-api-key", "cf-access-jwt-assertion", "cookie", "x-fleet-origin"}
@@ -9125,6 +9733,16 @@ async def native_proxy(path: str, request: Request):
                         remember_model_ctx({("", model): smaller})
                 except (httpx.ConnectError, httpx.ConnectTimeout):
                     pass  # the original failure is still the honest answer
+        if verb in ("tags", "ps") and status < 400 and raw_out:
+            shown = _native_listing_for(key, raw_out)
+            if shown is None:
+                log.error("native %s: the listing could not be read, so it "
+                          "was not passed on to a model-restricted key", verb)
+                return JSONResponse(
+                    {"error": "native upstream sent a listing this gateway "
+                              "cannot filter for a model-restricted key"},
+                    status_code=502)
+            raw_out = shown
         usage = None
         if metered:
             try:
@@ -9223,8 +9841,51 @@ async def _post_chat(cand: str, payload: bytes,
                                      "Content-Type": "application/json"})
 
 
+def _worker_node_gate(cap: int | None,
+                      engaged: set[str]) -> Callable[..., bool] | None:
+    """The host gate for a team whose workers are capped to `cap` distinct
+    OTHER nodes (teams.max_worker_nodes), or None for a team with no cap --
+    which then runs exactly as it always did. `engaged` is the set of other
+    nodes this one request has used so far; the caller owns it and keeps it
+    for every round of the request, so the cap holds for the whole of it and
+    not once per spawn_subagents call.
+
+    The node holding the key never counts: work on it is free, and a cap of 0
+    means "this node only". A node already engaged passes, so a worker is never
+    refused a box the request is using anyway. Check and add have no await
+    between them, so concurrent workers cannot both take the last slot and no
+    lock is needed.
+
+    A node is counted when it is PICKED, not when it answers. A call that fails
+    and fails over leaves both boxes counted, which errs towards the cap being
+    reached early rather than exceeded. And a peer that re-routes a worker on
+    to a third box by its own rules cannot be seen from here at all -- the cap
+    bounds the nodes THIS gateway addresses.
+
+    `claim=False` only asks: the answer a claim would get right now, with
+    nothing taken. fleet_chat uses it to tell whether another box could still
+    take a request, which is a different question from whether one is listed.
+    The engaged set only ever grows, so a box refused now stays refused."""
+    if cap is None:
+        return None
+
+    def gate(host: str, claim: bool = True) -> bool:
+        if not host or host == HOST_NAME or host in engaged:
+            return True
+        if len(engaged) >= cap:
+            return False
+        if claim:
+            engaged.add(host)
+        return True
+
+    return gate
+
+
 async def fleet_chat(key: dict, body: dict, endpoint: str,
                      ctx_limit: int | None = None, role: str = "primary",
+                     ladder: tuple[str, ...] | None = None,
+                     host_gate: Callable[..., bool] | None = None,
+                     list_exempt: bool = False,
                      ) -> tuple[int, dict, str, int]:
     """One completion, routed like the /v1 proxy routes: best host first,
     failover down the candidate list on a connect failure, a stall, or a
@@ -9235,6 +9896,15 @@ async def fleet_chat(key: dict, body: dict, endpoint: str,
     or a public single key benefits here too, not just plain bearer keys.
     `role` is 'primary' or 'worker' and selects the host policy (a team's
     sub-agents go to the always-on small boxes ahead of the big one).
+    `ladder` is the part of a fleet role the key's model list reaches, when it
+    reaches only part (key_model_gate); see role_pairs.
+    `host_gate` is asked about each candidate just before it is called and
+    skips the ones it refuses (see _worker_node_gate); None asks nothing. It
+    is also asked, without taking anything, about the candidates after the
+    current one, so the failover deadline is only used when one could be used.
+    `list_exempt` skips the key's model list for what the name routes to: the
+    caller has already decided the name is allowed without it (a team's worker
+    class, which the admin chose for the key).
 
     `ctx_limit` is the window the caller was promised. When the box that ends
     up answering cannot hold it, the request is fitted to what that box CAN
@@ -9253,12 +9923,25 @@ async def fleet_chat(key: dict, body: dict, endpoint: str,
     try:
         targets = await resolve_targets(
             model, role=role, prompt_tokens=prompt_est, gen_tokens=gen_est,
-            need_ctx=prompt_est + gen_est) or []
+            need_ctx=prompt_est + gen_est, ladder=ladder) or []
     except Exception:  # noqa: BLE001 -- routing is best-effort
-        targets = [("", model)]
+        # The local engine would read a class word as its own alias row, which
+        # may be a model outside the key's list: with a ladder, or for a class
+        # the caller exempted from the list (nothing then filters it), route
+        # nowhere and let the 404 below say so.
+        targets = [] if ladder or list_exempt else [("", model)]
     if not targets:
         return 404, {"error": {"message": "no host in the fleet serves model '"
                                + model + "'", "type": "invalid_request_error"}}, "", 0
+    # As in openai_proxy: the model's NAME was gated by the caller, and what
+    # the name routes to is held to the key's list here.
+    kept = targets if list_exempt else key_filter_targets(key, targets)
+    if not kept:
+        return 403, {"error": {
+            "message": "model '" + model + "' is not allowed for this key (no "
+                       "box serves it as a model on the key's list)",
+            "type": "invalid_request_error", "code": "model_not_allowed"}}, "", 0
+    targets = kept
     if ctx_limit and len(targets) > 1:
         targets = sorted(targets, key=lambda t: _ctx_rank(t, ctx_limit))
     last_err: tuple[int, dict, str, int] | None = None
@@ -9269,8 +9952,8 @@ async def fleet_chat(key: dict, body: dict, endpoint: str,
     # that cannot succeed.
     ctx_reject: HTTPException | None = None
     upstream_failed = False
+    gate_refused = False
     for i, (cand, fleet_id) in enumerate(targets):
-        more = i < len(targets) - 1
         hname = cand or HOST_NAME
         send, granted = body, 0
         if ctx_limit:
@@ -9283,6 +9966,19 @@ async def fleet_chat(key: dict, body: dict, endpoint: str,
                     ctx_reject = exc
                     continue
                 granted = cand_ctx
+        # After the ctx check, so a box that was never going to be called is
+        # not counted against the cap; before the call, so a refused box is
+        # never touched.
+        if host_gate is not None and not host_gate(hname):
+            gate_refused = True
+            continue
+        # "Another box could still take this" means one the gate would let
+        # through, asked after this box took its slot. Counting a listed box
+        # the gate will refuse gave a capped worker's only usable box the
+        # failover deadline: a healthy slow generation was timed out and the
+        # box marked down for every other key, with nowhere to fail over to.
+        more = any(host_gate is None or host_gate(h or HOST_NAME, False)
+                   for h, _fid in targets[i + 1:])
         untrack = _track(hname)
         payload = json.dumps({**send, "model": fleet_id}).encode()
         # Non-streaming, so the whole answer is one read: the deadline has
@@ -9392,6 +10088,15 @@ async def fleet_chat(key: dict, body: dict, endpoint: str,
                      out.get("usage") if isinstance(out, dict) else None,
                      None, int((time.time() - started) * 1000), host=hname)
         return r.status_code, out if isinstance(out, dict) else {}, hname, granted
+    if gate_refused and ctx_reject is None and not upstream_failed and last_err is None:
+        # Every box that holds the model was off limits: not a fleet fault, so
+        # not a 502. The task gets this as its own result and the round goes on.
+        record_usage(key, model, endpoint, False, 403, None, None,
+                     int((time.time() - started) * 1000))
+        return 403, {"error": {
+            "message": "no node within this key's worker-node cap holds "
+                       + model,
+            "type": "invalid_request_error", "code": "worker_node_cap"}}, "", 0
     if ctx_reject is not None and not upstream_failed and last_err is None:
         # Every candidate declined the prompt on length and nothing actually
         # broke: 413 about the prompt, not 502 about the fleet -- the same
@@ -9440,7 +10145,7 @@ def _batch_need_ctx(lines: str) -> int:
 
 
 async def _batch_targets(models: list[str], no_fallback: bool = False,
-                         need_ctx: int = 0) -> list[dict]:
+                         need_ctx: int = 0, key: dict | None = None) -> list[dict]:
     """Every (host, model) pair that can serve this batch -- at most ONE model
     per host. The swap group on a llama.cpp box is exclusive, so handing one
     box two of the batch's models would make every request a model reload;
@@ -9452,7 +10157,11 @@ async def _batch_targets(models: list[str], no_fallback: bool = False,
     whatever box happened to answer next. What actually served each item is
     already the honest record (the `model` field on every output line, and
     the `targets` this function returns) -- batches have no single reply to
-    staple an x_fleet notice to, so this IS the disclosure."""
+    staple an x_fleet notice to, so this IS the disclosure.
+
+    `key` is the submitting key: a substitute its model list refuses is not
+    taken, exactly as the live proxy drops one. batch_submit has already
+    refused the models the key named; this is the substitution it did not."""
     await model_routes(force=True)
     cap = _routes_cache.get("cap", {})
     if not no_fallback:
@@ -9464,7 +10173,8 @@ async def _batch_targets(models: list[str], no_fallback: bool = False,
             row = _catalogue_row_for(m)
             if row is not None:
                 sub = await pick_fallback(row, "worker", settings)
-                if sub is not None:
+                if sub is not None and (
+                        key is None or key_model_gate(key, str(sub["public_id"]))[0]):
                     out_m = str(sub["public_id"])
             if out_m not in seen:
                 seen.add(out_m)
@@ -9480,6 +10190,7 @@ async def _batch_targets(models: list[str], no_fallback: bool = False,
 
     taken: set[str] = set()
     targets: list[dict] = []
+    roles = fleet_roles()
     for m in models:
         # Policy order, so the first-listed model claims the boxes the owner
         # ranked highest for batch work (role 'worker': sub-agent rules). A
@@ -9491,15 +10202,19 @@ async def _batch_targets(models: list[str], no_fallback: bool = False,
         # as resolve_targets() does for the live proxy -- a bare
         # cands.get(m, []) would miss it entirely, since `cands` is keyed by
         # fleet id, never by public_id.
-        if m in FLEET_ROLES:
+        if m in roles:
             pool = role_pairs(m)
         else:
             row = _catalogue_row_for(m)
             fids = _row_fleet_ids(row) if row is not None else [m]
             pool = [(c, fid) for fid in fids
                    for c in _routes_cache["cands"].get(fid, [])]
+        if key is not None:
+            # The model list was checked by name up front; a name that fans
+            # out to ids or boxes the list does not reach loses those here.
+            pool = key_filter_targets(key, pool)
         ranked = await _score_host_model_pairs(
-            pool, role="worker", fleet_role=m if m in FLEET_ROLES else "",
+            pool, role="worker", fleet_role=m if m in roles else "",
             need_ctx=need_ctx)
         for cand, mid in ranked:
             hname = cand or HOST_NAME
@@ -9568,7 +10283,7 @@ async def _batch_run(bid: int, models: list[str], key: dict,
         _batch_live.pop(bid, None)
         return
 
-    targets = await _batch_targets(models, no_fallback, _batch_need_ctx(lines))
+    targets = await _batch_targets(models, no_fallback, _batch_need_ctx(lines), key)
     if not targets:
         _batch_flush(bid, state, "error",
                      "no host in the fleet serves any of: " + ", ".join(models))
@@ -9808,6 +10523,16 @@ MAX_BATCH_REQUESTS = 100_000
 MAX_BATCH_BYTES = 256 * 1024 * 1024  # 256 MiB of serialized request bodies
 
 
+def _batch_models_refused(key: dict, models: list[str]) -> list[str]:
+    """The batch models `key` may not use. A routing class the key reaches
+    only in part counts as refused, unlike on the live proxy: _batch_targets
+    fans a class out over every box's best member of the WHOLE ladder and has
+    no way to narrow it, so a partial class could run a model off the list."""
+    gates = {m: key_model_gate(key, m) for m in models}
+    return [m for m, (ok, ladder, _why) in gates.items()
+            if not ok or ladder is not None]
+
+
 async def batch_submit(key: dict, payload: dict,
                        request: Request | None = None) -> dict:
     reqs = payload.get("requests")
@@ -9837,6 +10562,13 @@ async def batch_submit(key: dict, payload: dict,
                 raise HTTPException(403, "model(s) not allowed for this key: "
                                     + ", ".join(refused))
 
+    # The key's own model list (api_keys.allowed_models), on top of the agent
+    # profile's: both must pass.
+    refused = _batch_models_refused(key, models)
+    if refused:
+        raise HTTPException(403, "model(s) not allowed for this key: "
+                            + ", ".join(refused))
+
     # The opt-out (requirement 2) has no per-item header on this surface, so
     # it is decided ONCE, up front, from the submission itself -- a batch
     # never re-checks it per dequeued request.
@@ -9845,7 +10577,7 @@ async def batch_submit(key: dict, payload: dict,
     for req in reqs:
         if isinstance(req, dict):
             need_ctx = max(need_ctx, estimate_prompt_tokens(req))
-    targets = await _batch_targets(models, no_fallback, need_ctx)
+    targets = await _batch_targets(models, no_fallback, need_ctx, key)
     if not targets:
         raise HTTPException(404, "no host in the fleet serves any of: "
                             + ", ".join(models))
@@ -9865,6 +10597,7 @@ async def batch_submit(key: dict, payload: dict,
         if agent:
             body = apply_agent(dict(agent, force_model="", allowed_models="[]"),
                                body)
+        pin_model_field(key, body)   # no "Model" left to compete with the id set below
         body.pop("model", None)  # the dispatcher assigns models per host
         line = json.dumps(body, ensure_ascii=False)
         spool_bytes += len(line.encode("utf-8")) + 1  # +1 for the newline join
@@ -9886,7 +10619,8 @@ async def batch_submit(key: dict, payload: dict,
     await asyncio.to_thread(in_path.write_text, "\n".join(lines) + "\n",
                             "utf-8")
     _batch_tasks[bid] = asyncio.create_task(
-        _batch_run(bid, models, {"id": key.get("id"), "name": key.get("name")},
+        _batch_run(bid, models, {"id": key.get("id"), "name": key.get("name"),
+                                 "allowed_models": key.get("allowed_models")},
                   no_fallback=no_fallback))
     return {"id": bid, "status": "running", "total": len(lines),
             "targets": [{k: t[k] for k in ("host", "model", "workers")}
@@ -9929,9 +10663,40 @@ async def resume_orphaned_batches() -> None:
             models = json.loads(row.get("models") or "[]")
         except json.JSONDecodeError:
             models = []
+        # The key's model list may have been narrowed since the batch was
+        # accepted: a resume is a new decision to spend that key's access.
+        key = {"id": row["key_id"], "name": row["key_name"]}
+        stored = db_query("SELECT allowed_models FROM api_keys WHERE id=?",
+                          (row["key_id"],))
+        if not stored:
+            # No key row is no list to read, which must not be read as "no
+            # list": a key that was restricted would resume on any model.
+            db_exec("UPDATE batches SET status='error', message=?, "
+                    "updated_at=? WHERE id=?",
+                    ("not resumed: the key that submitted it no longer exists",
+                     now(), bid))
+            log.warning("batch %d not resumed: its key (id %s) no longer exists",
+                        bid, row["key_id"])
+            continue
+        key["allowed_models"] = stored[0]["allowed_models"]
+        refused = _batch_models_refused(key, models)
+        if refused and not _routes_cache["t"]:
+            # Boot comes before the first routing sweep, and a peer's alias for
+            # a listed model is only known from that sweep: against the empty
+            # table a name the list does reach through one reads as refused. The
+            # sweep is paid for only by a batch that would otherwise be failed.
+            await model_routes()
+            refused = _batch_models_refused(key, models)
+        if refused:
+            db_exec("UPDATE batches SET status='error', message=?, "
+                    "updated_at=? WHERE id=?",
+                    ("not resumed: the key's model list no longer allows "
+                     + ", ".join(refused), now(), bid))
+            log.warning("batch %d not resumed: its key may no longer use %s",
+                        bid, ", ".join(refused))
+            continue
         _batch_tasks[bid] = asyncio.create_task(_batch_run(
-            bid, models, {"id": row["key_id"], "name": row["key_name"]},
-            done_idx, counts))
+            bid, models, key, done_idx, counts))
         log.info("batch %d resumed: %d of %d already answered",
                  bid, len(done_idx), int(row["total"] or 0))
 
@@ -10031,9 +10796,24 @@ def get_team(key_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def _exempt_worker(team: dict, model: str) -> bool:
+    """Is `model` the worker class the keys form gave `team`? That one is
+    allowed without the key's model list (the admin chose it for this key) --
+    but only while routing still knows the word as a class. Once the class is
+    gone it is a plain name, which a box may serve as any model or alias it
+    likes, and the exemption would hand the key all of them."""
+    cls = str(team.get("worker_class") or "")
+    return bool(cls) and model == cls and cls in fleet_roles()
+
+
 async def _run_subagents(key: dict, team: dict, tasks: list[dict],
                          pub_key: dict | None = None,
-                         no_fallback: bool = False) -> list[dict]:
+                         no_fallback: bool = False,
+                         engaged: set[str] | None = None) -> list[dict]:
+    """`engaged` is the other nodes this request's workers have used so far,
+    kept by team_orchestrate across rounds; it only matters for a team with a
+    node cap (teams.max_worker_nodes). A caller without one gets a fresh set,
+    so the cap then holds for this call alone."""
     try:
         roster = [str(w) for w in json.loads(team.get("worker_models") or "[]")
                   if str(w).strip()]
@@ -10042,6 +10822,8 @@ async def _run_subagents(key: dict, team: dict, tasks: list[dict],
     if not roster:
         roster = [str(team.get("primary_model") or "")]
     sem = asyncio.Semaphore(max(1, int(team.get("max_workers") or 4)))
+    host_gate = _worker_node_gate(
+        team.get("max_worker_nodes"), engaged if engaged is not None else set())
     wprompt = str(team.get("worker_prompt") or "").strip()
     # A Fleet Pass team's ctx_limit is the CONVERSATION cap on the primary;
     # each worker turn is a one-shot task with no history, so it is bounded
@@ -10067,10 +10849,22 @@ async def _run_subagents(key: dict, team: dict, tasks: list[dict],
             req_row = _catalogue_row_for(model)
             if req_row:
                 sub = await pick_fallback(req_row, "worker", get_public_settings())
-                if sub:
+                if sub and key_model_gate(key, str(sub["public_id"]))[0]:
                     served = str(sub["public_id"])
                     _note_fallback(int(key["id"]), model, served)
                     model = served
+        # The roster was already cut down to the key's model list by
+        # team_orchestrate; this is the check at the point of the side effect,
+        # which also covers a roster it never saw.
+        # The class the keys form gave this team is allowed without the key's
+        # model list (the admin chose it for this key); every other worker
+        # model, a Teams-tab edit of the roster included, is held to the list.
+        class_worker = _exempt_worker(team, model)
+        permitted, worker_ladder, why = (True, None, "") if class_worker \
+            else key_model_gate(key, model)
+        if not permitted:
+            return {"task": i, "model": model, "host": "", "ok": False,
+                   "result": why, "usage": None}
         msgs = ([{"role": "system", "content": wprompt}] if wprompt else [])
         msgs.append({"role": "user", "content": str(t.get("prompt") or "")})
         body = {"model": model, "messages": msgs,
@@ -10090,7 +10884,9 @@ async def _run_subagents(key: dict, team: dict, tasks: list[dict],
             # answer. It is still ENFORCED -- a worker sent more prompt than
             # its box can hold would have it silently truncated.
             status, resp, host, _granted = await fleet_chat(
-                key, body, "/v1/team-worker", worker_budget, role="worker")
+                key, body, "/v1/team-worker", worker_budget, role="worker",
+                ladder=worker_ladder, host_gate=host_gate,
+                list_exempt=class_worker)
         content = ""
         truncated = False
         usage = resp.get("usage") if isinstance(resp, dict) else None
@@ -10195,6 +10991,33 @@ async def team_orchestrate(key: dict, team: dict, payload: dict,
     primary = str(team.get("primary_model") or "").strip() \
         or str(payload.get("model") or "")
 
+    # The key's model list applies to the models this crew will actually run,
+    # not to the placeholder `model` a client sends to a team with its own
+    # primary. Workers the list refuses are dropped from the roster the primary
+    # is told about; a crew left with no worker it may use, or a primary it may
+    # not use, is refused outright rather than quietly run as something else.
+    # The one exception is the worker class the keys form gave this team: the
+    # admin picked it for this key, so it stays on the roster whatever the list
+    # says (while it is still a class: _exempt_worker). The primary, and every
+    # other roster entry, is held to the list.
+    primary_ok, primary_ladder, why = key_model_gate(key, primary)
+    if not primary_ok:
+        return _refuse_model(key, primary, "/v1/chat/completions", stream,
+                             started, why)
+    allowed_roster = [w for w in roster
+                      if _exempt_worker(team, w) or key_model_gate(key, w)[0]]
+    if roster and not allowed_roster:
+        return _refuse_model(key, primary, "/v1/chat/completions", stream,
+                             started, "this team's worker models are not "
+                             "allowed for this key")
+    roster = allowed_roster
+    # A crew with no roster uses its primary for the workers, which
+    # _run_subagents reads off this row -- where a blank primary (a team made
+    # on the keys form) means the client's model.
+    # Say which model that is, or every worker is sent to model ''.
+    team = {**team, "worker_models": json.dumps(roster),
+            "primary_model": primary}
+
     # Fallback (contract 1.9c and requirement 2) applies to every team key,
     # not only a Fleet Pass one -- a team's primary is exactly the workload
     # ("multi-model teams touching the largest models") the disclosed
@@ -10209,13 +11032,15 @@ async def team_orchestrate(key: dict, team: dict, payload: dict,
         req_row = _catalogue_row_for(primary)
         if req_row:
             sub = await pick_fallback(req_row, "primary", get_public_settings())
-            if sub:
+            if sub and key_model_gate(key, str(sub["public_id"]))[0]:
                 served_primary = str(sub["public_id"])
                 fallback = {"requested": primary, "served": served_primary}
                 primary = served_primary
+                primary_ladder = None
 
     payload = dict(payload)
     payload["model"] = primary
+    pin_model_field(key, payload)   # no "Model" beside the gated one
     payload["stream"] = False
     # Every team key, Fleet Pass or not, is subject to the same anti-abuse
     # strip a pub_row key gets in openai_proxy -- a team's primary is exactly
@@ -10246,6 +11071,9 @@ async def team_orchestrate(key: dict, team: dict, payload: dict,
     payload["tools"] = tools + [TEAM_TOOL]
 
     rounds, sub_calls, sub_fail = 0, 0, 0
+    # The other nodes this request's workers have used, across every round: the
+    # key's worker-node cap (teams.max_worker_nodes) counts against this.
+    engaged: set[str] = set()
     max_rounds = max(1, int(team.get("max_rounds") or 6))
     team_ctx = _norm_limit(team.get("ctx_limit"))
     # Every round talks to the primary under /v1/team-primary and every
@@ -10308,7 +11136,8 @@ async def team_orchestrate(key: dict, team: dict, payload: dict,
                             "primary_host": primary_host}),
                         status_code=413)
             status, resp, host, granted = await fleet_chat(
-                key, payload, "/v1/team-primary", team_ctx, role="primary")
+                key, payload, "/v1/team-primary", team_ctx, role="primary",
+                ladder=primary_ladder)
             primary_host = host or primary_host
             if primary_host:
                 job["host"] = primary_host
@@ -10425,7 +11254,7 @@ async def team_orchestrate(key: dict, team: dict, payload: dict,
                     capped = tasks[:round_task_budget]
                     round_task_budget -= len(capped)
                     results = await _run_subagents(
-                        key, team, capped, pub_key, no_fallback)
+                        key, team, capped, pub_key, no_fallback, engaged)
                     sub_calls += len(capped)
                     sub_fail += sum(1 for r in results if not r.get("ok"))
                     for r in results:
@@ -11926,6 +12755,7 @@ def _no_fallback_requested(request: Request | None = None,
 
 async def resolve_targets(model: str, role: str = "primary", prompt_tokens: int = 0,
                           gen_tokens: int = 256, need_ctx: int = 0,
+                          ladder: tuple[str, ...] | None = None,
                           ) -> list[tuple[str, str]]:
     """Every (host, fleet_id) pair that can serve `model`, best first.
 
@@ -11935,7 +12765,9 @@ async def resolve_targets(model: str, role: str = "primary", prompt_tokens: int 
     fleet ids (a MoE served under two different tags, say) has its
     candidates ranked against each other by the same scorer model_hosts()
     uses, via _score_host_model_pairs(). The keyword arguments describe the
-    request being routed and go straight to the scorer."""
+    request being routed and go straight to the scorer, except `ladder`: the
+    members of a fleet role a restricted key may reach, passed to role_pairs
+    (and meaningless for any other kind of `model`)."""
     await model_routes()
     kw = dict(role=role, prompt_tokens=prompt_tokens, gen_tokens=gen_tokens,
               need_ctx=need_ctx)
@@ -11947,10 +12779,11 @@ async def resolve_targets(model: str, role: str = "primary", prompt_tokens: int 
             for cand in _routes_cache["cands"].get(fid, []):
                 pairs.append((cand, fid))
         ranked = await _score_host_model_pairs(pairs, **kw)
-    elif model in FLEET_ROLES:
+    elif model in fleet_roles():
         # A fleet role is a policy, not a name any box serves: each box's
         # best model for it, ranked like any other candidates. See FLEET_ROLES.
-        ranked = await _score_host_model_pairs(role_pairs(model), fleet_role=model, **kw)
+        ranked = await _score_host_model_pairs(
+            role_pairs(model, ladder), fleet_role=model, **kw)
     else:
         hosts = await model_hosts(model, **kw)
         ranked = [(h, model) for h in hosts]
@@ -15393,17 +16226,19 @@ async def admin_public_model_put(
     # resolve_targets() answers the catalogue before a fleet role, so a row
     # named like one -- or claiming one as a fleet id -- would quietly take
     # over live routing for that word.
-    if public_id in FLEET_ROLES:
+    roles = fleet_roles()
+    if public_id in roles:
         raise HTTPException(
-            400, f"{public_id!r} is a fleet role (FLEET_ROLES in the gateway); "
-                 "a catalogue row by that name would shadow the policy")
+            400, f"{public_id!r} is a fleet role (FLEET_ROLES in the gateway, "
+                 "or a class on the Routing tab); a catalogue row by that name "
+                 "would shadow the policy")
     before = db_query("SELECT * FROM public_models WHERE public_id=?", (public_id,))
     row_before = before[0] if before else {}
     fleet_ids = p.get("fleet_ids")
     if not isinstance(fleet_ids, list) or not fleet_ids \
             or not all(isinstance(f, str) and f.strip() for f in fleet_ids):
         raise HTTPException(400, "fleet_ids must be a non-empty list of strings")
-    if any(f.strip() in FLEET_ROLES for f in fleet_ids):
+    if any(f.strip() in roles for f in fleet_ids):
         raise HTTPException(400, "fleet_ids may not name a fleet role")
     arch = str(p.get("arch", "dense"))
     if arch not in ("moe", "dense"):
@@ -17016,6 +17851,68 @@ async def api_swap_config(admin: dict = Depends(require_admin)) -> str:
     return render_swap_config(load_models())
 
 
+@app.get("/admin/api/voice")
+async def api_voice(admin: dict = Depends(require_admin)) -> dict:
+    rep = await voice_report()
+    if rep is None:
+        raise HTTPException(404, "no voice node on this box")
+    return rep
+
+
+@app.post("/admin/api/voice/pause")
+async def api_voice_pause(request: Request, admin: dict = Depends(require_admin)) -> dict:
+    """Stop the voice node and keep it stopped until Resume. A live call is
+    refused unless the body says {"force": true}: pausing ends it, silently,
+    for whoever is on it."""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 -- an empty body is a plain pause
+        payload = {}
+    force = isinstance(payload, dict) and payload.get("force") is True
+    rep = await voice_report()
+    if rep is None:
+        raise HTTPException(404, "no voice node on this box")
+    # Paused and stopped is done. Paused but RUNNING (a unit installed before
+    # its ConditionPathExists, then rebooted) is stopped again.
+    if rep["paused"] and rep["units"].get(VOICE_UNIT) != "active":
+        return {**rep, "already": True}
+    if rep["live_session"] and not force:
+        raise HTTPException(409, "a live voice call is on, and pausing ends it -- "
+                                 "send {\"force\": true} to pause anyway")
+    # The marker first: from this moment nothing restarts the unit, not even
+    # the guard's Wants= between the two steps. "by" only when it is a person:
+    # through the hub's proxy this box sees the hub's admin token, not who.
+    who = admin.get("email") if admin.get("via") == "cf-access" else ""
+    write_atomic(VOICE_PAUSED, json.dumps({"since": now(), "by": who or ""}))
+    code, out = await asyncio.to_thread(systemctl, "stop", VOICE_UNIT + ".service")
+    if code != 0:
+        VOICE_PAUSED.unlink(missing_ok=True)
+        raise HTTPException(502, "could not stop " + VOICE_UNIT + " (" + out[:300]
+                                 + ") -- is the voice grant in /etc/sudoers.d/llmstack-fleet? "
+                                 "A gateway deploy re-runs hosts/linux/grants.sh")
+    log.info("voice: %s paused by %s", VOICE_UNIT, admin.get("email"))
+    return await voice_report() or {}
+
+
+@app.post("/admin/api/voice/resume")
+async def api_voice_resume(admin: dict = Depends(require_admin)) -> dict:
+    if not await asyncio.to_thread(voice_units):
+        raise HTTPException(404, "no voice node on this box")
+    # The marker goes first, or the unit's ConditionPathExists would skip the
+    # start (and systemctl would still say 0).
+    held = VOICE_PAUSED.read_text(encoding="utf-8") if VOICE_PAUSED.exists() else None
+    VOICE_PAUSED.unlink(missing_ok=True)
+    code, out = await asyncio.to_thread(systemctl, "start", VOICE_UNIT + ".service")
+    if code != 0:
+        if held is not None:
+            write_atomic(VOICE_PAUSED, held)     # still paused, not "down" to the hub
+        raise HTTPException(502, "could not start " + VOICE_UNIT + " (" + out[:300]
+                                 + ") -- is the voice grant in /etc/sudoers.d/llmstack-fleet? "
+                                 "A gateway deploy re-runs hosts/linux/grants.sh")
+    log.info("voice: %s resumed by %s", VOICE_UNIT, admin.get("email"))
+    return await voice_report() or {}
+
+
 @app.post("/admin/api/service/{action}/{unit}")
 async def api_service(action: str, unit: str, admin: dict = Depends(require_admin)) -> dict:
     if action not in ("restart", "start", "stop"):
@@ -17717,6 +18614,125 @@ async def api_delete_model(
 # ---- keys ----
 
 
+def _models_view(row: dict) -> dict:
+    """Turn a key row's stored allowed_models into the list the API speaks. A
+    stored value that cannot be read is shown as an empty list AND flagged:
+    the key is refusing every model (key_allowed_models), and an editor that
+    showed it as "all models" would be lying about that."""
+    stored = _stored_models(row.get("allowed_models"))
+    row["allowed_models"] = stored or []
+    if stored is None:
+        row["allowed_models_invalid"] = True
+    return row
+
+
+def _workers_view(team: dict | None) -> dict:
+    """What the keys API says about a key's sub-agents, from its live team row
+    (enabled, not archived) or None. A row with a worker_class belongs to the
+    keys form. One without was made on the Teams tab: it is reported as `team`
+    so the editor leaves it to that tab, and its node cap is shown as it is.
+    No row means off."""
+    if team is None:
+        return {"max_worker_nodes": None, "worker_class": "", "team": False}
+    return {"max_worker_nodes": team["max_worker_nodes"],
+            "worker_class": team["worker_class"] or "",
+            "team": not team["worker_class"]}
+
+
+def _check_team_tab_free(key_id: int) -> None:
+    """The keys form can only set sub-agents on a key that has no team of the
+    Teams tab's making: one row per key (teams.key_id is UNIQUE), and taking
+    over a crew with its own prompts and roster would wipe them. An archived
+    one counts too -- it is the Teams tab's to restore or delete."""
+    rows = db_query(
+        "SELECT archived_at FROM teams WHERE key_id=? AND worker_class=''",
+        (key_id,))
+    if rows:
+        raise HTTPException(409, (
+            "this key fronts a team -- edit it on the Teams tab"
+            if rows[0]["archived_at"] is None else
+            "this key has an archived team on the Teams tab -- delete it "
+            "there before setting workers here"))
+
+
+def _check_no_live_agent(key_id: int) -> None:
+    """Sub-agents put a key on the team loop, which openai_proxy takes BEFORE
+    it reads an agent profile: the profile's pinned model, rules, parameter
+    caps, context window and host policy would stop applying without a word,
+    and a blank lead (the client's own model) leaves nothing to show it. So a
+    key is never both: this refuses workers over a live profile, and
+    _check_no_form_workers refuses the profile over live workers."""
+    if get_agent(key_id):
+        raise HTTPException(409, (
+            "this key has an agent profile -- sub-agents would bypass its "
+            "model pin, rules and limits; remove the profile on the Agents "
+            "tab first"))
+
+
+def _check_no_form_workers(key_id: int) -> None:
+    """The other order of _check_no_live_agent: a profile saved or restored on
+    a key whose keys-form sub-agents are on would never be applied. A
+    Teams-tab team is not counted: its team-beats-agent order is the Teams
+    tab's own, and visible there."""
+    team = get_team(key_id)
+    if team and team["worker_class"]:
+        raise HTTPException(409, (
+            "this key runs sub-agents (set on the Keys tab) -- they would "
+            "bypass this profile; turn them off there first"))
+
+
+def _form_class(key_id: int) -> str:
+    """The worker class the keys form last gave this key, or '' if it never
+    did. Read even while the form's team is switched off or archived."""
+    rows = db_query("SELECT worker_class FROM teams WHERE key_id=? "
+                    "AND worker_class!=''", (key_id,))
+    return rows[0]["worker_class"] if rows else ""
+
+
+def _class_without_this_node(cls: str) -> frozenset[str] | None:
+    """The nodes the Routing tab limits `cls` to when that leaves this one
+    out, else None. Workers capped at 0 run on this node only, so for them
+    such a class refuses every task."""
+    only = role_nodes(cls)
+    return only if only is not None and HOST_NAME.lower() not in only else None
+
+
+def _check_class_runs_here(nodes: int | None, cls: str) -> None:
+    """A 400 for workers capped at 0 on a class that leaves this node out."""
+    if nodes == 0 and (only := _class_without_this_node(cls)):
+        raise HTTPException(
+            400, f"worker class {cls!r} is limited to {', '.join(sorted(only))} "
+                 "on the Routing tab, which leaves this node out, so workers "
+                 "capped at 0 (this node only) could never run -- raise the "
+                 "cap or add this node to the class")
+
+
+def _set_key_workers(key_id: int, name: str, nodes: int | None, cls: str) -> None:
+    """Apply the keys form's sub-agent setting to a live key that
+    _check_team_tab_free has passed. None switches the form's team off but
+    keeps the row; a number enables it (or makes it) with that node cap and
+    worker class. The lead is blank, so the client's own model leads, and the
+    crew size and rounds are the column defaults.
+
+    The roster is [class] when the row is made and when its class changes, and
+    left alone otherwise: it is editable on the Teams tab, and moving the cap
+    must not undo what was done there."""
+    if nodes is None:
+        db_update("UPDATE teams SET enabled=0, updated_at=? "
+                  "WHERE key_id=? AND worker_class!=''", (now(), key_id))
+        return
+    if not db_update(
+            "UPDATE teams SET enabled=1, archived_at=NULL, "
+            "worker_models=CASE WHEN worker_class=? THEN worker_models "
+            "ELSE ? END, worker_class=?, max_worker_nodes=?, updated_at=? "
+            "WHERE key_id=? AND worker_class!=''",
+            (cls, json.dumps([cls]), cls, nodes, now(), key_id)):
+        db_exec(
+            "INSERT INTO teams(key_id,enabled,name,primary_model,worker_models,"
+            "worker_class,max_worker_nodes,updated_at) VALUES (?,1,?,'',?,?,?,?)",
+            (key_id, name, json.dumps([cls]), cls, nodes, now()))
+
+
 @app.get("/admin/api/keys")
 async def api_keys(
     limit: int = 25,
@@ -17745,7 +18761,8 @@ async def api_keys(
     total = db_query("SELECT COUNT(*) n FROM api_keys WHERE " + where, params)[0]["n"]
     keys = db_query(
         "SELECT id,name,prefix,created_at,last_used_at,disabled,"
-        "expires_at,max_rpd,max_tpd,max_total_tokens,archived_at "
+        "expires_at,max_rpd,max_tpd,max_total_tokens,archived_at,"
+        "allowed_models "
         "FROM api_keys WHERE " + where + " ORDER BY id DESC LIMIT ? OFFSET ?",
         (*params, limit, offset),
     )
@@ -17777,11 +18794,27 @@ async def api_keys(
             "AND archived_at IS NULL"
         )
     }
+    teams = {
+        r["key_id"]: r
+        for r in db_query(
+            "SELECT key_id,max_worker_nodes,worker_class,archived_at "
+            "FROM teams WHERE enabled=1"
+        )
+    }
     for k in keys:
+        _models_view(k)
         k["reqs_24h"] = int(day.get(k["id"], {}).get("reqs", 0))
         k["tokens_24h"] = int(day.get(k["id"], {}).get("toks", 0))
         k["tokens_total"] = life.get(k["id"], 0)
         k["agent"] = agents.get(k["id"])
+        # A live key's setting is its live team; an archived key's is the team
+        # ITS archive took down (same stamp), the one restore brings back. A
+        # team removed on the Teams tab earlier carries another stamp, stays
+        # removed, and so reads as off here too.
+        team = teams.get(k["id"])
+        if team and team["archived_at"] != k["archived_at"]:
+            team = None
+        k.update(_workers_view(team))
     return {"items": keys, "total": int(total), "limit": limit,
             "offset": offset}
 
@@ -17790,14 +18823,38 @@ async def api_keys(
 async def api_keys_new(request: Request, admin: dict = Depends(require_admin)) -> dict:
     payload = await request.json()
     name = str(payload.get("name", "")).strip() or "unnamed"
+    # Validated before anything is minted: a 400 here must leave no key behind.
+    models = _norm_model_list(payload.get("allowed_models"))
+    nodes = _norm_worker_nodes(payload.get("max_worker_nodes"))
+    cls = _norm_worker_class(payload.get("worker_class"))
+    _check_class_runs_here(nodes, cls)
     raw, meta = mint_key(
         name,
         expires_at=_norm_expiry(payload.get("expires_at")),
         max_rpd=_norm_limit(payload.get("max_rpd")),
         max_tpd=_norm_limit(payload.get("max_tpd")),
         max_total_tokens=_norm_limit(payload.get("max_total_tokens")),
+        allowed_models=models,
     )
-    return {"key": raw, **meta, "note": "shown once -- store it now"}
+    if nodes is not None:
+        try:
+            _set_key_workers(meta["id"], meta["name"], nodes, cls)
+        except Exception as exc:
+            # A key that was asked to run sub-agents and does not must not
+            # exist: its raw value is never shown on an error, so nobody could
+            # even tell it from the one they meant to make.
+            log.exception("key %s: sub-agent setup failed; removing the key",
+                          meta["id"])
+            db_exec("DELETE FROM api_keys WHERE id=?", (meta["id"],))
+            raise HTTPException(
+                500, "key not created: its sub-agents could not be set up ("
+                + type(exc).__name__ + ": " + str(exc)[:200] + ")") from exc
+    # Echoed so the dashboard can tell a node that stored these from an older
+    # gateway that ignored the fields and minted a plain, unrestricted key.
+    return {"key": raw, **meta, "allowed_models": models,
+            "max_worker_nodes": nodes,
+            "worker_class": cls if nodes is not None else "",
+            "note": "shown once -- store it now"}
 
 
 @app.patch("/admin/api/keys/{key_id}")
@@ -17813,19 +18870,51 @@ async def api_keys_patch(
     for f in ("max_rpd", "max_tpd", "max_total_tokens"):
         if f in payload:
             fields[f] = _norm_limit(payload[f])
-    if not fields:
+    if "allowed_models" in payload:
+        fields["allowed_models"] = json.dumps(
+            _norm_model_list(payload["allowed_models"]))
+    # (nodes, class) when the request sets the key's sub-agents. The class
+    # means nothing without the cap beside it, so one alone is refused rather
+    # than guessed at. A cap sent without a class keeps the key's own (moving
+    # the cap must not move its workers to another class); a key that has none
+    # yet gets "fast". Resolved here, before anything is written, so a stored
+    # class routing no longer knows is a 400 and not a half-saved edit.
+    workers: tuple[int | None, str] | None = None
+    if "max_worker_nodes" in payload:
+        nodes = _norm_worker_nodes(payload["max_worker_nodes"])
+        named = str(payload.get("worker_class") or "").strip()
+        kept = _form_class(key_id) if nodes is not None and not named else ""
+        workers = (nodes, _norm_worker_class(named or kept))
+        _check_class_runs_here(*workers)
+    elif "worker_class" in payload:
+        raise HTTPException(400, "worker_class is sent together with "
+                                 "max_worker_nodes")
+    if not fields and workers is None:
         raise HTTPException(400, "nothing to update")
-    sets = ", ".join(f + "=?" for f in fields)
-    if not db_update(
-        "UPDATE api_keys SET " + sets + " WHERE id=? AND archived_at IS NULL",
-        (*fields.values(), key_id),
-    ):
-        raise HTTPException(404, "no such live key -- restore it first")
-    return db_query(
-        "SELECT id,name,prefix,expires_at,max_rpd,max_tpd,max_total_tokens,disabled "
-        "FROM api_keys WHERE id=?",
+    if workers is not None:
+        # Every refusal comes before anything is written, so a 409 never leaves
+        # the other fields half applied.
+        if not db_query("SELECT id FROM api_keys WHERE id=? AND archived_at "
+                        "IS NULL", (key_id,)):
+            raise HTTPException(404, "no such live key -- restore it first")
+        _check_team_tab_free(key_id)
+        if workers[0] is not None:
+            _check_no_live_agent(key_id)
+    if fields:
+        sets = ", ".join(f + "=?" for f in fields)
+        if not db_update(
+            "UPDATE api_keys SET " + sets + " WHERE id=? AND archived_at IS NULL",
+            (*fields.values(), key_id),
+        ):
+            raise HTTPException(404, "no such live key -- restore it first")
+    out = _models_view(db_query(
+        "SELECT id,name,prefix,expires_at,max_rpd,max_tpd,max_total_tokens,"
+        "disabled,allowed_models FROM api_keys WHERE id=?",
         (key_id,),
-    )[0]
+    )[0])
+    if workers is not None:
+        _set_key_workers(key_id, out["name"], *workers)
+    return {**out, **_workers_view(get_team(key_id))}
 
 
 @app.delete("/admin/api/keys/{key_id}")
@@ -17865,14 +18954,25 @@ async def api_keys_restore(
     """Bring an archived key back. It returns DISABLED rather than live: a key
     that was revoked should not start accepting traffic again the moment
     somebody un-files it -- enabling is a second, deliberate click."""
-    if not db_update(
+    archived = db_query(
+        "SELECT archived_at FROM api_keys WHERE id=? AND archived_at IS NOT NULL",
+        (key_id,))
+    if not archived or not db_update(
         "UPDATE api_keys SET archived_at=NULL "
         "WHERE id=? AND archived_at IS NOT NULL",
         (key_id,),
     ):
         raise HTTPException(404, "no such archived key")
-    db_update("UPDATE agents SET archived_at=NULL WHERE key_id=?", (key_id,))
-    db_update("UPDATE teams SET archived_at=NULL WHERE key_id=?", (key_id,))
+    # Only the profile and team this key's own archive took down (they carry
+    # the key's stamp). One removed on the Agents or Teams tab first has
+    # another, and stays removed: restoring a key brings back what it had, not
+    # what had been taken away before -- a key that served plain chat must not
+    # wake up with sub-agents, nor a key whose profile was retired for workers
+    # with that profile beside them.
+    for table in ("agents", "teams"):
+        db_update("UPDATE " + table + " SET archived_at=NULL "
+                  "WHERE key_id=? AND archived_at=?",
+                  (key_id, archived[0]["archived_at"]))
     return {"restored": key_id, "disabled": True}
 
 
@@ -18042,6 +19142,8 @@ async def api_agents_put(
         now(),
         key_id,
     )
+    if row[0]:   # a profile saved switched off is applied to nothing
+        _check_no_form_workers(key_id)
     if db_query("SELECT id FROM agents WHERE key_id=?", (key_id,)):
         # archived_at cleared: saving a profile is the clearest statement that
         # you want it in force, so it comes back out of the archive.
@@ -18114,6 +19216,7 @@ async def api_agents_restore(
     ):
         raise HTTPException(409, "restore the key first -- a profile without a "
                                  "live key enforces nothing")
+    _check_no_form_workers(key_id)
     if not db_update(
         "UPDATE agents SET archived_at=NULL WHERE key_id=? "
         "AND archived_at IS NOT NULL",
@@ -18140,12 +19243,16 @@ async def api_agents_purge(
 # ---- teams (admin) ----
 
 
-def _team_row(p: dict) -> tuple:
+def _team_row(p: dict, keys_form: bool = False) -> tuple:
     worker_models = p.get("worker_models") or []
     if not isinstance(worker_models, list):
         raise HTTPException(400, "worker_models must be a list")
+    # Blank means the client's own model leads (team_orchestrate falls back to
+    # the request's model), which only a team made from the API-keys form is
+    # meant to do. Anywhere else -- a Fleet Pass team included -- it would let
+    # the key's holder pick any fleet model.
     primary = str(p.get("primary_model", "")).strip()
-    if not primary:
+    if not primary and not keys_form:
         raise HTTPException(400, "a team needs a primary model")
     return (
         int(bool(p.get("enabled", True))),
@@ -18204,7 +19311,10 @@ async def api_teams_put(
         "SELECT id FROM api_keys WHERE id=? AND archived_at IS NULL", (key_id,)
     ):
         raise HTTPException(404, "no such live key")
-    row = _team_row(await request.json())
+    keys_form = bool(_form_class(key_id))
+    row = _team_row(await request.json(), keys_form)
+    if keys_form and row[0]:
+        _check_no_live_agent(key_id)   # saving it enabled is arming it
     if db_query("SELECT id FROM teams WHERE key_id=?", (key_id,)):
         db_exec(
             "UPDATE teams SET enabled=?,name=?,primary_model=?,"
@@ -18243,6 +19353,10 @@ async def api_teams_restore(
     ):
         raise HTTPException(409, "restore the key first -- a team without a "
                                  "live key can never be called")
+    form = db_query("SELECT enabled FROM teams WHERE key_id=? AND worker_class!=''",
+                    (key_id,))
+    if form and form[0]["enabled"]:
+        _check_no_live_agent(key_id)   # restoring it is arming it
     if not db_update(
         "UPDATE teams SET archived_at=NULL WHERE key_id=? "
         "AND archived_at IS NOT NULL",
@@ -18525,7 +19639,7 @@ def _tail_file(path: Path, lines: int, block: int = 65536) -> str:
 async def api_logs(
     unit: str = "llama-swap", lines: int = 300, admin: dict = Depends(require_admin)
 ) -> str:
-    if unit not in ("llama-swap", "llm-gateway", "cloudflared", "tailscaled"):
+    if unit not in ("llama-swap", "llm-gateway", "cloudflared", "tailscaled", *VOICE_UNITS):
         raise HTTPException(400, "unit not managed here")
     lines = max(10, min(lines, 2000))
     if platform.system() == "Windows":
@@ -19535,17 +20649,310 @@ async def api_roles(admin: dict = Depends(require_admin)) -> dict:
     cands = _routes_cache.get("cands", {})
     alias = _routes_cache.get("alias", {})
     out: dict[str, dict] = {}
-    for role, ladder in FLEET_ROLES.items():
+    for role, ladder in fleet_roles().items():
         pairs = role_pairs(role)
         ranked = await _score_host_model_pairs(pairs, fleet_role=role)
         out[role] = {
             "ladder": list(ladder),
+            # Empty means every box that holds a member. Additive: the hub
+            # scripts that read this endpoint only look at `order`.
+            "nodes": sorted(role_nodes(role) or ()),
             "picks": {(h or HOST_NAME): m for h, m in pairs},
             "order": [{"host": h or HOST_NAME, "model": m} for h, m in ranked],
             "local_rows": {(h or HOST_NAME): (alias.get((h, role)) or "?")
                            for h in cands.get(role, [])},
         }
     return {"roles": out}
+
+
+def _class_holders() -> dict[str, list[dict]]:
+    """canonical model id -> the boxes that hold it, for the Routing tab.
+
+    Read from the routing table as it stands, never from a fresh sweep: this
+    feeds an editor, and an editor that waits on a sleeping peer's connect
+    timeout is not one. Boxes that are asleep right now, or up but holding
+    back everything they have, come from the remembered context ceilings
+    (known_model_ctx) and are marked offline, so a class can still be pinned
+    to a box that is not serving at the moment. Names
+    are canonicalised the way role_pairs() does, and a class word a peer
+    serves is skipped: it is a policy, not a model anyone holds."""
+    cands = _routes_cache.get("cands", {})
+    alias = _routes_cache.get("alias", {})
+    meta = _routes_cache.get("meta", {})
+    running = _routes_cache.get("running", {})
+    reachable = _routes_cache.get("reachable", set())
+    roles = fleet_roles()
+    reserve = {}
+    held: dict[str, dict[str, dict]] = {}   # canonical id -> host -> row
+
+    def row(hname: str, name: str, fit: str, resident: bool, online: bool) -> dict:
+        if hname not in reserve:
+            reserve[hname] = host_reserved(hname)
+        return {"host": hname, "name": name, "fit": fit, "resident": resident,
+                "online": online, "reserve": reserve[hname]}
+
+    for name, hosts in cands.items():
+        for h in hosts:
+            canon = alias.get((h, name)) or name
+            canon = SPELLING_TO_CANONICAL.get(canon, canon)
+            if canon in roles:
+                continue
+            hname = h or HOST_NAME
+            resident = name in running.get(hname, set())
+            cur = held.setdefault(canon, {}).get(hname)
+            # Two names for one model on one box: show the one that is loaded.
+            if cur is None or (resident and not cur["resident"]):
+                held[canon][hname] = row(
+                    hname, name, str((meta.get((h, name)) or {}).get("fit") or ""),
+                    resident, hname == HOST_NAME or hname in reachable)
+    # A box that answered the last sweep but listed nothing at all is one the
+    # availability gate is holding back (its owner is at the keyboard): up, and
+    # still the owner of everything it remembers, so it is no more "gone" than
+    # a sleeping one.
+    advertising = {h or HOST_NAME for hosts in cands.values() for h in hosts}
+    # A name some box answers to for a DIFFERENT model is that box's own alias
+    # (`house-pick`), not a model. The ctx table keeps the alias beside the id,
+    # and the id row is the one that counts.
+    foreign = {n for (_, n), c in alias.items() if c != n}
+    for model, by_host in known_model_ctx().items():
+        canon = SPELLING_TO_CANONICAL.get(model)
+        if canon is None:
+            if model in foreign:
+                continue
+            canon = model
+        if canon in roles:
+            continue
+        for hname in by_host:
+            # A box that answered the last sweep and lists models, just not
+            # this one, no longer has it; only a silent box's memory is still
+            # good.
+            if hname != HOST_NAME and (hname not in reachable
+                                       or hname not in advertising):
+                held.setdefault(canon, {}).setdefault(
+                    hname, row(hname, model, "", False, False))
+    return {canon: [by_host[h] for h in sorted(by_host)]
+            for canon, by_host in sorted(held.items())}
+
+
+def _routing_classes_state() -> dict:
+    """What the Routing tab renders. Synchronous on purpose: callers await
+    model_routes() first, so this reads the table they just looked at."""
+    roles = fleet_roles()
+    holders = _class_holders()
+    reachable = _routes_cache.get("reachable", set())
+    classes = []
+    for name in [*FLEET_ROLES, *sorted(n for n in roles if n not in FLEET_ROLES)]:
+        nodes = sorted(role_nodes(name) or ())
+        classes.append({
+            "name": name,
+            "models": list(roles[name]),
+            "nodes": nodes,
+            "builtin": name in FLEET_ROLES,
+            # Edited means it differs from what ships, not that a row exists.
+            "overridden": name in FLEET_ROLES and bool(
+                nodes or roles[name] != FLEET_ROLES[name]),
+            "default_models": list(FLEET_ROLES.get(name, ())),
+        })
+    names = {p["name"] for p in load_peers()} | {HOST_NAME}
+    return {
+        "classes": classes,
+        "holders": holders,
+        "models": sorted(set(holders) | {m for ladder in roles.values()
+                                         for m in ladder}),
+        "nodes": [{"name": n, "online": n == HOST_NAME or n in reachable,
+                   "self": n == HOST_NAME} for n in sorted(names)],
+    }
+
+
+def _class_name_clash(name: str) -> str:
+    """What a NEW class name would shadow, or "". resolve_targets() answers a
+    catalogue row before a class and a class before a plain model name, so a
+    class named like any of these would quietly take its traffic over."""
+    cat = public_catalogue()
+    # Not only what answers right now: a box that is asleep, held back by its
+    # availability gate, or running without the model at this moment gives the
+    # name back to its model the instant it returns, and the class would take
+    # that model's traffic over from then on.
+    checks = (
+        (cat["by_public"], "a public catalogue id"),
+        (cat["by_fleet"], "a fleet id the public catalogue claims"),
+        ({*_routes_cache.get("cands", {}), *_routes_cache.get("alias", {}).values()},
+         "a model name or alias a box serves"),
+        (known_model_ctx(), "a model a box served before it went quiet"),
+        ({str(n).strip() for rec in load_models()
+          for n in (rec.get("id", ""), *(rec.get("aliases") or []))},
+         "an id or alias in this box's models.json"),
+        ({*FLEET_MODEL_NAMES, *SPELLING_TO_CANONICAL},
+         "a fleet model id or an old spelling of one"),
+        ({m for ladder in fleet_roles().values() for m in ladder},
+         "a model on a class ladder"),
+        # A key's list may hold a word that names nothing yet; as a class it
+        # would give that key the whole ladder, which nobody chose for it. An
+        # archived key counts: restoring it brings its list back as it was.
+        ({m for k in db_query("SELECT allowed_models FROM api_keys")
+          for m in _stored_models(k["allowed_models"]) or ()},
+         "a word on a key's model list (an archived key's included)"),
+    )
+    return next((why for names, why in checks if name in names), "")
+
+
+def _validated_class(name: str, entry: Any, stored: Any, known: set[str]) -> dict:
+    """One entry of the routing-classes PUT, checked and normalised, or a 400
+    that names the class. A field left out keeps what is stored for it, so a
+    caller can change a class's nodes without restating its models."""
+    # fullmatch, because SAFE_ID's `$` also accepts a trailing newline, and a
+    # name of only dots, which a URL normaliser turns into a path step: the
+    # DELETE route could never address such a class again.
+    if len(name) > 48 or not SAFE_ID.fullmatch(name) or not name.strip("."):
+        raise HTTPException(
+            400, f"bad class name {name[:60]!r}: use 1-48 characters from "
+                 "letters, digits and . _ : - (not only dots)")
+    if not isinstance(entry, dict):
+        raise HTTPException(400, f"class {name!r}: expected {{models, nodes}}")
+    if name not in fleet_roles() and (clash := _class_name_clash(name)):
+        raise HTTPException(
+            400, f"class {name!r} is already {clash}; a class by that name "
+                 "would shadow it")
+    cur = stored if isinstance(stored, dict) else {}
+    models = entry["models"] if "models" in entry else cur.get("models", [])
+    if not isinstance(models, list) or not all(
+            isinstance(m, str) and SAFE_ID.fullmatch(m) for m in models):
+        raise HTTPException(
+            400, f"class {name!r}: models must be a list of model ids")
+    # A ladder is matched against canonical ids (role_pairs, role_index), so an
+    # old spelling is stored as the id it stands for: kept as written it would
+    # be accepted here and never match a box.
+    models = list(dict.fromkeys(SPELLING_TO_CANONICAL.get(m, m) for m in models))
+    if len(models) > 64:
+        raise HTTPException(400, f"class {name!r}: at most 64 models")
+    # A built-in with an empty list keeps its shipped ladder; a class of the
+    # operator's own has nothing else to fall back to.
+    if not models and name not in FLEET_ROLES:
+        raise HTTPException(400, f"class {name!r}: needs at least one model")
+    nodes = entry["nodes"] if "nodes" in entry else cur.get("nodes", [])
+    if not isinstance(nodes, list) or not all(
+            isinstance(n, str) and SAFE_PEER.match(n) for n in nodes):
+        raise HTTPException(
+            400, f"class {name!r}: nodes must be a list of host names")
+    # Against the configured peers, not the ones answering now: a box that is
+    # asleep has to stay selectable.
+    for n in nodes:
+        if n.lower() not in known:
+            raise HTTPException(400, f"class {name!r}: unknown node: {n}")
+    return {"models": models, "nodes": clean_host_list(nodes)}
+
+
+@app.get("/admin/api/routing-classes")
+async def api_routing_classes(admin: dict = Depends(require_admin)) -> dict:
+    """The Routing tab's data: every class (shipped and the operator's), who
+    holds each model, and the nodes a class may be limited to."""
+    await model_routes()
+    return _routing_classes_state()
+
+
+@app.put("/admin/api/routing-classes")
+async def api_routing_classes_put(request: Request,
+                                  admin: dict = Depends(require_admin)) -> dict:
+    """Save classes: {classes: {name: {models: [...], nodes: [...]}}}. A bulk
+    upsert -- classes not named stay as they are -- and all-or-nothing: every
+    entry is checked before the one write. A built-in left with no models and
+    no nodes is the shipped class again, so it is dropped from the row."""
+    try:
+        payload = await request.json()
+    except ValueError:   # not JSON, or not UTF-8
+        raise HTTPException(
+            400, "body must be JSON: {classes: {name: {models: [...], nodes: [...]}}}")
+    incoming = payload.get("classes") if isinstance(payload, dict) else None
+    if not isinstance(incoming, dict) or not incoming:
+        raise HTTPException(
+            400, "expected {classes: {name: {models: [...], nodes: [...]}}}")
+    # Waited on BEFORE the stored row is read: the read-modify-write below has
+    # no await in it, so two saves cannot interleave and lose one.
+    await model_routes()
+    known = {p["name"].lower() for p in load_peers()} | {HOST_NAME.lower()}
+    stored = dict(get_role_config().get("classes") or {})
+    clean = {name: _validated_class(name, entry, stored.get(name), known)
+             for name, entry in incoming.items()}
+    before = {name: _class_view(name) for name in clean}
+    for name, c in clean.items():
+        if c["models"] or c["nodes"]:
+            stored[name] = c
+        else:
+            stored.pop(name, None)
+    set_role_config({"classes": stored})
+    _log_class_changes(admin, before)
+    return {**_routing_classes_state(), "warnings": _stranded_workers(set(clean))}
+
+
+def _class_view(name: str) -> tuple[list[str], list[str]]:
+    """(models, nodes) a class routes with right now; empty if there is none."""
+    return list(fleet_roles().get(name, ())), sorted(role_nodes(name) or ())
+
+
+def _log_class_changes(admin: dict, before: dict[str, tuple]) -> None:
+    """One line per class just edited: who, and what it routed with before and
+    after. Editing a class changes what keys limited to it may use, so the
+    change must be traceable. The identity is the admin's email (or the label
+    of the token), never a credential."""
+    for name, (models, nodes) in before.items():
+        new_models, new_nodes = _class_view(name)
+        log.info("routing class %r changed by %s: models %s -> %s, nodes %s -> %s",
+                 name, _admin_email(admin), models, new_models, nodes, new_nodes)
+
+
+def _stranded_workers(classes: set[str]) -> list[str]:
+    """One line per live key whose workers are capped at 0 on one of `classes`
+    although the class now leaves this node out: all they spawn is refused.
+    Said to the admin who just saved it, not refused -- they may mean it."""
+    return [
+        f"key {t['name']!r} (#{t['id']}): its workers are capped at 0 (this node "
+        f"only), but class {t['worker_class']!r} is now limited to "
+        f"{', '.join(sorted(only))}, so every task they spawn will be refused"
+        for t in db_query(
+            "SELECT k.id, k.name, t.worker_class FROM teams t "
+            "JOIN api_keys k ON k.id=t.key_id WHERE t.enabled=1 "
+            "AND t.archived_at IS NULL AND k.archived_at IS NULL "
+            "AND t.max_worker_nodes=0 AND t.worker_class!=''")
+        if t["worker_class"] in classes
+        and (only := _class_without_this_node(t["worker_class"]))]
+
+
+def _class_users(name: str) -> list[str]:
+    """The keys that lean on the class word `name`: workers that run as it (an
+    enabled team row) or a model list that names it. Archived ones count, until
+    the key is deleted for good: a restore brings its list and its crew back as
+    they were, and the word must still be the class they were set up with, not
+    a name any box may answer with whatever model it likes."""
+    crews = {t["key_id"] for t in db_query(
+        "SELECT key_id FROM teams WHERE worker_class=? AND enabled=1", (name,))}
+    return ["%s (#%d%s)" % (k["name"], k["id"], ", archived" if k["archived_at"] else "")
+            for k in db_query("SELECT id,name,allowed_models,archived_at FROM api_keys")
+            if k["id"] in crews or name in (_stored_models(k["allowed_models"]) or [])]
+
+
+@app.delete("/admin/api/routing-classes/{name}")
+async def api_routing_classes_delete(
+        name: str, admin: dict = Depends(require_admin)) -> dict:
+    """Remove a class of the operator's own, or reset a built-in to what
+    ships. A built-in survives a reset, so keys may go on using it; a class of
+    the operator's own that a key still leans on is a 409 naming the keys,
+    since its word would stay on their lists and as their workers' class with
+    nothing behind it (see _exempt_worker)."""
+    if name not in fleet_roles():
+        raise HTTPException(404, "unknown class: " + name[:64])
+    if name not in FLEET_ROLES and (users := _class_users(name)):
+        raise HTTPException(
+            409, f"class {name!r} is still used by key(s) {', '.join(users[:8])}"
+                 + (f" and {len(users) - 8} more" if len(users) > 8 else "")
+                 + " -- take it off their model lists and workers first (an "
+                   "archived key: restore it to edit it, or delete it for good)")
+    await model_routes()
+    stored = dict(get_role_config().get("classes") or {})
+    before = {name: _class_view(name)}
+    stored.pop(name, None)
+    set_role_config({"classes": stored})
+    _log_class_changes(admin, before)
+    return _routing_classes_state()
 
 
 @app.get("/admin/api/peers")

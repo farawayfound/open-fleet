@@ -189,6 +189,16 @@ class TestSandboxRefusesSystemWork:
         assert ctx.run(["definitely-not-a-real-command"], system=True) is None
         assert any("sandbox" in a for a in ctx.actions)
 
+    def test_sudo_accepts_an_explicit_system_flag(self, linux_facts, empty_repo,
+                                                  tmp_path):
+        # The packages step calls ctx.sudo(cmd, system=True); sudo used to
+        # pass system=True itself as well, a TypeError on every Linux install.
+        for root in (True, False):
+            linux_facts["privilege"] = {"root": root, "sudo_nopasswd": True}
+            ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+            assert ctx.sudo(["dnf", "install", "-y", "x"], system=True) is None
+            assert any("dnf install" in a for a in ctx.actions)
+
     def test_root_ok_is_false_under_a_sandbox_however_privileged(
             self, linux_facts, empty_repo, tmp_path):
         linux_facts["privilege"] = {"root": True, "sudo_nopasswd": True}

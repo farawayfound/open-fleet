@@ -73,6 +73,11 @@ def _fresh_public_state(client):
     # scorer assertion after it. Same for the one-slot manual-load state.
     gw.db_exec("DELETE FROM settings WHERE key=?", (gw.FLEET_ROUTING_KEY,))
     gw._specs_cache.update(stamp=None, specs=None, gen=-1)
+    # The Routing tab's classes feed role_index() on every scorer call, so a
+    # class (or a node list that hides every box) one test saved must not
+    # outlive it; the cache is rebuilt from the now-empty row on first use.
+    gw.db_exec("DELETE FROM settings WHERE key=?", (gw.ROLES_KEY,))
+    gw._roles_cache.update(gen=-1, roles={}, nodes={})
     gw._manual_load.clear()
     # "Not in use" is remembered across restarts on purpose. Left behind by
     # one test it would silently switch off the warm-up and sync loops that

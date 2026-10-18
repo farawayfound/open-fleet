@@ -127,6 +127,30 @@
   .stack{display:flex;flex-direction:column;gap:5px}
   label.f{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
   .field{display:flex;flex-direction:column;gap:3px;min-width:100px}
+  /* ---- model checklist: a dropdown of checkboxes (mselHtml) ----
+     The panel floats over the card under it, so it needs a z-index above the
+     cards and its own scroll once the fleet lists more models than fit. */
+  .msel{position:relative;min-width:170px}
+  .msel>summary{list-style:none;cursor:pointer;background:var(--bg);
+                border:1px solid var(--line);border-radius:6px;padding:6px 9px;
+                font-size:13px;white-space:nowrap}
+  .msel>summary::-webkit-details-marker{display:none}
+  .msel>summary::after{content:"\25BE";float:right;margin-left:12px;color:var(--muted)}
+  .msel[open]>summary{border-color:var(--accent)}
+  .mselp{position:absolute;z-index:30;left:0;top:calc(100% + 4px);min-width:270px;
+         max-height:300px;overflow:auto;background:var(--panel2);
+         border:1px solid var(--line);border-radius:8px;padding:9px 11px;
+         box-shadow:0 12px 34px #000a;text-align:left}
+  /* Inside a table (the edit row) the panel stays in the row's flow instead of
+     floating: the Existing-keys card scrolls sideways (overflow-x:auto), which
+     would clip a floating panel to the card and give it a scrollbar of its
+     own. The row simply grows while the checklist is open. */
+  table .mselp{position:static;margin-top:4px;box-shadow:none}
+  .mselp label{display:flex;gap:6px;align-items:center;font-size:13px;padding:2px 0;cursor:pointer}
+  .mselp label[hidden]{display:none}
+  .mselp input[type=checkbox],.mselp input[type=radio]{width:auto}
+  .mselp .mselg{display:block;margin:9px 0 3px;font-size:11px;color:var(--muted);
+                text-transform:uppercase;letter-spacing:.05em}
   /* ---- home page ---- */
   header h1{cursor:pointer;user-select:none}
   .pool{display:flex;flex-direction:column;align-items:center;gap:8px}
@@ -159,6 +183,36 @@
   .cfgrow .num{font-family:var(--mono);color:var(--muted);min-width:22px}
   .cfgrow .cname{font-family:var(--mono);font-weight:600;font-size:14px}
   .cfgrow .grow{flex:1}
+  /* ---- Routing: the class editor ----
+     rt- throughout: another editor on this page grows its own checklist
+     component, and the two must not meet in one stylesheet. */
+  #rt-tab tr[data-name]{cursor:pointer}
+  #rt-tab tr[data-name]:hover td{background:var(--panel2)}
+  .rt-open{background:none;border:0;padding:0;color:var(--fg);font-weight:700;
+           font-size:inherit;cursor:pointer}
+  .rt-open:focus-visible,.rt-row button:focus-visible,.rt-node input:focus-visible,
+  .rt-pick input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .rt-list{display:flex;flex-direction:column;gap:6px;margin-top:5px}
+  .rt-row{display:flex;align-items:center;gap:10px;padding:6px 10px;
+          border:1px solid var(--line);border-radius:8px;background:var(--panel2)}
+  .rt-row .rt-n{font-family:var(--mono);color:var(--muted);min-width:22px}
+  .rt-row .rt-id{font-family:var(--mono);flex:1;word-break:break-all}
+  .rt-dd summary{display:inline-block;cursor:pointer;list-style:none;
+                 background:var(--panel2);border:1px solid var(--line);
+                 padding:5px 11px;border-radius:6px;font-size:12px}
+  .rt-dd summary::-webkit-details-marker{display:none}
+  .rt-dd summary:hover,.rt-dd[open] summary{border-color:var(--accent);color:var(--accent)}
+  .rt-ddbody{margin-top:6px;padding:8px 10px;border:1px solid var(--line);
+             border-radius:8px;background:var(--panel2)}
+  .rt-pickbox{margin-top:6px;max-height:240px;overflow:auto}
+  .rt-pick,.rt-node{display:flex;align-items:center;gap:8px;padding:4px 2px;
+                    font-family:var(--mono);font-size:13px;cursor:pointer}
+  .rt-node{padding:6px 10px;border:1px solid var(--line);border-radius:8px;
+           background:var(--panel2)}
+  .rt-node input,.rt-pick input{width:auto}
+  .rt-dot{display:inline-block;width:8px;height:8px;border-radius:99px;
+          flex:none;background:var(--bad)}
+  .rt-dot.on{background:var(--good)}
   .machine .mname{font-size:15px;font-weight:600;font-family:var(--mono)}
   .machine .mrow{display:flex;justify-content:space-between;font-size:12px;
                  color:var(--muted);margin-top:4px;gap:8px}
@@ -216,6 +270,7 @@
        same split the pills already imply -- fleet things are nobody's tab. -->
   <nav id="fleetnav">
     <button data-t="home" class="on">Home</button>
+    <button data-t="routing">Routing</button>
     <button data-t="fleetjobs">Jobs</button>
     <button data-t="teams">Teams</button>
     <button data-t="config">Configurations</button>
@@ -398,6 +453,50 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
   </div>
 </section>
 
+<!-- ================= ROUTING (fleet) ================= -->
+<section id="routing">
+  <div class="card" style="overflow-x:auto">
+    <h3>Routing classes</h3>
+    <p class="hint">Applies to everything this hub routes. A class is an ordered
+      list of models, best first; a request for the class goes to the best
+      member each eligible node holds. Leave nodes unchecked to use every node
+      that holds a member.</p>
+    <div class="tbar">
+      <button class="act primary" onclick="rtNew()">+ New class</button>
+      <span class="muted" id="rt-meta" style="font-size:12px"></span>
+    </div>
+    <table id="rt-tab"><tbody></tbody></table>
+  </div>
+  <div class="spacer"></div>
+  <div class="card" id="rt-editor" style="display:none">
+    <h3 id="rt-title">Class</h3>
+    <div class="field" style="max-width:320px"><label class="f">class name</label>
+      <input id="rt-name" placeholder="e.g. reviewers" autocomplete="off"></div>
+    <div class="spacer"></div>
+    <div class="field"><label class="f">members (best first)</label>
+      <div class="rt-list" id="rt-members"></div></div>
+    <div class="spacer"></div>
+    <div class="field"><label class="f">add models</label>
+      <details class="rt-dd">
+        <summary>choose models…</summary>
+        <div class="rt-ddbody">
+          <input id="rt-filter" placeholder="filter…" aria-label="filter models" autocomplete="off" oninput="rtPicker()">
+          <div class="rt-pickbox" id="rt-pick"></div>
+        </div>
+      </details></div>
+    <div class="spacer"></div>
+    <div class="field"><label class="f">nodes (none checked = every holder)</label>
+      <div class="rt-list" id="rt-nodes"></div></div>
+    <div class="spacer"></div>
+    <div class="row">
+      <button class="act primary" onclick="rtSave()">Save</button>
+      <button class="act" id="rt-reset" onclick="rtDelete(true)">Reset to default</button>
+      <button class="act danger" id="rt-del" onclick="rtDelete(false)">Delete</button>
+      <button class="act" onclick="rtClose()">Cancel</button>
+    </div>
+  </div>
+</section>
+
 <!-- ================= CONFIGURATIONS (fleet) ================= -->
 <section id="config">
   <div class="grid g2">
@@ -466,7 +565,8 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
   </div>
   <div class="spacer"></div>
   <div class="grid g2">
-    <div class="card"><h3>Services</h3><table id="svc"><tbody></tbody></table></div>
+    <div class="card"><h3>Services</h3><table id="svc"><tbody></tbody></table>
+      <div id="voicebox"></div></div>
     <div class="card"><h3>Loaded models</h3>
       <table id="running"><tbody></tbody></table>
       <div class="spacer"></div>
@@ -754,11 +854,21 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
         <input class="s" id="keytpd" type="number" placeholder="∞"></div>
       <div class="field"><label class="f">tokens total</label>
         <input class="s" id="keytt" type="number" placeholder="∞"></div>
+      <div class="field"><label class="f">models</label>
+        <div id="keymodels"><span class="muted" style="font-size:12px">loading…</span></div></div>
+      <div class="field"><label class="f">max parallel workers</label>
+        <select id="keyworkers" onchange="workersChanged('keyworkers','keyclass')"><option value="">off</option></select>
+        <div class="muted" id="keyworkersnote" style="font-size:12px"></div></div>
+      <div class="field"><label class="f">worker class</label>
+        <select id="keyclass" disabled><option value="fast">fast</option></select></div>
       <button class="act primary" onclick="newKey()" style="align-self:flex-end">Mint key</button>
     </div>
     <div class="hint">Every limit is optional — leave blank for no expiration and no budget.
       Daily budgets are rolling 24-hour windows. A key that hits a budget gets
-      HTTP 429 until the window moves on.</div>
+      HTTP 429 until the window moves on. Models: leave on <i>all models</i>, or pick the
+      ones this key may call (enforced on this node). Max parallel workers: leave <i>off</i>
+      for an ordinary key, or let the model behind it hand work to sub-agents on up to that
+      many other nodes (chat completions then run non-streaming).</div>
     <div id="newkey"></div>
   </div>
   <div class="spacer"></div>
@@ -939,6 +1049,7 @@ POST /v1/batches/&lt;id&gt;/cancel</pre>
       <select id="logunit" data-help="log unit" style="width:auto" onchange="loadLogs()">
         <option>llama-swap</option><option>llm-gateway</option>
         <option>cloudflared</option><option>tailscaled</option>
+        <option>llm-voice</option><option>gpu-laptop-1-voice-guard</option>
       </select>
       <button class="act" onclick="loadLogs()">Refresh</button>
       <label class="row" data-help="log auto" style="gap:5px"><input type="checkbox"
@@ -1186,12 +1297,12 @@ const archLabel = on => on ? "Show live" : "Show archived";
 // as a whole (Home, Jobs, Teams); a host pill and the node nav belong to one
 // machine. MODE says which level is showing, and the pills only light up when
 // a machine is actually the subject.
-const FLEET_TABS = new Set(["home", "fleetjobs", "teams", "config"]);
+const FLEET_TABS = new Set(["home", "routing", "fleetjobs", "teams", "config"]);
 let MODE = "fleet";
-const LOADERS = {home: loadHome, fleetjobs: loadFleetJobs, teams: loadTeams,
-  config: loadConfig,
+const LOADERS = {home: loadHome, routing: loadRouting, fleetjobs: loadFleetJobs,
+  teams: loadTeams, config: loadConfig,
   overview: loadStatus, models: loadModels,
-  optimize: loadOptimize, library: loadLibrary, keys: loadKeys, agents: loadAgents,
+  optimize: loadOptimize, library: loadLibrary, keys: () => loadKeys(true), agents: loadAgents,
   usage: loadUsage, logs: loadLogs};
 function tabLoad(t) { (LOADERS[t] || (() => {}))(); }
 // switchSection is showTab minus the data load: addQuantModel needs to land on
@@ -1793,6 +1904,233 @@ async function cfgSetReserve(name, flag) {
   await saveConfig();
 }
 
+// ---- Routing: classes, their members, and the nodes allowed to play them ----
+// A class (`fast`, `deep`, or one the operator adds) is an ordered list of
+// models, best first; a request for it goes to the best member each eligible
+// node holds. It is the hub's own setting, so rawApi like Configurations, and
+// an editor rather than a monitor, so nothing here polls: the tab loads when
+// it opens and again after each save. RT is the class being edited -- a draft
+// until Save.
+let RTDATA = null;   // GET /routing-classes: {classes, holders, models, nodes}
+let RT = null;       // {name, isNew, builtin, overridden, deflt, models, nodes}
+
+// The hub stores node names lower-cased; show the name the fleet knows it by.
+const rtKey = n => String(n).toLowerCase();
+const rtNodeName = n => (((RTDATA || {}).nodes) || []).map(x => x.name)
+  .find(x => rtKey(x) === rtKey(n)) || n;
+const rtHolders = id => {
+  const h = (RTDATA || {}).holders || {};
+  return Object.prototype.hasOwnProperty.call(h, id) ? h[id] : [];
+};
+
+async function loadRouting() {
+  try { RTDATA = await rawApi("/routing-classes"); }
+  catch (e) {
+    $("#rt-tab tbody").innerHTML =
+      `<tr><td class="muted">could not load: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  renderRouting();
+}
+
+function renderRouting() {
+  const cs = RTDATA.classes || [];
+  $("#rt-meta").textContent =
+    `${cs.length} classes · ${(RTDATA.models || []).length} models in the fleet`;
+  $("#rt-tab tbody").innerHTML = `<tr><th>class</th><th>members</th><th>nodes</th></tr>` +
+    cs.map(c => {
+      const more = c.models.length > 4
+        ? ` <span class="muted">+${c.models.length - 4} more</span>` : "";
+      // The row opens the editor with the mouse; the name is a real button so
+      // the keyboard can too. Its click bubbles to the row, so it needs no
+      // handler of its own.
+      return `<tr data-name="${esc(c.name)}" onclick="rtEdit(this.dataset.name)">
+        <td><button class="rt-open mono" aria-label="edit class ${esc(c.name)}">${esc(c.name)}</button>
+          <span class="pill dim">${c.builtin ? "built-in" : "custom"}</span>
+          ${c.overridden ? '<span class="pill mid">edited</span>' : ""}</td>
+        <td class="mono" style="font-size:12px">${c.models.slice(0, 4).map(m => esc(m)).join(", ")}${more}</td>
+        <td class="mono" style="font-size:12px">${c.nodes.length
+          ? c.nodes.map(n => esc(rtNodeName(n))).join(", ")
+          : '<span class="muted">every holder</span>'}</td></tr>`;
+    }).join("");
+  if (RT) rtRender();   // what the fleet holds may have moved under an open editor
+}
+
+function rtOpen(draft) {
+  RT = draft;
+  const name = $("#rt-name");
+  name.value = draft.name;
+  name.readOnly = !draft.isNew;    // a saved class cannot be renamed
+  $("#rt-filter").value = "";
+  $("#rt-editor").style.display = "";
+  rtRender();
+  $("#rt-editor").scrollIntoView({behavior: "smooth"});
+}
+function rtEdit(name) {
+  const c = ((RTDATA || {}).classes || []).find(x => x.name === name);
+  if (!c) return;
+  rtOpen({name: c.name, isNew: false, builtin: c.builtin, overridden: c.overridden,
+    deflt: c.default_models || [], models: c.models.slice(),
+    nodes: new Set(c.nodes.map(rtKey))});
+}
+function rtNew() {
+  rtOpen({name: "", isNew: true, builtin: false, overridden: false, deflt: [],
+    models: [], nodes: new Set()});
+}
+function rtClose() { RT = null; $("#rt-editor").style.display = "none"; }
+
+function rtRender() {
+  $("#rt-title").textContent = RT.isNew ? "New class" : "Class: " + RT.name;
+  $("#rt-reset").style.display = RT.builtin ? "" : "none";
+  $("#rt-reset").disabled = !RT.overridden;
+  $("#rt-del").style.display = RT.isNew || RT.builtin ? "none" : "";
+  rtMembers();
+  rtPicker();
+  rtNodes();
+}
+
+function rtMembers() {
+  const last = RT.models.length - 1;
+  $("#rt-members").innerHTML = RT.models.map((m, i) => {
+    const n = rtHolders(m).length;
+    return `<div class="rt-row"><span class="rt-n">${i + 1}</span>
+      <span class="rt-id">${esc(m)}</span>
+      <span class="pill ${n ? "dim" : "no"}">${n ? n + (n === 1 ? " node" : " nodes") : "no node"}</span>
+      <button class="act" data-f="up:${i}" aria-label="move ${esc(m)} up" onclick="rtMove(${i},-1)" ${i ? "" : "disabled"}>↑</button>
+      <button class="act" data-f="down:${i}" aria-label="move ${esc(m)} down" onclick="rtMove(${i},1)" ${i < last ? "" : "disabled"}>↓</button>
+      <button class="act danger" data-f="rm:${i}" aria-label="remove ${esc(m)}" onclick="rtDrop(${i})">remove</button></div>`;
+  }).join("") || `<div class="muted">no members yet — add models below</div>`;
+}
+
+// A redraw replaces the control the keyboard was on, which drops the focus to
+// the page. Each control carries data-f, and the caller hands the focus to the
+// twin it wants in the new markup (a disabled one cannot take it).
+function rtFocus(box, key) {
+  const el = [...document.querySelectorAll(box + " [data-f]")]
+    .find(e => e.dataset.f === key && !e.disabled);
+  if (el) el.focus();
+  return !!el;
+}
+// The moved row keeps the focus on the same arrow; at either end that arrow is
+// now disabled, so the other one takes it.
+function rtMove(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= RT.models.length) return;
+  [RT.models[i], RT.models[j]] = [RT.models[j], RT.models[i]];
+  rtRender();
+  rtFocus("#rt-members", (d < 0 ? "up:" : "down:") + j)
+    || rtFocus("#rt-members", (d < 0 ? "down:" : "up:") + j);
+}
+function rtDrop(i) {
+  RT.models.splice(i, 1);
+  rtRender();
+  rtFocus("#rt-members", "rm:" + Math.min(i, RT.models.length - 1));
+}
+
+// The dropdown checklist: every model the fleet knows that is not a member yet,
+// narrowed by the filter box. Only the list inside the <details> is redrawn, so
+// it stays open and the filter keeps its text while models are added one by one.
+function rtPicker() {
+  const q = ($("#rt-filter").value || "").trim().toLowerCase();
+  const rows = ((RTDATA || {}).models || [])
+    .filter(m => !RT.models.includes(m) && m.toLowerCase().includes(q));
+  $("#rt-pick").innerHTML = rows.map(m => `<label class="rt-pick">
+      <input type="checkbox" data-m="${esc(m)}" onchange="rtAdd(this.dataset.m)">
+      <span>${esc(m)}</span><span class="pill dim">${rtHolders(m).length}</span></label>`).join("")
+    || `<div class="muted">${q ? "no model matches" : "every known model is already a member"}</div>`;
+}
+function rtAdd(m) {
+  if (!RT.models.includes(m)) RT.models.push(m);
+  rtRender();
+  // The ticked row has left the checklist; the filter box above it is the one
+  // control that survives the redraw, and the next thing a keyboard wants.
+  $("#rt-filter").focus();
+}
+
+// The nodes a class can be limited to: every node holding a current member,
+// recomputed as members change. A node ticked or saved earlier that holds none
+// of them now still shows, so it can be unticked rather than saved invisibly.
+function rtNodes() {
+  const up = new Map(((RTDATA || {}).nodes || []).map(n => [rtKey(n.name), n.online]));
+  const held = new Map();   // lower-cased node -> {name, online, members}
+  for (const m of RT.models) for (const h of rtHolders(m)) {
+    const k = rtKey(h.host);
+    if (!held.has(k)) held.set(k, {name: h.host, online: h.online, members: []});
+    held.get(k).members.push(m);
+  }
+  for (const k of RT.nodes)
+    if (!held.has(k)) held.set(k, {name: rtNodeName(k), online: false, members: []});
+  $("#rt-nodes").innerHTML = [...held.entries()]
+    .sort((a, b) => a[1].name.localeCompare(b[1].name))
+    .map(([k, h]) => {
+      const on = up.has(k) ? up.get(k) : h.online;
+      return `<label class="rt-node">
+        <input type="checkbox" data-n="${esc(k)}" data-f="n:${esc(k)}" ${RT.nodes.has(k) ? "checked" : ""}
+          onchange="rtNode(this.dataset.n, this.checked)">
+        <span class="rt-dot${on ? " on" : ""}" role="img" aria-label="${on ? "online" : "offline"}"
+          title="${on ? "online" : "offline"}"></span>
+        <b>${esc(h.name)}</b>
+        <span class="muted" style="font-size:12px">${h.members.length
+          ? "holds " + h.members.map(m => esc(m)).join(", ")
+          : "holds none of the members"}</span></label>`;
+    }).join("") || `<div class="muted">no node holds any member yet</div>`;
+}
+function rtNode(k, on) {
+  on ? RT.nodes.add(k) : RT.nodes.delete(k);
+  rtNodes();
+  rtFocus("#rt-nodes", "n:" + k);   // gone when it was unticked and holds no member
+}
+
+async function rtSave() {
+  if (RT.busy) return;
+  const name = RT.isNew ? $("#rt-name").value.trim() : RT.name;
+  if (!name) return toast("give the class a name", true);
+  // The PUT is an upsert, so a draft that reuses a name would replace that
+  // class's members and nodes -- a built-in's included -- with one toast to say so.
+  if (RT.isNew && ((RTDATA || {}).classes || []).some(c => rtKey(c.name) === rtKey(name)))
+    return toast(`a class called ${name} already exists -- open it from the table`, true);
+  if (!RT.models.length) return toast("a class needs at least one member", true);
+  // A built-in left on its shipped ladder is saved as "no models", so it keeps
+  // following the ladder the gateway ships instead of freezing today's copy.
+  const shipped = RT.builtin && RT.models.join("\n") === RT.deflt.join("\n");
+  RT.busy = true;
+  try {
+    const saved = await rawApi("/routing-classes", {method: "PUT", body: {classes: {
+      [name]: {models: shipped ? [] : RT.models, nodes: [...RT.nodes]}}}});
+    toast(`routing class ${name} saved`);
+    // Saved all the same: these are keys whose workers the new node list leaves
+    // with nowhere to run.
+    for (const w of (saved && saved.warnings) || []) toast(w, true);
+    await loadRouting();
+    rtEdit(name);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (RT) RT.busy = false;
+  }
+}
+
+// DELETE does both jobs: a class of the operator's own is removed, a built-in's
+// saved models and nodes are cleared so it is the shipped class again.
+async function rtDelete(reset) {
+  if (RT.busy || RT.isNew) return;
+  const name = RT.name;
+  if (!reset && !confirm(`Delete the class ${name}? A request that names it stops resolving.`)) return;
+  RT.busy = true;
+  try {
+    await rawApi("/routing-classes/" + encodeURIComponent(name), {method: "DELETE"});
+    toast(reset ? `${name} reset to its shipped models, on every node`
+                : `routing class ${name} deleted`);
+    if (!reset) rtClose();
+    await loadRouting();
+    if (reset) rtEdit(name);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (RT) RT.busy = false;
+  }
+}
+
 function renderNetmap(hosts) {
   const W = 800, H = 460, cx = W / 2, cy = H / 2;
   const rx = 300, ry = 165;
@@ -1989,8 +2327,9 @@ async function loadStatus() {
     : "";
   $("#svc tbody").innerHTML = avRow + Object.entries(s.services || {}).map(([k, v]) =>
     `<tr><td>${esc(k)}</td><td style="text-align:right">
-      <span class="pill ${v === "active" ? "ok" : v === "not installed" ? "" : "no"}"
-        >${esc(v)}</span></td></tr>`).join("");
+      <span class="pill ${v === "active" ? "ok" : v === "paused" ? "mid"
+        : v === "not installed" ? "" : "no"}">${esc(v)}</span></td></tr>`).join("");
+  loadVoice(s.services);
   const run = s.models_running || [];
   // The context each resident model actually got. A model can be loaded and
   // still be the wrong shape for the job it is doing, and this is the number
@@ -2363,6 +2702,46 @@ async function svcAction(a, u) {
   catch (e) { toast(e.message, true); }
 }
 
+// The voice node (gpu-laptop-1's llm-voice): shown under Services on a box that
+// carries it, with Pause and Resume. A pause holds through reboots and
+// redeploys until Resume (see voice_report() in app.py).
+async function loadVoice(services) {
+  const box = $("#voicebox");
+  if (!services || !("llm-voice" in services)) { box.innerHTML = ""; return; }
+  let v;
+  try { v = await api("/voice"); } catch (e) { box.innerHTML = ""; return; }
+  const unit = (v.units || {})["llm-voice"] || "down";
+  const state = v.paused ? `<span class="pill mid">paused</span>`
+    : unit === "active" ? `<span class="pill ${v.ready ? "ok" : "mid"}">${v.ready ? "ready" : "loading"}</span>`
+    : `<span class="pill no">${esc(unit)}</span>`;
+  const note = v.paused
+    ? "paused" + (v.paused_since ? " since " + esc(v.paused_since) : "")
+      + (v.paused_by ? " by " + esc(v.paused_by) : "") + " — Athena replies in text meanwhile"
+    : v.loading_error ? esc(v.loading_error) : "speech-to-text and text-to-speech for Athena";
+  box.innerHTML = `<div class="spacer"></div>
+    <div class="row" style="justify-content:space-between">
+      <span>voice node${v.live_session ? ' <span class="pill arch">live call</span>' : ""}
+        <div class="muted" style="font-size:11px">${note}</div></span>
+      <span>${state}
+        <button class="act" onclick="voiceAction(${jsArg(v.paused ? "resume" : "pause")}, ${v.live_session ? "true" : "false"})"
+          >${v.paused ? "Resume" : "Pause"}</button></span>
+    </div>`;
+}
+async function voiceAction(a, live) {
+  let body = {};
+  if (a === "pause") {
+    const ask = live
+      ? "A live voice call is on, and pausing ends it. Pause the voice node anyway?"
+      : "Pause the voice node? It stays stopped, through reboots and redeploys, until you resume it.";
+    if (!confirm(ask)) return;
+    if (live) body = {force: true};
+  }
+  try { await api(`/voice/${a}`, {method: "POST", body});
+    toast(a === "pause" ? "voice node paused" : "voice node starting — models take a minute to load");
+    setTimeout(loadStatus, 1500); }
+  catch (e) { toast(e.message, true); }
+}
+
 // ---- peers (always operate on the hub, never proxied) ----
 let PEERS = [];
 async function loadPeersTable() {
@@ -2519,7 +2898,7 @@ async function loadTeams() {
         ? ' <span class="pill dim">fleet-pass</span>' : ""}</td>
       <td>${esc(t.key_name || "—")} <span class="mono muted" style="font-size:11px">${esc(t.prefix || "")}…</span>
         ${t.key_archived ? `<br><span class="pill arch">key archived too</span>` : ""}</td>
-      <td class="mono" style="font-size:12px">${esc(t.primary_model)}</td>
+      <td class="mono" style="font-size:12px">${t.primary_model ? esc(t.primary_model) : "<span class=\"muted\">client's model</span>"}</td>
       <td class="mono" style="font-size:12px">${esc(W(t).join(", ") || "—")}</td>
       <td class="num">${t.max_workers} × ${t.max_rounds} rounds</td>
       <td>${arch ? `<span class="pill arch">archived</span>`
@@ -2544,10 +2923,19 @@ function fillTeamEditor(t) {
   $("#tm_rounds").value = (t && t.max_rounds) || 6;
   $("#tm_sys").value = (t && t.system_prompt) || "";
   $("#tm_worker").value = (t && t.worker_prompt) || "";
-  $("#tm_primary").innerHTML = FLEETMODELS.map(m =>
+  // A blank primary is the client's own model, which only a team made from the
+  // API-keys form has: the gateway refuses it on any other team (a Fleet Pass
+  // one included), where it would let the key's holder pick any fleet model.
+  // For that team it is a choice here, or saving it would quietly pin it to the
+  // first model in the list.
+  $("#tm_primary").innerHTML = (FLEETMODELS.map(m =>
     `<option value="${esc(m)}" ${t && t.primary_model === m ? "selected" : ""}>${esc(m)}</option>`).join("")
+    + (t && t.worker_class
+      ? `<option value="" ${t.primary_model ? "" : "selected"}>client's model</option>` : ""))
     || `<option value="">no models served anywhere</option>`;
-  $("#tm_models").innerHTML = FLEETMODELS.map(m => `
+  // A roster entry that is not a served model (the routing class an API-keys
+  // form team uses) stays listed, or saving the editor would drop it.
+  $("#tm_models").innerHTML = [...new Set([...FLEETMODELS, ...workers])].map(m => `
     <label class="row" style="gap:4px;font-size:13px">
       <input type="checkbox" style="width:auto" data-tm-model="${esc(m)}"
         ${workers.includes(m) ? "checked" : ""}> ${esc(m)}</label>`).join("")
@@ -3804,7 +4192,9 @@ async function lmsToggle() {
 // ---- keys ----
 let KEYS = [], KEDIT = null;
 let KEYPAGE = {total: 0};
-async function loadKeys() {
+// `fresh` is set by entering the tab (a click, or picking another node), which
+// re-reads the model choices; a toggle or a page turn keeps what it has.
+async function loadKeys(fresh) {
   const seq = ++SEQ.keys;
   await settings();
   await publicKeyIds();
@@ -3822,6 +4212,159 @@ async function loadKeys() {
   const host = HOSTS.find(h => h.name === CUR);
   $("#apiurl").textContent = (host && host.api_url) || "ask the host's gateway.env (LLMSTACK_PUBLIC_API_URL)";
   renderKeys();
+  mountKeyModels(fresh);   // not awaited: the list is usable before the choices arrive
+}
+
+// ---- model checklist: a dropdown of checkboxes ----
+// A <details> reading "all models" or "N selected" that opens a panel: an
+// All/Only-these radio pair, a filter box, then the routing classes and the
+// models as checkboxes. The state lives in the DOM (data-msel-v on each
+// checkbox), is read back with mselValue(id), and is never rebuilt by a poll --
+// only by a tab load, a host switch, or the form being reset.
+// `opts` is {roles:[...], models:[...]} or null while the lists are loading;
+// `only` forces the "Only these" side (an unreadable stored list opens there,
+// with nothing ticked, so saving cannot quietly turn it into "all").
+function mselHtml(id, selected, opts, only) {
+  const sel = new Set(selected || []);
+  const roles = opts ? opts.roles : [];
+  // A listed id the option lists no longer carry (a model since removed, a
+  // class this node does not know) stays on the panel, or saving would drop it.
+  const known = new Set([...roles, ...(opts ? opts.models : [])]);
+  const models = [...new Set([...(opts ? opts.models : []),
+                              ...[...sel].filter(v => !known.has(v))])].sort();
+  const restricted = only || sel.size > 0;
+  const box = v => `<label data-q="${esc(v.toLowerCase())}"><input type="checkbox"
+      data-msel-v="${esc(v)}" ${sel.has(v) ? "checked" : ""} onchange="mselChanged(this)"> ${esc(v)}</label>`;
+  const group = (title, items) => items.length
+    ? `<span class="mselg">${title}</span>${items.map(box).join("")}` : "";
+  return `<details class="msel" id="${esc(id)}" data-help="models" aria-label="models">
+    <summary>${restricted ? sel.size + " selected" : "all models"}</summary>
+    <div class="mselp">
+      <label><input type="radio" name="${esc(id)}_mode" value="all" ${restricted ? "" : "checked"}
+        onchange="mselChanged(this)"> All models</label>
+      <label><input type="radio" name="${esc(id)}_mode" value="only" ${restricted ? "checked" : ""}
+        onchange="mselChanged(this)"> Only these</label>
+      <input class="mself" placeholder="filter…" aria-label="filter models"
+        oninput="mselFilter(this)" style="margin-top:6px">
+      ${group("Routing classes", roles)}${group("Models", models)}
+    </div></details>`;
+}
+function mselChanged(el) {
+  const d = el.closest(".msel");
+  if (el.type === "checkbox") d.querySelector('input[value="only"]').checked = true;
+  const only = d.querySelector('input[value="only"]').checked;
+  d.querySelector("summary").textContent = only
+    ? d.querySelectorAll("input[data-msel-v]:checked").length + " selected" : "all models";
+}
+function mselFilter(inp) {
+  const q = inp.value.trim().toLowerCase();
+  inp.closest(".msel").querySelectorAll("label[data-q]").forEach(l => {
+    l.hidden = !!q && !l.dataset.q.includes(q);
+  });
+}
+// [] for "All models"; otherwise the ticked ids. "Only these" with nothing
+// ticked would save as [] -- every model -- so it is refused instead of being
+// read as what it is not. So is a picker that is not on the page: its choices
+// are still loading, or the node was just switched. Reading that as [] would
+// mint an unrestricted key from a control nobody has seen yet.
+function mselValue(id) {
+  const d = $("#" + id);
+  if (!d) throw new Error("the model list is still loading -- try again in a moment");
+  if (!d.querySelector('input[value="only"]').checked) return [];
+  const v = Array.from(d.querySelectorAll("input[data-msel-v]:checked")).map(i => i.dataset.mselV);
+  if (!v.length) throw new Error("pick at least one model, or choose All models");
+  return v;
+}
+// The gateway echoes the list it stored. One that does not (an older build
+// ignores unknown fields and mints an unrestricted key) only passes when
+// nothing was asked for.
+function modelsEchoed(want, r) {
+  const got = r && Array.isArray(r.allowed_models) ? r.allowed_models : null;
+  return got ? got.length === want.length && want.every(v => got.includes(v))
+             : want.length === 0;
+}
+
+// The choices for this node: its own routing classes (/roles), the models
+// the fleet can answer for it (/routes, aliases left out) and how many other
+// nodes it knows (/peers), which bounds "max parallel workers". Fetched when
+// the tab is entered and kept until it is entered again -- /routes is heavy, so
+// a toggle or a page turn never polls it. `host` is passed in rather than read
+// from CUR after the await: the operator can pick another node while the reply
+// is in flight, and one node's choices must not be filed under another's name.
+let KEYMODELS = {}, KEYMODELS_FOR = null;
+async function keyModelOptions(host, fresh) {
+  if (fresh || !KEYMODELS[host]) {
+    const [ro, rt, rp] = await Promise.all([
+      hostApi(host, "/roles"), hostApi(host, "/routes"), hostApi(host, "/peers")]);
+    KEYMODELS[host] = {
+      roles: Object.keys((ro && ro.roles) || {}).sort(),
+      models: [...new Set(((rt && rt.models) || []).filter(m => !m.alias).map(m => m.model))].sort(),
+      // Anything but a list reads as no peers: the choices then stop at "this
+      // node only", which cannot promise more than the node can deliver.
+      peers: Array.isArray(rp) ? rp.length : 0};
+  }
+  return KEYMODELS[host];
+}
+
+// ---- max parallel workers: sub-agents on up to N other nodes ----
+// "" is off (a plain key), 0 is this node only, N is up to N other nodes. A key
+// with workers on is served through the team loop: its model gets a
+// spawn_subagents tool, and the workers run on `class` (a routing class).
+// Options for a node that knows `peers` other nodes; `cur` keeps a stored cap
+// the node can no longer offer (fewer peers than when it was saved) on the list.
+function workerNodeOptions(peers, cur) {
+  const top = Math.min(32, Math.max(peers, cur == null ? 0 : cur));
+  const opt = (v, t) => `<option value="${v}" ${String(cur ?? "") === String(v) ? "selected" : ""}>${t}</option>`;
+  let h = opt("", "off") + opt("0", "this node only");
+  for (let i = 1; i <= top; i++) h += opt(i, i === 1 ? "1 other node" : i + " other nodes");
+  return h;
+}
+function workerClassOptions(roles, cur) {
+  const want = cur || "fast";
+  return [...new Set([...roles, want])].map(r =>
+    `<option value="${esc(r)}" ${r === want ? "selected" : ""}>${esc(r)}</option>`).join("");
+}
+function workersChanged(nodesId, classId) {
+  $("#" + classId).disabled = !$("#" + nodesId).value;
+}
+// What the two selects say, in the shape the keys API takes. Off sends no class,
+// so the node's echo of "" is what an honest answer looks like.
+function workersValue(nodesId, classId) {
+  const v = $("#" + nodesId).value;
+  return v ? {max_worker_nodes: +v, worker_class: $("#" + classId).value || "fast"}
+           : {max_worker_nodes: null, worker_class: ""};
+}
+// The gateway echoes what it stored. A reply that does not (an older build
+// ignores unknown fields and mints a plain key) only passes when off was asked.
+function workersEchoed(want, r) {
+  if (!r || r.max_worker_nodes === undefined) return want.max_worker_nodes === null;
+  return r.max_worker_nodes === want.max_worker_nodes && (r.worker_class || "") === want.worker_class;
+}
+// The Create-a-key worker controls for a node whose choices are `opts`, or
+// just "off" while they are loading (opts null).
+function mountKeyWorkers(opts) {
+  $("#keyworkers").innerHTML = workerNodeOptions(opts ? opts.peers : 0, null);
+  $("#keyclass").innerHTML = workerClassOptions(opts ? opts.roles : [], "fast");
+  $("#keyclass").disabled = true;
+  $("#keyworkersnote").textContent = opts && !opts.peers ? "this node knows no other nodes" : "";
+}
+// Builds the Create-a-key control once per node, so a toggle or a page turn
+// does not wipe a half-made choice. Until this node's choices are in there is
+// no control at all -- never the previous node's -- and newKey refuses to mint.
+async function mountKeyModels(fresh) {
+  const host = CUR;
+  if (KEYMODELS_FOR !== host) {
+    $("#keymodels").innerHTML = '<span class="muted" style="font-size:12px">loading…</span>';
+    mountKeyWorkers(null);   // another node's peer count must not size this node's choices
+  }
+  let opts = KEYMODELS[host] || null, got = false;
+  try { opts = await keyModelOptions(host, fresh); got = true; }
+  catch (e) { toast("could not load the model list: " + e.message, true); }
+  if (host !== CUR || (KEYMODELS_FOR === host && opts && !(fresh && got))) return;
+  KEYMODELS_FOR = opts ? host : null;
+  $("#keymodels").innerHTML = mselHtml("keymodels_sel", [], opts);
+  mountKeyWorkers(opts);
+  fillKeyChoices();   // an edit row opened while the choices were still coming
 }
 const limStr = k => {
   const parts = [];
@@ -3830,6 +4373,65 @@ const limStr = k => {
   if (k.max_total_tokens) parts.push(fmtN(k.max_total_tokens) + " tok total");
   return parts.join(" · ") || "unlimited";
 };
+// Model access, said in the key list next to the limits. A list that cannot be
+// read is not "all models": the gateway refuses such a key everything.
+const modelsStr = k => {
+  if (k.allowed_models_invalid)
+    return '<span class="pill no">blocked: stored model list unreadable</span>';
+  const m = k.allowed_models || [];
+  if (!m.length) return '<span class="muted">all models</span>';
+  return `<span title="${esc(m.join(", "))}">models: ${esc(m.slice(0, 2).join(", "))}${
+    m.length > 2 ? " +" + (m.length - 2) : ""}</span>`;
+};
+// Sub-agents, said next to the models. A key that fronts a Teams-tab team shows
+// as "team" (with its node cap, if it has one): that crew is edited there.
+const workersStr = k => {
+  const n = k.max_worker_nodes;   // absent from an older gateway: reads as off
+  const cap = n == null ? "" : n === 0 ? "this node only"
+    : "up to " + n + (n === 1 ? " other node" : " other nodes");
+  if (k.team) return `<span class="muted">team${cap ? " · " + esc(cap) : ""}</span>`;
+  if (n == null) return '<span class="muted">workers: off</span>';
+  return `workers: ${esc(cap)} · ${esc(k.worker_class || "fast")}`;
+};
+// The edit row's worker selects. None for a hub routing key (it must stay a
+// plain key), for a key that fronts a team (the Teams tab owns that crew) or
+// for one with an agent profile (the team loop would skip the profile).
+function workersEditHtml(x) {
+  if (String(x.name).startsWith("hub-")) return "";   // the models line already says so
+  if (x.team)
+    return '<span class="muted" style="font-size:12px">fronts a team -- edit its workers on the Teams tab</span>';
+  if (x.agent)
+    return '<span class="muted" style="font-size:12px">has an agent profile -- sub-agents would bypass it; remove it on the Agents tab first</span>';
+  const opts = KEYMODELS[CUR] || null, cur = x.max_worker_nodes ?? null;
+  return `<div class="row" style="gap:4px">
+    <select id="ke_workers" data-help="max parallel workers" aria-label="max parallel workers"
+      onchange="workersChanged('ke_workers','ke_class')" style="width:auto">${
+      workerNodeOptions(opts ? opts.peers : 0, cur)}</select>
+    <select id="ke_class" data-help="worker class" aria-label="worker class" style="width:auto"
+      ${cur === null ? "disabled" : ""}>${
+      workerClassOptions(opts ? opts.roles : [], x.worker_class)}</select></div>`;
+}
+// The edit row's model checklist and worker selects. Until this node's choices
+// have arrived there are none: a list built without them offers too little (no
+// classes, no other nodes) for the rest of that edit, so the row says it is
+// loading and fillKeyChoices swaps the real ones in. A hub routing key has
+// neither control and needs nothing to arrive.
+function keyChoicesHtml(x) {
+  const hub = String(x.name).startsWith("hub-"), opts = KEYMODELS[CUR] || null;
+  if (!hub && !opts)
+    return '<div class="muted kloading" style="font-size:12px;margin-top:6px">loading the choices…</div>';
+  return `<div style="margin-top:6px">${hub
+      ? '<span class="muted" style="font-size:12px">hub routing key -- leave unrestricted</span>'
+      : mselHtml("ke_models", x.allowed_models, opts, x.allowed_models_invalid)}</div>
+    <div style="margin-top:6px">${workersEditHtml(x)}</div>`;
+}
+// Fills a "loading" edit row in place. Nothing in it was ever pickable, so
+// nothing is lost, and the fields beside it (name, expiry, limits) that may
+// have been typed into are not touched -- a whole re-render would wipe them.
+function fillKeyChoices() {
+  const box = $("#ke_choices"), x = KEYS.find(k => k.id === KEDIT);
+  if (box && x && box.querySelector(".kloading")) box.innerHTML = keyChoicesHtml(x);
+}
 function renderKeys() {
   const arch = VIEW.keys;
   $("#keysarch").textContent = archLabel(arch);
@@ -3847,7 +4449,8 @@ function renderKeys() {
         <input class="s" id="ke_rpd" type="number" placeholder="req/d" value="${x.max_rpd ?? ""}">
         <input class="s" id="ke_tpd" type="number" placeholder="tok/d" value="${x.max_tpd ?? ""}">
         <input class="s" id="ke_tt"  type="number" placeholder="total" value="${x.max_total_tokens ?? ""}">
-      </div></td>
+      </div>
+      <div id="ke_choices">${keyChoicesHtml(x)}</div></td>
       <td colspan="3"><span class="hint">blank = unlimited / never expires</span></td>
       <td style="text-align:right;white-space:nowrap">
         <button class="act primary" onclick="saveKeyEdit(${x.id})">save</button>
@@ -3857,7 +4460,7 @@ function renderKeys() {
         ? ' <span class="pill dim">fleet-pass</span>' : ""}</td>
       <td class="mono muted">${esc(x.prefix)}…</td>
       <td class="mono" style="font-size:12px">${x.expires_at ? esc(x.expires_at.slice(0,10)) : '<span class="muted">never</span>'}</td>
-      <td style="font-size:12px">${limStr(x)}</td>
+      <td style="font-size:12px">${limStr(x)}<div>${modelsStr(x)}</div><div>${workersStr(x)}</div></td>
       <td class="num" style="font-size:12px">${fmtN(x.reqs_24h)} req · ${fmtN(x.tokens_24h)} tok</td>
       <td>${x.agent ? `<span class="pill ok">${esc(x.agent)}</span>` : '<span class="muted">—</span>'}</td>
       <td>${x.archived_at
@@ -3873,25 +4476,72 @@ function renderKeys() {
       : `<tr><td class="muted" colspan="8">${VIEW.keys ? "nothing archived" : "no keys yet"}</td></tr>`);
 }
 async function saveKeyEdit(id) {
+  const host = CUR;   // the node the edited row belongs to, even if the pick moves on
   try {
-    await api("/keys/" + id, {method: "PATCH", body: {
+    const body = {
       name: $("#ke_name").value, expires_at: $("#ke_exp").value,
       max_rpd: $("#ke_rpd").value, max_tpd: $("#ke_tpd").value,
-      max_total_tokens: $("#ke_tt").value}});
-    KEDIT = null; toast("key updated"); loadKeys();
+      max_total_tokens: $("#ke_tt").value};
+    // A hub routing key has no picker, so its list is never sent.
+    const withModels = !!$("#ke_models");
+    if (withModels) body.allowed_models = mselValue("ke_models");
+    // Sent only when the selects moved off what the key has: a hub routing key
+    // and a key that fronts a team have none, and a rename of a key whose
+    // Teams-tab team is paused must not be refused for a setting it never touched.
+    const was = KEYS.find(k => k.id === id) || {};
+    const workers = $("#ke_workers") ? workersValue("ke_workers", "ke_class") : null;
+    const withWorkers = !!workers && (workers.max_worker_nodes !== (was.max_worker_nodes ?? null)
+      || workers.worker_class !== (was.worker_class || ""));
+    if (withWorkers) Object.assign(body, workers);
+    const r = await hostApi(host, "/keys/" + id, {method: "PATCH", body});
+    const lost = [withModels && !modelsEchoed(body.allowed_models, r) && "model list",
+                  withWorkers && !workersEchoed(body, r) && "worker setting"]
+      .filter(Boolean).join(" and ");
+    if (host === CUR) { KEDIT = null; loadKeys(); }
+    if (lost) return toast(host + " runs an older gateway that ignored the " + lost + " -- "
+      + "the other changes were saved, the " + lost + " was not; deploy the gateway there first", true);
+    toast("key updated");
   } catch (e) { toast(e.message, true); }
 }
 async function newKey() {
   const name = $("#keyname").value.trim();
   if (!name) return toast("give the key a name so you can revoke the right one later", true);
+  // Key ids are per node, so every call below goes to the node the key is being
+  // minted on -- not whichever one the header shows when the replies arrive.
+  const host = CUR;
   try {
-    const r = await api("/keys", {method: "POST", body: {
+    const models = mselValue("keymodels_sel");
+    const workers = workersValue("keyworkers", "keyclass");
+    const r = await hostApi(host, "/keys", {method: "POST", body: {
       name, expires_at: $("#keyexp").value, max_rpd: $("#keyrpd").value,
-      max_tpd: $("#keytpd").value, max_total_tokens: $("#keytt").value}});
+      max_tpd: $("#keytpd").value, max_total_tokens: $("#keytt").value,
+      allowed_models: models, ...workers}});
+    const lost = [!modelsEchoed(models, r) && "model list",
+                  !workersEchoed(workers, r) && "worker setting"].filter(Boolean).join(" and ");
+    if (lost) {
+      // A node on an older gateway ignored what it did not know and minted a
+      // key without it. Its secret is never shown: the key is archived on the
+      // spot, and if even that fails the operator is told which key to archive
+      // by hand.
+      try { await hostApi(host, "/keys/" + r.id, {method: "DELETE"}); }
+      catch (e) {
+        if (host === CUR) loadKeys();
+        return toast(host + " runs an older gateway that ignored the " + lost + ", and archiving "
+          + "the key '" + name + "' that lacks it failed (" + e.message + ") -- archive it by hand", true);
+      }
+      if (host === CUR) loadKeys();
+      return toast(host + " runs an older gateway that ignored the " + lost + " -- the key was "
+        + "archived; deploy the gateway there first", true);
+    }
     $("#newkey").innerHTML = `<code class="key">${esc(r.key)}</code>
-      <div class="hint">Copy it now — only its hash is stored, so it cannot be shown again.</div>`;
+      <div class="hint">Copy it now — only its hash is stored, so it cannot be shown again.${
+        host === CUR ? "" : " It signs in to " + esc(host) + ", not to the node now showing."}</div>`;
     ["keyname","keyexp","keyrpd","keytpd","keytt"].forEach(i => $("#"+i).value = "");
-    loadKeys();
+    if (host === CUR) {
+      $("#keymodels").innerHTML = mselHtml("keymodels_sel", [], KEYMODELS[host] || null);
+      mountKeyWorkers(KEYMODELS[host] || null);
+      loadKeys();
+    }
   } catch (e) { toast(e.message, true); }
 }
 async function toggleKey(id) { await api(`/keys/${id}/toggle`, {method: "POST"}).catch(e=>toast(e.message,true)); loadKeys(); }
@@ -4365,6 +5015,25 @@ const HELP = {
   "tokens total": ["Lifetime token budget",
     "Counted from the day the key was minted and never resets. Once spent, the key is done "
     + "&mdash; mint a new one. Blank means no limit."],
+  "keys:models": ["Which models this key may call",
+    "Empty means <b>all models</b>, which is what every key did before this list existed. "
+    + "Pick models and the key can call only those. A routing class (<code>fast</code>, "
+    + "<code>small</code>, &hellip;) in the list grants the class's whole ladder; a class you "
+    + "did not list still works when its ladder overlaps your list, but it routes only to the "
+    + "members you allowed. Enforced on <b>this node</b> &mdash; the one the key signs in to."],
+  "keys:max parallel workers": ["Sub-agents on other nodes",
+    "<b>off</b> is an ordinary key. Anything else turns on the <code>spawn_subagents</code> team "
+    + "loop for this key's chat completions: the model it calls (the one the client names) can "
+    + "hand pieces of work to workers, and the key's replies are then built in non-streaming "
+    + "rounds. <b>this node only</b> runs the workers on this node. <b>N other nodes</b> lets "
+    + "them run on at most N distinct <i>other</i> nodes of the fleet &mdash; workers on this "
+    + "node are free and never count. The choices stop at the number of nodes this one knows. "
+    + "Workers use the routing class chosen beside it. A key with an agent profile cannot have "
+    + "workers: the team loop would skip the profile's model pin, rules and limits."],
+  "keys:worker class": ["Routing class for the workers",
+    "The routing class the sub-agents run on, <code>fast</code> unless you pick another. The "
+    + "class is allowed for the workers whatever this key's model list says; the model leading "
+    + "the conversation is still held to that list. Disabled while workers are off."],
   "mint key": ["Mint the key",
     "Creates the key and shows the secret <b>once</b>. Only a hash is stored, so a lost key "
     + "cannot be recovered, only replaced."],
@@ -4541,6 +5210,39 @@ const HELP = {
   "remove team": ["Archive this team",
     "The key instantly goes back to being an ordinary key. The roster and prompts survive "
     + "in the archived view until retention deletes them for good."],
+
+  // ---- routing ----
+  "routing:class": ["Routing class",
+    "A word that stands for a list of models. Ask for it as the <code>model</code> and the hub "
+    + "sends the request to the best member each eligible node holds, then ranks those nodes "
+    + "like any other candidates. A request that names a member model directly ignores the "
+    + "class and its node list."],
+  "routing:class name": ["Name of the class",
+    "Letters, digits and <code>. _ : -</code>, up to 48. It cannot be a model id a box serves or "
+    + "a catalogue id, since it would take that traffic over. Built-ins keep their names, and a "
+    + "saved class cannot be renamed."],
+  "routing:members": ["Models in the class, best first",
+    "On each node the first member it holds in GPU memory is its pick, else the first it serves "
+    + "at all. Among nodes that hold theirs, the one higher on this list goes first, then the "
+    + "usual routing order. The pill counts the nodes that serve the model, asleep ones "
+    + "remembered from before included."],
+  "routing:add models": ["Add models",
+    "Every model the fleet serves or has served that is not a member yet. Ticking one appends it "
+    + "to the bottom of the list; the arrows reorder."],
+  "routing:nodes": ["Which nodes may play this class",
+    "Every node that holds a current member is listed; a dot is green while the node is up. "
+    + "Tick some to limit the class to them, or tick none to use every node that holds a member. "
+    + "A node saved earlier that holds none of the members now still shows, so it can be unticked."],
+  "routing:new class": ["Create a class",
+    "Opens an empty editor. A class of your own needs a name and at least one member."],
+  "routing:save": ["Save this class",
+    "Live on the next request. It governs what <b>this hub</b> routes; peers keep routing their "
+    + "own direct traffic with the shipped ladders."],
+  "routing:reset to default": ["Back to what ships",
+    "Clears this built-in's saved models and nodes: the shipped ladder, on every node."],
+  "routing:delete": ["Delete this class",
+    "Removes a class you added. A request that names it stops resolving; the models stay "
+    + "where they are."],
 
   // ---- fleet jobs ----
   "fleetjobs:job": ["Batch job",
@@ -4760,6 +5462,17 @@ document.addEventListener("mouseout", e => {
 // Reading time is over the moment they act on it, or the page moves under it.
 document.addEventListener("mousedown", helpReset);
 document.addEventListener("keydown", e => { if (e.key === "Escape") helpReset(); });
+// A model checklist is a floating panel: Escape closes it (focus goes back to
+// its summary, so a keyboard user is not left nowhere) and so does a click
+// anywhere outside it.
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  $$("details.msel[open]").forEach(d => { d.open = false; d.querySelector("summary").focus(); });
+});
+document.addEventListener("mousedown", e => {
+  const inside = e.target instanceof Element ? e.target.closest(".msel") : null;
+  $$("details.msel[open]").forEach(d => { if (d !== inside) d.open = false; });
+});
 addEventListener("scroll", helpReset, true);
 addEventListener("blur", helpReset);
 
