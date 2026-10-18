@@ -79,6 +79,14 @@ $GPUCONF_DST, \\
 /usr/bin/systemctl is-active tailscaled.service, \\
 /usr/bin/systemctl status llama-swap.service
 EOF
+# The voice node's Pause and Resume on the dashboard (gateway/app.py
+# api_voice_pause / api_voice_resume), and only on a box that carries it --
+# the node AND its guard: apu-box-1 keeps a retired, disabled llm-voice.service.
+if [[ -f /etc/systemd/system/llm-voice.service && -f /etc/systemd/system/gpu-laptop-1-voice-guard.service ]]; then
+  cat >>"$SUDOERS_FILE" <<EOF
+$SVC_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop llm-voice.service, /usr/bin/systemctl start llm-voice.service
+EOF
+fi
 chmod 0440 "$SUDOERS_FILE"
 
 if ! visudo -cf "$SUDOERS_FILE"; then

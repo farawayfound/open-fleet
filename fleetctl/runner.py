@@ -170,9 +170,10 @@ class Ctx:
 
     def sudo(self, argv: Sequence[str], **kw) -> Any:
         """The same command, escalated if it has to be and can be."""
+        kw.setdefault("system", True)
         if self.facts.get("privilege", {}).get("root") or self.family == "windows":
-            return self.run(argv, system=True, **kw)
-        return self.run(["sudo", "-n", *[str(a) for a in argv]], system=True, **kw)
+            return self.run(argv, **kw)
+        return self.run(["sudo", "-n", *[str(a) for a in argv]], **kw)
 
     # -- files --------------------------------------------------------------
     def ensure_dir(self, p: str | Path, mode: int = 0o755) -> bool:
