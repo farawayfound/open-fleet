@@ -25,8 +25,8 @@ spelling:
 
 | engine | boxes | upstream |
 |---|---|---|
-| llama.cpp behind llama-swap | apu-box-1, apu-tablet-2, mac-laptop-2, mac-laptop-1, gpu-laptop-3, gpu-desktop-2, gpu-desktop-1, server-1, gpu-laptop-1 | `127.0.0.1:8081` |
-| Ollama | mac-desktop-1, cpu-box-1, mini-pc-1, gpu-laptop-2 | `127.0.0.1:11434` |
+| llama.cpp behind llama-swap | apu-box-1, apu-tablet-2, mac-laptop-2, mac-laptop-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1, server-1, gpu-laptop-1 | `127.0.0.1:8081` |
+| Ollama | mac-desktop-1, cpu-box-1, mini-pc-1 | `127.0.0.1:11434` |
 | none (routes, does not serve) | apu-tablet-1, hub | `8081`, where nothing listens |
 
 server-1 and gpu-desktop-2 appeared in neither engine row until 2026-09-03, which

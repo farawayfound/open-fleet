@@ -263,6 +263,15 @@ class EnvFile(Step):
             vals["LLMSTACK_AVAILABILITY_FILE"] = ctx.plan["availability"]["file"]
         return vals
 
+    # Written only for one engine or the other. When the plan leaves one out,
+    # it has chosen the other engine -- it is not a stranger's value to carry
+    # across. gpu-laptop-2's move off Ollama (2026-10-18) would otherwise have kept
+    # LLMSTACK_MODELS_FROM_UPSTREAM=1 beside a freshly installed llama-swap.
+    ENGINE_KEYS = frozenset({
+        "LLMSTACK_MODELS_FROM_UPSTREAM", "LLMSTACK_LLAMA_SERVER",
+        "LLMSTACK_LLAMA_BENCH", "LLMSTACK_SWAP_CONFIG",
+    })
+
     NOTES = {
         "LLMSTACK_BIND": (
             "0.0.0.0, not loopback: the hub calls this box's admin API as a\n"
@@ -313,7 +322,7 @@ class EnvFile(Step):
         """
         if not current:
             return {}
-        mine = set(self._values(ctx)) | {"LLMSTACK_ADMIN_TOKEN"}
+        mine = set(self._values(ctx)) | self.ENGINE_KEYS | {"LLMSTACK_ADMIN_TOKEN"}
         out: dict[str, str] = {}
         for line in current.splitlines():
             m = re.match(r"^(?:set |export )?([A-Z][A-Z0-9_]*)=(.*)$", line.strip())

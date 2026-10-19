@@ -216,6 +216,38 @@ ok(html.includes('<button data-t="config">'),
 ok(html.includes('<section id="config">'), "and the section exists");
 ok(/FLEET_TABS = new Set\(\[[^\]]*"config"/.test(src),
    "config is a fleet-level tab");
+// Routing classes: an editor on the hub, so a fleet tab with a loader and no
+// poll.
+ok(html.includes('<button data-t="routing">Routing</button>'),
+   "the fleet nav has a Routing button");
+ok(html.includes('<section id="routing">'), "and the section exists");
+ok(/FLEET_TABS = new Set\(\[[^\]]*"routing"/.test(src),
+   "routing is a fleet-level tab");
+ok(/LOADERS = \{[^}]*routing: loadRouting/.test(src),
+   "and the tab loads its classes when it opens");
+// Each setInterval(...) call, parenthesis to parenthesis. A pattern that stops
+// at the first `)` only ever saw the bare `setInterval(loadX, 5000)`: the
+// page's own pollers are arrow functions, `() => { ... loadX(); }`, which carry
+// a `)` before the name.
+const pollers = (code) => {
+  const out = [];
+  for (let i = code.indexOf("setInterval("); i >= 0;
+       i = code.indexOf("setInterval(", i + 1)) {
+    let depth = 0, j = i + "setInterval".length;
+    do {
+      const c = code[j++];
+      depth += c === "(" ? 1 : c === ")" ? -1 : 0;
+    } while (depth > 0 && j < code.length);
+    out.push(code.slice(i, j));
+  }
+  return out;
+};
+const polls = (code, fn) => pollers(code).some((p) => new RegExp("\\b" + fn + "\\b").test(p));
+ok(polls('setInterval(() => { if ($("#routing").classList.contains("on")) loadRouting(); }, 5000);',
+         "loadRouting"), "the poll check catches an arrow-function poller");
+ok(polls("setInterval(loadRouting, 30000);", "loadRouting"), "and the bare form");
+ok(polls(src, "loadHome"), "and it finds the page's real pollers (loadHome is one)");
+ok(!polls(src, "loadRouting"), "an editor is not polled");
 
 // ---------------------------------------------------------------------------
 // The Overview card's helpers. fillPick must not rewrite a <select> the
@@ -306,6 +338,354 @@ ok(npuCard.includes("NPU memory"), "...and calls the 48 GB NPU memory, not VRAM"
 ok(!npuCard.includes("Wi-Fi") && !npuCard.includes("threads"),
    "...and shows neither the PC's network nor its threads");
 ok(npuCard.includes(">not in use</span>"), "a node registered Not in use says so");
+
+// ---------------------------------------------------------------------------
+// Per-key model access (API keys tab). The control is a checklist dropdown;
+// newKey/saveKeyEdit send its ids and compare the node's echo with them, so a
+// node on an older gateway (which ignores the field and mints an unrestricted
+// key) is caught instead of trusted.
+// ---------------------------------------------------------------------------
+const mopts = {roles: ["fast", "small"], models: ["m-b", "m-a"]};
+const picker = ctx.mselHtml("kx", ["fast", "gone-model"], mopts);
+ok(picker.includes("<summary>2 selected</summary>"),
+   "a restricted key's picker says how many are selected");
+ok(/data-msel-v="fast"\s+checked/.test(picker) && /data-msel-v="gone-model"\s+checked/.test(picker),
+   "ticked ids are checked, including one the node no longer lists");
+ok(picker.indexOf('data-msel-v="m-a"') < picker.indexOf('data-msel-v="m-b"'),
+   "the models are sorted");
+ok(ctx.mselHtml("kx", [], mopts).includes("<summary>all models</summary>"),
+   "no list reads as all models");
+ok(ctx.mselHtml("kx", [], mopts, true).includes("<summary>0 selected</summary>"),
+   "an unreadable stored list opens on 'Only these' with nothing ticked");
+ok(ctx.mselHtml("kx", ['a"b'], null).includes("a&quot;b"), "ids are HTML-escaped");
+ok(ctx.modelsEchoed(["a", "b"], {allowed_models: ["b", "a"]}), "the same set echoed is accepted");
+ok(!ctx.modelsEchoed(["a"], {allowed_models: []}), "an emptied echo is a mismatch");
+ok(!ctx.modelsEchoed(["a"], {id: 1, key: "k"}), "no echo at all (an older gateway) is a mismatch");
+ok(ctx.modelsEchoed([], {id: 1, key: "k"}), "...except when nothing was asked for");
+ok(/allowed_models: models, \.\.\.workers\}\}\);\s*const lost = \[!modelsEchoed\(models, r\) && "model list",\s*!workersEchoed\(workers, r\)/.test(src),
+   "newKey sends allowed_models and the worker setting, and checks both echoes before showing the key");
+ok(/hostApi\(host, "\/keys\/" \+ r\.id, \{method: "DELETE"\}\)/.test(src),
+   "a mismatched mint archives the key it just made, on the node it was minted on");
+ok(/body\.allowed_models = mselValue\("ke_models"\)/.test(src),
+   "saveKeyEdit sends the list too");
+ok(vm.runInContext('modelsStr({allowed_models_invalid: true})', ctx)
+     .includes("blocked: stored model list unreadable"),
+   "an unreadable stored list shows as blocked, not as all models");
+ok(vm.runInContext('modelsStr({allowed_models: ["a", "b", "c", "d"]})', ctx)
+     .includes("models: a, b +2"),
+   "the key list shows the first two models and a count");
+
+// The picker's panel, its labels and its keyboard/mouse dismissal.
+ok(/table \.mselp\{position:static/.test(html),
+   "inside a table (the edit row) the panel stays in the row's flow: the scrolling card would clip a floating one");
+ok(picker.includes('aria-label="models"') && picker.includes('aria-label="filter models"'),
+   "the picker and its filter box have accessible names");
+ok(/key !== "Escape"\) return;\s*\$\$\("details\.msel\[open\]"\)/.test(src),
+   "Escape closes an open model checklist");
+ok(/closest\("\.msel"\)[\s\S]{0,120}d\.open = false/.test(src),
+   "a click outside an open model checklist closes it");
+ok(/keys: \(\) => loadKeys\(true\)/.test(src),
+   "entering the Keys tab re-reads the model choices");
+
+// ---- behaviour: a mint belongs to the node it was started on ----
+// The harness has no real page, so `$` is pointed at hand-made fields and
+// rawApi at a recorder (hostApi/api reach the network only through it).
+// SELF/CUR are the page's own lexical bindings.
+{
+  const set = (code) => vm.runInContext(code, ctx);
+  const realQuery = ctx.document.querySelector, realApi = ctx.rawApi;
+  const fields = {"#keyname": {value: "mykey"}, "#keyexp": {value: ""},
+                  "#keyrpd": {value: ""}, "#keytpd": {value: ""}, "#keytt": {value: ""}};
+  const calls = [];
+  try {
+    set('SELF = "hub"; CUR = "peer1"');
+
+    // No picker on the page (its choices still loading, or the node just
+    // switched): reading it as "all models" would mint an unrestricted key.
+    ctx.document.querySelector = (s) => s === "#keymodels_sel" ? null : (fields[s] || realQuery(s));
+    ctx.rawApi = async (path, opts = {}) => { calls.push([opts.method || "GET", path]); return {}; };
+    let msg = "";
+    try { ctx.mselValue("keymodels_sel"); } catch (e) { msg = e.message; }
+    ok(/still loading/.test(msg), "an absent picker is an error, never 'all models'");
+    await ctx.newKey();
+    ok(calls.length === 0, "Mint key with no picker on the page sends nothing");
+
+    // The picker has m-a ticked; the operator moves to the hub while the POST
+    // is in flight, and the node (an older gateway) answers with no echo.
+    fields["#keymodels_sel"] = {querySelector: () => ({checked: true}),
+                                querySelectorAll: () => [{dataset: {mselV: "m-a"}}]};
+    ctx.document.querySelector = (s) => fields[s] || realQuery(s);
+    ctx.rawApi = async (path, opts = {}) => {
+      calls.push([opts.method || "GET", path]);
+      if (opts.method === "POST") {
+        set('CUR = "hub"');
+        return {id: 9, key: "sk-secret-value", name: "mykey"};
+      }
+      return {};
+    };
+    await ctx.newKey();
+    ok(calls[0] && calls[0][0] === "POST" && calls[0][1] === "/fleet/peer1/keys",
+       "the mint is sent to the node the operator was on");
+    const del = calls.find((c) => c[0] === "DELETE");
+    ok(del && del[1] === "/fleet/peer1/keys/9",
+       "the rollback archives the key on the node that minted it, not the one picked meanwhile");
+    ok(!(sink["#newkey"] || "").includes("sk-secret-value"),
+       "the secret of a rolled-back mint is never shown");
+
+    // One node's choices are filed under that node's name even when the pick
+    // moves on before the reply.
+    set('KEYMODELS = {}; CUR = "peer1"');
+    ctx.rawApi = async (path) => {
+      const roles = path.endsWith("/roles");
+      if (roles) set('CUR = "hub"');
+      return roles ? {roles: {fast: {}}} : {models: [{model: "peer-only"}]};
+    };
+    await ctx.keyModelOptions("peer1", true);
+    const filed = JSON.parse(set("JSON.stringify(KEYMODELS)"));
+    ok(filed.peer1 && filed.peer1.models.includes("peer-only") && !filed.hub,
+       "model choices are cached under the node they were fetched for");
+
+    // Another node's picker is gone the moment this node's mount starts.
+    set('KEYMODELS = {}; KEYMODELS_FOR = "peer1"; CUR = "hub"');
+    sink["#keymodels"] = "<details>peer1's picker</details>";
+    ctx.rawApi = async () => { throw new Error("offline"); };
+    const mounting = ctx.mountKeyModels();
+    ok((sink["#keymodels"] || "").includes("loading"),
+       "a picker built for another node is replaced by 'loading' at once");
+    await mounting;
+  } finally {
+    ctx.document.querySelector = realQuery;
+    ctx.rawApi = realApi;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Max parallel workers (API keys tab): off / this node only / up to N other
+// nodes, with a routing class for the workers. Like the model list, newKey and
+// saveKeyEdit compare the node's echo with what they sent, so a node on an older
+// gateway (which would mint a plain key) is caught instead of trusted.
+// ---------------------------------------------------------------------------
+{
+  const values = (h) => [...h.matchAll(/value="([^"]*)"/g)].map((m) => m[1]);
+  ok(html.includes('id="keyworkers"') && html.includes('id="keyclass"'),
+     "the Create-a-key card has the two worker selects");
+  ok(/<label class="f">max parallel workers<\/label>/.test(html) && /<label class="f">worker class<\/label>/.test(html),
+     "...labelled max parallel workers and worker class");
+  ok(src.includes('"keys:max parallel workers"') && src.includes('"keys:worker class"'),
+     "both have a keys-section HELP entry, which beats the Teams tab's un-prefixed one");
+  ok(JSON.stringify(values(ctx.workerNodeOptions(0, null))) === '["","0"]',
+     "a node that knows no peers offers only off and this node only");
+  ok(JSON.stringify(values(ctx.workerNodeOptions(3, null))) === '["","0","1","2","3"]',
+     "a node with 3 peers offers 1..3 other nodes");
+  ok(values(ctx.workerNodeOptions(2, 5)).includes("5"),
+     "a stored cap the node can no longer offer stays on the list, or saving would change it");
+  ok(/value="0" selected/.test(ctx.workerNodeOptions(2, 0)) && /value="" selected/.test(ctx.workerNodeOptions(2, null)),
+     "0 and off are told apart when picking what is selected");
+  ok(/value="fast" selected/.test(ctx.workerClassOptions(["small", "fast"], "")),
+     "the worker class defaults to fast");
+  ok(/value="mine" selected/.test(ctx.workerClassOptions(["small"], "mine")),
+     "a stored class the node no longer lists stays on the list");
+
+  const set = (code) => vm.runInContext(code, ctx);
+  const realQuery = ctx.document.querySelector, realApi = ctx.rawApi;
+  const fields = {"#keyname": {value: "wkey"}, "#keyexp": {value: ""}, "#keyrpd": {value: ""},
+                  "#keytpd": {value: ""}, "#keytt": {value: ""},
+                  "#keyworkers": {value: "2"}, "#keyclass": {value: "small"},
+                  "#keymodels_sel": {querySelector: () => ({checked: true}),
+                                     querySelectorAll: () => [{dataset: {mselV: "m-a"}}]}};
+  let sent = [];
+  try {
+    ctx.document.querySelector = (s) => fields[s] || realQuery(s);
+    // The node is switched away mid-call so loadKeys (which this harness has no
+    // network for) is not started; it is the request and the verdict on the
+    // reply that are under test.
+    const answer = (reply) => async (path, opts = {}) => {
+      sent.push([opts.method || "GET", path, opts.body]);
+      if (opts.method === "POST") set('CUR = "hub"');
+      return opts.method === "POST" ? reply : {};
+    };
+    set('SELF = "hub"; CUR = "peer1"');
+
+    ctx.rawApi = answer({id: 11, key: "sk-kept", allowed_models: ["m-a"], max_worker_nodes: 2, worker_class: "small"});
+    await ctx.newKey();
+    const post = sent.find((c) => c[0] === "POST");
+    ok(post && post[2].max_worker_nodes === 2 && post[2].worker_class === "small",
+       "newKey sends max_worker_nodes as a number and the chosen worker_class");
+    ok(!sent.some((c) => c[0] === "DELETE") && (sink["#newkey"] || "").includes("sk-kept"),
+       "a node that echoes both is believed: the key is shown, nothing is rolled back");
+
+    sent = []; set('CUR = "peer1"'); sink["#newkey"] = ""; fields["#keyname"].value = "wkey";
+    ctx.rawApi = answer({id: 12, key: "sk-lost", allowed_models: ["m-a"]});
+    await ctx.newKey();
+    const del = sent.find((c) => c[0] === "DELETE");
+    ok(del && del[1] === "/fleet/peer1/keys/12" && !(sink["#newkey"] || "").includes("sk-lost"),
+       "no worker echo with workers asked for (an older gateway): the key is archived on that node and never shown");
+
+    sent = []; set('CUR = "peer1"'); sink["#newkey"] = ""; fields["#keyname"].value = "wkey";
+    ctx.rawApi = answer({id: 13, key: "sk-wrong", allowed_models: ["m-a"], max_worker_nodes: 1, worker_class: "small"});
+    await ctx.newKey();
+    ok(sent.some((c) => c[0] === "DELETE"), "an echo of a different cap is a mismatch too");
+
+    fields["#keyworkers"].value = "";   // off
+    sent = []; set('CUR = "peer1"'); sink["#newkey"] = ""; fields["#keyname"].value = "wkey";
+    ctx.rawApi = answer({id: 14, key: "sk-plain", allowed_models: ["m-a"]});
+    await ctx.newKey();
+    const off = sent.find((c) => c[0] === "POST");
+    ok(off && off[2].max_worker_nodes === null && off[2].worker_class === "",
+       "off is sent as null with no class");
+    ok(!sent.some((c) => c[0] === "DELETE") && (sink["#newkey"] || "").includes("sk-plain"),
+       "...and an older gateway that echoes nothing is fine when off was asked for");
+
+    // The edit row: workers are sent only when the selects moved.
+    Object.assign(fields, {"#ke_name": {value: "wkey"}, "#ke_exp": {value: ""}, "#ke_rpd": {value: ""},
+      "#ke_tpd": {value: ""}, "#ke_tt": {value: ""}, "#ke_workers": {value: "3"}, "#ke_class": {value: "fast"}});
+    ctx.document.querySelector = (s) => s === "#ke_models" ? null : (fields[s] || realQuery(s));
+    const patched = (reply) => async (path, opts = {}) => {
+      sent.push([opts.method || "GET", path, opts.body]);
+      if (opts.method === "PATCH") set('CUR = "hub"');
+      return opts.method === "PATCH" ? reply : {};
+    };
+    set('KEYS = [{id: 5, name: "wkey", max_worker_nodes: 3, worker_class: "fast"}]; CUR = "peer1"');
+    sent = [];
+    ctx.rawApi = patched({id: 5, max_worker_nodes: 3, worker_class: "fast"});
+    await ctx.saveKeyEdit(5);
+    const same = sent.find((c) => c[0] === "PATCH");
+    ok(same && !("max_worker_nodes" in same[2]) && !("worker_class" in same[2]),
+       "an edit that leaves the workers alone does not send them");
+
+    fields["#ke_workers"].value = "0"; fields["#ke_class"].value = "small";
+    sent = []; set('CUR = "peer1"');
+    ctx.rawApi = patched({id: 5, max_worker_nodes: 0, worker_class: "small"});
+    await ctx.saveKeyEdit(5);
+    const moved = sent.find((c) => c[0] === "PATCH");
+    ok(moved && moved[2].max_worker_nodes === 0 && moved[2].worker_class === "small",
+       "saveKeyEdit sends 0 (this node only) as a number, not as off");
+  } finally {
+    ctx.document.querySelector = realQuery;
+    ctx.rawApi = realApi;
+  }
+
+  ok(ctx.workersEchoed({max_worker_nodes: 2, worker_class: "fast"}, {max_worker_nodes: 2, worker_class: "fast"}),
+     "the same cap and class echoed is accepted");
+  ok(!ctx.workersEchoed({max_worker_nodes: 0, worker_class: "fast"}, {max_worker_nodes: null, worker_class: ""}),
+     "0 echoed back as off is a mismatch");
+  ok(!ctx.workersEchoed({max_worker_nodes: 2, worker_class: "fast"}, {id: 1}),
+     "no echo at all is a mismatch when workers were asked for");
+  ok(ctx.workersEchoed({max_worker_nodes: null, worker_class: ""}, {id: 1}),
+     "...but not when off was");
+
+  const str = (k) => vm.runInContext(`workersStr(${JSON.stringify(k)})`, ctx);
+  ok(str({}).includes("workers: off") && str({max_worker_nodes: null, worker_class: ""}).includes("workers: off"),
+     "a key with no setting (or from an older gateway) reads workers: off");
+  ok(str({max_worker_nodes: 0, worker_class: "fast"}).includes("workers: this node only · fast"),
+     "0 reads workers: this node only · class");
+  ok(str({max_worker_nodes: 3, worker_class: "small"}).includes("workers: up to 3 other nodes · small"),
+     "N reads workers: up to N other nodes · class");
+  ok(str({max_worker_nodes: 1, worker_class: "fast"}).includes("up to 1 other node ·"),
+     "...singular for one");
+  ok(str({team: true, max_worker_nodes: null, worker_class: ""}).includes(">team<"),
+     "a key fronting a Teams-tab team reads team");
+  ok(str({max_worker_nodes: 1, worker_class: '<b>"x"'}).includes("&lt;b&gt;"),
+     "the class name is HTML-escaped");
+
+  ok(vm.runInContext('workersEditHtml({name: "hub-aero"})', ctx) === "",
+     "a hub routing key's edit row has no worker selects");
+  const teamEdit = vm.runInContext('workersEditHtml({name: "t", team: true})', ctx);
+  ok(!teamEdit.includes("<select") && teamEdit.includes("Teams tab"),
+     "a key fronting a team has none either, and says where to edit it");
+  const plainEdit = vm.runInContext('workersEditHtml({name: "k", max_worker_nodes: null, worker_class: ""})', ctx);
+  ok(plainEdit.includes('id="ke_workers"') && /id="ke_class"[^>]*disabled/.test(plainEdit),
+     "an ordinary key gets both selects, the class disabled while workers are off");
+  ok(!/id="ke_class"[^>]*disabled/.test(
+       vm.runInContext('workersEditHtml({name: "k", max_worker_nodes: 0, worker_class: "fast"})', ctx)),
+     "...and enabled once workers are on");
+
+  // A key with an agent profile is not offered workers: the team loop is taken
+  // before the profile is read, so the profile would silently stop applying.
+  const agentEdit = vm.runInContext(
+    'workersEditHtml({name: "k", agent: "pinned", max_worker_nodes: null, worker_class: ""})', ctx);
+  ok(!agentEdit.includes("<select") && agentEdit.includes("Agents tab"),
+     "a key with an agent profile gets no worker selects, and is told where the profile is");
+
+  // An edit row opened before the node's choices arrived says so rather than
+  // offering a stunted list (no classes, no other nodes) for the rest of that
+  // edit; the real controls are swapped in, in place, the moment they arrive.
+  {
+    const run = (code) => vm.runInContext(code, ctx);
+    const realQ = ctx.document.querySelector, realApi = ctx.rawApi;
+    const keyRow = '{id: 5, name: "k", allowed_models: ["m-a"], max_worker_nodes: null, worker_class: ""}';
+    const box = {h: "", loading: true,
+                 set innerHTML(v) { this.h = v; }, get innerHTML() { return this.h; },
+                 querySelector(s) { return this.loading && s === ".kloading" ? {} : null; }};
+    try {
+      run('KEYMODELS = {}; KEYMODELS_FOR = null; CUR = "peer1"; KEDIT = 5; KEYS = [' + keyRow + ']');
+      const waiting = run('keyChoicesHtml(' + keyRow + ')');
+      ok(waiting.includes("kloading") && !waiting.includes('id="ke_models"') && !waiting.includes('id="ke_workers"'),
+         "before the node's choices arrive the edit row offers no pickers, only 'loading'");
+      const hub = run('keyChoicesHtml({id: 6, name: "hub-aero"})');
+      ok(hub.includes("hub routing key") && !hub.includes("kloading"),
+         "a hub routing key never waits: it has neither control");
+
+      ctx.document.querySelector = (s) => s === "#ke_choices" ? box : realQ(s);
+      ctx.rawApi = async (path) => path.endsWith("/roles") ? {roles: {fast: {}, small: {}}}
+        : path.endsWith("/peers") ? [{name: "a"}, {name: "b"}] : {models: [{model: "m-a"}]};
+      await ctx.mountKeyModels(true);
+      ok(box.h.includes('id="ke_models"') && box.h.includes('id="ke_workers"') && box.h.includes('value="2"')
+           && box.h.includes('value="small"'),
+         "when the choices arrive the waiting edit row is filled with the model list, the 2 peers and the classes");
+
+      box.h = "typed into"; box.loading = false;
+      ctx.fillKeyChoices();
+      ok(box.h === "typed into", "an edit row that already has its pickers is never rewritten");
+    } finally {
+      run('KEYMODELS = {}; KEYMODELS_FOR = null; KEDIT = null; KEYS = []');
+      ctx.document.querySelector = realQ;
+      ctx.rawApi = realApi;
+    }
+  }
+
+  // The Teams tab shows a blank primary as the client's model.
+  ok(/client's model<\/span>/.test(src), "the Teams tab names a blank primary");
+
+  // And offers it in the editor only for a team the keys form made: the
+  // gateway refuses a blank primary on any other team (Fleet Pass included),
+  // where it would let the key's holder pick any fleet model.
+  {
+    const run = (code) => vm.runInContext(code, ctx);
+    const realQ = ctx.document.querySelector, oldModels = run("FLEETMODELS");
+    ctx.document.querySelector = (s) => Object.assign(realQ(s), {scrollIntoView() {}});
+    try {
+      run('FLEETMODELS = ["m-a"]');
+      const primaryOptions = (team) => { ctx.fillTeamEditor(team); return sink["#tm_primary"]; };
+      const form = primaryOptions({name: "k", primary_model: "", worker_class: "fast",
+                                   worker_models: '["fast"]'});
+      ok(form.includes('<option value="" selected>client\'s model</option>'),
+         "a keys-form team's editor offers the client's model, selected while the primary is blank");
+      const pinned = primaryOptions({name: "k", primary_model: "m-a", worker_class: "fast"});
+      ok(pinned.includes('<option value="m-a" selected>') && !pinned.includes('value="" selected'),
+         "and keeps the model a keys-form team was pinned to");
+      const fleetPass = primaryOptions({name: "fp", primary_model: "m-a", worker_class: ""});
+      ok(fleetPass.includes('<option value="m-a" selected>') && !fleetPass.includes("client's model"),
+         "any other team's editor does not offer the client's model");
+      ok(!primaryOptions(null).includes("client's model"),
+         "nor does the editor for a new team");
+
+      // With nothing served the select must say so, or saving it is a bare 400
+      // ("a team needs a primary model") with nothing on screen to explain it.
+      run("FLEETMODELS = []");
+      const none = '<option value="">no models served anywhere</option>';
+      ok(primaryOptions(null) === none, "an empty fleet says so for a new team");
+      ok(primaryOptions({name: "fp", primary_model: "m-a", worker_class: ""}) === none,
+         "...and for any other team, a Fleet Pass one included");
+      const bare = primaryOptions({name: "k", primary_model: "", worker_class: "fast"});
+      ok(bare.includes("client's model") && !bare.includes("no models served anywhere"),
+         "a keys-form team has the client's model to choose, so it needs no such message");
+    } finally {
+      ctx.document.querySelector = realQ;
+      run("FLEETMODELS = " + JSON.stringify(oldModels));
+    }
+  }
+}
 
 if (fail.length) { console.error("FAIL:\n - " + fail.join("\n - ")); process.exit(1); }
 console.log(`ok — ${cards.length} cards, all assertions passed`);

@@ -451,6 +451,19 @@ ok(!lrOutOne.includes("not in Models yet") && !lrOutOne.includes("Add all"),
 const lrOutUpstream = run(`renderLocalRows(${JSON.stringify(lrLocalFixture())}, [], true)`);
 ok(!lrOutUpstream.includes("Add all") && !lrOutUpstream.includes("Add to Models"),
    "an Ollama-managed box: no backlog banner and no per-row Add to Models button either");
+// gpu-laptop-2, 2026-10-18: a Library download on an Ollama box had no way onward
+// but a models.json record Ollama never launches -- and once one was saved,
+// the row only said "in Models as" it.
+ok(rowOf(lrOutUpstream, "a.gguf").includes("lmsOllamaImport(") && rowOf(lrOutUpstream, "a.gguf").includes(",&quot;a-id&quot;)"),
+   "an Ollama-managed box: a complete download offers Import into Ollama under its suggested id");
+ok(rowOf(lrOutUpstream, "b.gguf").includes("Import into Ollama") && !rowOf(lrOutUpstream, "b.gguf").includes("in Models as"),
+   "...even when a models.json record already names it, because nothing on that box launches the record");
+ok(!rowOf(lrOutUpstream, "c.gguf").includes("Import into Ollama"),
+   "...but never an incomplete one");
+const lrSplit = [{path: "D:\\models\\p\\s-00001-of-00002.gguf", name: "s-00001-of-00002.gguf",
+  kind: "main", bytes: 2e9, shards: 2, complete: true, suggested_id: "s-id", mmproj: "", in_models: ""}];
+ok(!run(`renderLocalRows(${JSON.stringify(lrSplit)}, [], true)`).includes("Import into Ollama"),
+   "...nor a split one: ollama create is handed a single file");
 
 // A row staged on the Models tab but not saved yet is neither "in Models" nor
 // backlog: the Library used to keep offering "Add all 2" for models already

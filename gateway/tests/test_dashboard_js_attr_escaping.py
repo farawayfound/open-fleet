@@ -77,6 +77,9 @@ def test_jsarg_is_actually_used_at_former_vulnerable_sites():
         "cancelPackage(${jsArg(repo)},${jsArg(pkg)})",
         "addQuantModel(${jsArg(q.suggested_id)},${jsArg(q.main_dest)},${jsArg(mmprojDest)})",
         "addQuantModel(${jsArg(id)},${jsArg(mainDest)},${jsArg(mmprojDest)})",
+        # The Library's Import into Ollama (2026-10-18): a download path and
+        # an HF-derived id.
+        "lmsOllamaImport(${jsArg(path)},${jsArg(id || \"\")})",
     ):
         assert needle in html, f"expected {needle!r} in index.html"
 

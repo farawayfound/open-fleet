@@ -774,6 +774,116 @@ def test_ollama_import_refuses_a_path_outside_lmstudio(store, monkeypatch):
     assert "not inside LM Studio" in str(exc.value.detail)
 
 
+def test_ollama_import_takes_a_library_download_on_a_box_without_lm_studio(
+        store, monkeypatch, tmp_path):
+    """gpu-laptop-2, 2026-10-18: the Library downloaded humanizer-12b into the
+    models folder of an Ollama box with no LM Studio on it, and the only way
+    onward was a models.json record Ollama never launches. A Library GGUF is
+    as legitimate a source as an LM Studio one, and is collapsed the same way."""
+    monkeypatch.setattr(gw, "UPSTREAM_MODELS", True)
+    monkeypatch.setattr(gw, "lmstudio_root", lambda *a, **kw: None)
+    payload = b"GGUF" + bytes(range(256)) * 64
+    src = _write(store.fleet / "pub__humanizer-GGUF" / "humanizer-12b.gguf", payload)
+    blobs = tmp_path / "ollama" / "blobs"
+    blobs.mkdir(parents=True)
+
+    def fake_create(cmd, **kw):
+        _write(blobs / "sha256-cafe", payload)
+
+        class P:
+            returncode = 0
+            stdout = "success"
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(gw, "_ollama_binary", lambda: "/usr/bin/ollama")
+    monkeypatch.setattr(gw, "_ollama_stores", lambda: [tmp_path / "ollama"])
+    monkeypatch.setattr(gw.subprocess, "run", fake_create)
+
+    res = gw.lmstudio_ollama_import(str(src), "Humanizer-12b")
+
+    assert res["rc"] == 0
+    assert res["reclaimed"] == len(payload)
+    assert (blobs / "sha256-cafe").stat().st_ino == src.stat().st_ino
+
+
+def test_ollama_import_refuses_anything_but_a_gguf(store, monkeypatch):
+    """MODELS_DIR is Ollama's own store on some boxes, and a path reaching
+    this comes from an HTTP body: only a GGUF is something to hand Ollama."""
+    monkeypatch.setattr(gw, "UPSTREAM_MODELS", True)
+    other = _write(store.fleet / "notes.txt", b"not weights")
+    with pytest.raises(gw.HTTPException) as exc:
+        gw.lmstudio_ollama_import(str(other), "name")
+    assert exc.value.status_code == 400
+
+
+def test_ollama_import_does_not_collapse_onto_a_source_swapped_mid_import(
+        store, monkeypatch, tmp_path):
+    """The create runs for minutes. If the path now names a different file,
+    linking it over Ollama's blob would put the wrong bytes behind the tag."""
+    monkeypatch.setattr(gw, "UPSTREAM_MODELS", True)
+    payload = b"GGUF" + bytes(range(256)) * 64
+    src = _write(store.fleet / "pub__repo-GGUF" / "m.gguf", payload)
+    blobs = tmp_path / "ollama" / "blobs"
+    blobs.mkdir(parents=True)
+
+    def fake_create(cmd, **kw):
+        _write(blobs / "sha256-beef", payload)
+        src.unlink()
+        _write(src, b"GGUF" + b"\x00" * (len(payload) - 4))   # same size, new file
+
+        class P:
+            returncode = 0
+            stdout = "success"
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(gw, "_ollama_binary", lambda: "/usr/bin/ollama")
+    monkeypatch.setattr(gw, "_ollama_stores", lambda: [tmp_path / "ollama"])
+    monkeypatch.setattr(gw.subprocess, "run", fake_create)
+
+    res = gw.lmstudio_ollama_import(str(src), "mymodel")
+
+    assert res["reclaimed"] == 0
+    assert "changed during the import" in res["note"]
+    assert (blobs / "sha256-beef").read_bytes() == payload
+
+
+def test_ollama_import_does_not_collapse_onto_a_source_rewritten_in_place(
+        store, monkeypatch, tmp_path):
+    """Same inode, same size, different bytes -- what the swap test above
+    becomes on Linux whenever the freed inode is handed straight back to the
+    new file (the export CI failed on exactly that, `16388 == 0`). Rewritten
+    in place here so every OS sees it: (dev, ino, size) cannot tell the two
+    files apart, only their content can."""
+    monkeypatch.setattr(gw, "UPSTREAM_MODELS", True)
+    payload = b"GGUF" + bytes(range(256)) * 64
+    src = _write(store.fleet / "pub__repo-GGUF" / "m.gguf", payload)
+    blobs = tmp_path / "ollama" / "blobs"
+    blobs.mkdir(parents=True)
+
+    def fake_create(cmd, **kw):
+        _write(blobs / "sha256-beef", payload)
+        with open(src, "r+b") as fh:                           # same file, new bytes
+            fh.write(b"GGUF" + b"\x00" * (len(payload) - 4))
+
+        class P:
+            returncode = 0
+            stdout = "success"
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(gw, "_ollama_binary", lambda: "/usr/bin/ollama")
+    monkeypatch.setattr(gw, "_ollama_stores", lambda: [tmp_path / "ollama"])
+    monkeypatch.setattr(gw.subprocess, "run", fake_create)
+
+    res = gw.lmstudio_ollama_import(str(src), "mymodel")
+
+    assert res["reclaimed"] == 0
+    assert "changed during the import" in res["note"]
+    assert (blobs / "sha256-beef").read_bytes() == payload
+
+
 def test_ollama_import_refuses_a_bad_model_name(store, monkeypatch):
     monkeypatch.setattr(gw, "UPSTREAM_MODELS", True)
     f = _gguf(store.lms / "pub" / "repo-GGUF" / "m.gguf", b"m")
