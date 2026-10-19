@@ -530,6 +530,64 @@ class TestUnreadableIsNotAbsent:
         assert Power().check(ctx).state == MISSING
 
 
+class TestWindowsPowerIsReadBack:
+    """gpu-laptop-2, 2026-10-19: the Windows check never read the two settings
+    back -- it listed the schemes and said MISSING every time -- so an
+    apply that had just pinned both to 0 re-checked as UNCHANGED and the
+    run stopped before `services` ever created the llama-swap task."""
+
+    SCHEME = "381b4222-f694-41f0-9685-ff5bb260df2e"
+    LIST = ("Existing Power Schemes (* Active)\n"
+            "-----------------------------------\n"
+            f"Power Scheme GUID: {SCHEME}  (Balanced) *\n")
+
+    @staticmethod
+    def query(ac: int, dc: int) -> str:
+        return ("    Power Setting GUID: x  (Sleep after)\n"
+                "      Possible Settings units: Seconds\n"
+                f"    Current AC Power Setting Index: 0x{ac:08x}\n"
+                f"    Current DC Power Setting Index: 0x{dc:08x}\n")
+
+    def ctx(self, windows_facts, empty_repo, tmp_path, values):
+        ctx = ctx_for(windows_facts, empty_repo, tmp_path)
+
+        def probe(argv, **_):
+            argv = [str(a) for a in argv]
+            if argv[:2] == ["powercfg", "/l"]:
+                return SimpleNamespace(returncode=0, stdout=self.LIST, stderr="")
+            if argv[:2] == ["powercfg", "/q"]:
+                got = values.get(argv[4])
+                if got is None:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="does not exist")
+                return SimpleNamespace(returncode=0, stdout=self.query(*got), stderr="")
+            return None
+
+        ctx.probe = probe
+        return ctx
+
+    def test_both_settings_never_on_every_scheme_is_ok(self, windows_facts,
+                                                        empty_repo, tmp_path):
+        values = {Power.STANDBYIDLE: (0, 0), Power.UNATTENDSLEEP: (0, 0)}
+        ctx = self.ctx(windows_facts, empty_repo, tmp_path, values)
+        assert Power().check(ctx).state == OK
+
+    def test_a_scheme_that_still_sleeps_is_missing(self, windows_facts,
+                                                   empty_repo, tmp_path):
+        values = {Power.STANDBYIDLE: (0, 900), Power.UNATTENDSLEEP: (0, 0)}
+        ctx = self.ctx(windows_facts, empty_repo, tmp_path, values)
+        check = Power().check(ctx)
+        assert check.state == MISSING
+        assert "1 power scheme(s) to pin" in check.detail
+
+    def test_a_setting_it_cannot_read_is_missing_not_ok(self, windows_facts,
+                                                        empty_repo, tmp_path):
+        # UNATTENDSLEEP is hidden until apply unhides it, so a never-provisioned
+        # box answers "does not exist" -- that is work to do, not a pass.
+        values = {Power.STANDBYIDLE: (0, 0)}
+        ctx = self.ctx(windows_facts, empty_repo, tmp_path, values)
+        assert Power().check(ctx).state == MISSING
+
+
 class TestTheEnvFileHasValuesThePlanNeverHeardOf:
     """A privileged dry run on hub proposed removing eight of them.
 
@@ -641,6 +699,35 @@ class TestTheEnvFileHasValuesThePlanNeverHeardOf:
         step = EnvFile()
         text = step._render(ctx, "tok", {"HF_TOKEN": "hf_x"})
         assert "set HF_TOKEN=hf_x" in text
+
+
+class TestAnEngineSwitchLeavesNoOldEngineBehind:
+    """gpu-laptop-2, 2026-10-18: an Ollama box moving to llama.cpp. Its env file
+    says LLMSTACK_MODELS_FROM_UPSTREAM=1, which a llama.cpp plan does not
+    render -- and foreign() carried across every key the plan does not
+    render, so the apply that installed llama-swap would have left the
+    gateway reading an Ollama catalogue off llama-swap's port. A key only an
+    engine choice ever writes is fleetctl's whichever engine is chosen."""
+
+    def test_the_ollama_flag_is_dropped_by_a_llama_cpp_plan(
+            self, linux_facts, empty_repo, tmp_path):
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        assert ctx.plan["engine"]["kind"] == "llama.cpp"
+        step = EnvFile()
+        path = ctx.path(ctx.plan["paths"]["envfile"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(step._render(ctx, "the-hub-holds-this-one")
+                        + "LLMSTACK_MODELS_FROM_UPSTREAM=1\nHF_TOKEN=hf_x\n",
+                        encoding="utf-8")
+
+        assert set(step.foreign(ctx, path.read_text(encoding="utf-8"))) == {"HF_TOKEN"}
+        step.apply(ctx)
+
+        after = path.read_text(encoding="utf-8")
+        assert "LLMSTACK_MODELS_FROM_UPSTREAM" not in after
+        assert "HF_TOKEN=hf_x" in after
+        assert "LLMSTACK_ADMIN_TOKEN=the-hub-holds-this-one" in after
+        assert step.check(ctx).state == OK
 
 
 class TestFirewalldRuleIsReadFromListPortsNotState:

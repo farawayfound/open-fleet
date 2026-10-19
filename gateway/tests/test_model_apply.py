@@ -486,6 +486,89 @@ class TestNeverVerifyAgainstAnEngineThatDidNotRestart:
         assert [m["id"] for m in started[0]] == ["m1"]
 
 
+class TestAnOllamaBoxHasNoLlamaSwapToRestart:
+    """gpu-laptop-2, 2026-10-18. A GGUF staged from the Library was saved on an
+    Ollama-backed box, and Save & apply ran `schtasks /End /TN llama-swap`
+    against a task that box has never had -- "ERROR: The system cannot find
+    the file specified", toasted as a failed engine restart. The save is kept
+    (the box may be about to move to llama.cpp, where the record is exactly
+    right), it says plainly that nothing serves it yet, and no restart is
+    attempted."""
+
+    @pytest.fixture
+    def ollama_box(self, monkeypatch, registry):
+        monkeypatch.setattr(gw, "UPSTREAM_MODELS", True)
+        monkeypatch.setitem(gw._running_cache, "openai_only", False)
+        restarts: list = []
+        monkeypatch.setattr(gw, "service_control",
+                            lambda a, u: restarts.append((a, u)) or (1, "no task"))
+        started: list = []
+        monkeypatch.setattr(gw, "start_verify",
+                            lambda q, b: started.append(q) or [])
+        return restarts, started
+
+    def test_a_new_record_is_saved_with_a_warning_and_no_restart(
+            self, client, admin_headers, ollama_box):
+        restarts, started = ollama_box
+        r = client.put("/admin/api/models", headers=admin_headers,
+                       json={"models": [REC]})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["restart_rc"] == 0
+        assert "Ollama" in body["warning"]
+        assert "m1" in body["warning"]
+        assert restarts == [] and started == []
+        assert [m["id"] for m in gw.load_models()] == ["m1"]
+
+    def test_a_changed_record_warns_too(self, client, admin_headers, ollama_box):
+        restarts, _ = ollama_box
+        gw.save_models([REC])
+        r = client.put("/admin/api/models", headers=admin_headers,
+                       json={"models": [dict(REC, ctx=131072)]})
+        assert r.status_code == 200
+        assert "Ollama" in r.json()["warning"]
+        assert restarts == []
+
+    def test_an_openai_only_engine_is_not_called_ollama(
+            self, client, admin_headers, ollama_box, monkeypatch):
+        """npu-box-1 is upstream-backed too, and has no Ollama to import into."""
+        monkeypatch.setitem(gw._running_cache, "openai_only", True)
+        r = client.put("/admin/api/models", headers=admin_headers,
+                       json={"models": [REC]})
+        assert "OpenAI-only" in r.json()["warning"]
+        assert "Ollama" not in r.json()["warning"]
+
+    def test_removing_a_record_saves_quietly(self, client, admin_headers, ollama_box):
+        """How gpu-laptop-2 gets rid of the record it is holding now."""
+        restarts, _ = ollama_box
+        gw.save_models([REC])
+        r = client.put("/admin/api/models", headers=admin_headers,
+                       json={"models": []})
+        assert r.status_code == 200
+        assert r.json()["restart_rc"] == 0
+        assert not r.json()["warning"]
+        assert gw.load_models() == []
+        assert restarts == []
+
+    def test_a_llama_swap_box_still_restarts_and_never_warns(
+            self, client, admin_headers, monkeypatch, registry):
+        restarts: list = []
+        monkeypatch.setattr(gw, "service_control",
+                            lambda a, u: restarts.append((a, u)) or (0, "ok"))
+        monkeypatch.setattr(gw, "start_verify", lambda q, b: ["m1"])
+        r = client.put("/admin/api/models", headers=admin_headers,
+                       json={"models": [REC]})
+        assert r.status_code == 200
+        assert restarts == [("restart", "llama-swap")]
+        assert not r.json()["warning"]
+
+    def test_it_needs_an_admin_and_writes_nothing_without_one(
+            self, client, ollama_box):
+        r = client.put("/admin/api/models", json={"models": [REC]})
+        assert r.status_code in (401, 403)
+        assert gw.load_models() == []
+
+
 class TestOneRestartPerRun:
     @pytest.mark.asyncio
     async def test_two_failures_cost_one_restart_not_two(

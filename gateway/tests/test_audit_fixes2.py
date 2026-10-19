@@ -207,6 +207,10 @@ class TestBatchCancelPersists:
     async def test_resume_orphaned_batches_still_resumes_an_uncancelled_one(
             self, monkeypatch, tmp_path):
         bid = self._insert_running_batch(cancel_requested=0)
+        # A batch always belongs to the key that submitted it, and one whose
+        # key is gone is not resumed (its model list cannot be read).
+        _raw, meta = gw.mint_key("batch-resume-uncancelled")
+        gw.db_exec("UPDATE batches SET key_id=? WHERE id=?", (meta["id"], bid))
         in_path, _out_path = gw._batch_paths(bid)
         gw.BATCHES_DIR.mkdir(parents=True, exist_ok=True)
         in_path.write_text(json.dumps({"messages": []}) + "\n", "utf-8")

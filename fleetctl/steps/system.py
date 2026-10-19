@@ -327,11 +327,29 @@ IdleAction=ignore
                          "lid/idle suspend not disabled",
                          [f"write {self.LOGIND_PATH}",
                           "mask sleep.target suspend.target hibernate.target"])
+        import re
+
         r = ctx.probe(["powercfg", "/l"])
         if r is None or r.returncode != 0:
             return Check(BLOCKED, "powercfg did not answer")
-        schemes = [ln for ln in (r.stdout or "").splitlines() if "GUID:" in ln]
-        return Check(MISSING, f"{len(schemes)} power scheme(s) to pin",
+        schemes = re.findall(r"GUID:\s+(\S+)", r.stdout or "")
+        # Read both settings back from every scheme. This used to list the
+        # schemes and say MISSING regardless, so an apply that had just pinned
+        # them re-checked as UNCHANGED and stopped the run (gpu-laptop-2,
+        # 2026-10-19). A setting powercfg will not show -- UNATTENDSLEEP is
+        # hidden until apply unhides it -- counts as not pinned.
+        unpinned = 0
+        for scheme in schemes:
+            for setting in (self.STANDBYIDLE, self.UNATTENDSLEEP):
+                q = ctx.probe(["powercfg", "/q", scheme, self.SUB_SLEEP, setting])
+                values = re.findall(r"Current (?:AC|DC) Power Setting Index:\s*0x([0-9a-fA-F]+)",
+                                    (q.stdout if q and q.returncode == 0 else "") or "")
+                if len(values) != 2 or any(int(v, 16) != 0 for v in values):
+                    unpinned += 1
+                    break
+        if not unpinned:
+            return Check(OK, f"standby + unattended-sleep never on all {len(schemes)} scheme(s)")
+        return Check(MISSING, f"{unpinned} power scheme(s) to pin",
                      [f"set standby + unattended-sleep to never on all "
                       f"{len(schemes)} schemes"])
 
