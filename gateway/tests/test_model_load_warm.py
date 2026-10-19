@@ -383,6 +383,91 @@ class TestStatusCarriesLoadAndWarmState:
         ]
         assert body["manual_load"] == dict(gw._manual_load)
 
+    def test_an_ollama_box_offers_what_its_engine_can_load(
+            self, registry, client, admin_headers, monkeypatch):
+        """gpu-laptop-2, 2026-10-18: the picker listed models.json, where a saved
+        humanizer record sat that Ollama had never heard of, and left out
+        every tag Ollama could actually load."""
+        async def fake_swap_running():
+            return True, []
+
+        monkeypatch.setattr(gw, "swap_running", fake_swap_running)
+        monkeypatch.setattr(gw, "host_status", lambda: {})
+        monkeypatch.setattr(gw, "service_states", lambda: {})
+        _ollama_catalogue(monkeypatch)
+        gw.save_models([rec("humanizer")])
+
+        r = client.get("/admin/api/status", headers=admin_headers)
+
+        assert r.status_code == 200
+        # The tags only: /api/ps reports residency by tag, so offering the
+        # fleet id too would offer a model that is already loaded.
+        assert r.json()["models_configured"] == [
+            {"id": m, "preload": False, "persistent": False}
+            for m in ("llama3:8b", "qwen2.5-coder:7b")]
+
+    def test_an_openai_only_engine_offers_nothing_to_load(
+            self, registry, client, admin_headers, monkeypatch):
+        """npu-box-1: the device holds what it lists, and a load sent there as an
+        Ollama generate answers 401."""
+        async def fake_swap_running():
+            return True, []
+
+        monkeypatch.setattr(gw, "swap_running", fake_swap_running)
+        monkeypatch.setattr(gw, "host_status", lambda: {})
+        monkeypatch.setattr(gw, "service_states", lambda: {})
+        _ollama_catalogue(monkeypatch, openai_only=True)
+
+        r = client.get("/admin/api/status", headers=admin_headers)
+
+        assert r.json()["models_configured"] == []
+
+
+def _ollama_catalogue(monkeypatch, openai_only=False):
+    """An Ollama box with two tags, one of which it also answers to under
+    the fleet's id -- or, with openai_only, an engine that speaks only /v1."""
+    async def tags():
+        return {"qwen2.5-coder:7b", "llama3:8b"}
+
+    async def pairs():
+        return {"fleet-coder": "qwen2.5-coder:7b"}
+
+    monkeypatch.setattr(gw, "UPSTREAM_MODELS", True)
+    monkeypatch.setattr(gw, "upstream_model_ids", tags)
+    monkeypatch.setattr(gw, "upstream_alias_pairs", pairs)
+    monkeypatch.setitem(gw._running_cache, "openai_only", openai_only)
+
+
+class TestLoadOnAnOllamaBox:
+    """POST /admin/api/models/load where the engine is Ollama: a models.json
+    record is not something it can load, and saying so up front beats a
+    background job that fails with Ollama's bare 404."""
+
+    def test_a_record_ollama_has_never_heard_of_is_404_and_says_why(
+            self, registry, client, admin_headers, monkeypatch):
+        _ollama_catalogue(monkeypatch)
+        gw.save_models([rec("humanizer")])
+        gw._manual_load.clear()
+
+        r = client.post("/admin/api/models/load", headers=admin_headers,
+                        json={"model": "humanizer"})
+
+        assert r.status_code == 404
+        assert "Ollama" in r.json()["detail"]
+        assert gw._manual_load == {}
+
+    def test_a_tag_it_does_have_starts_loading(
+            self, registry, client, admin_headers, monkeypatch):
+        _ollama_catalogue(monkeypatch)
+        monkeypatch.setattr(gw, "client", FakeEngine())
+        gw._manual_load.clear()
+
+        r = client.post("/admin/api/models/load", headers=admin_headers,
+                        json={"model": "fleet-coder"})
+
+        assert r.status_code == 200
+        assert r.json()["load"]["status"] == "loading"
+
 
 class TestTouchEndpoint:
     """POST /admin/api/models/touch {"model": id} -- keep a model loaded
