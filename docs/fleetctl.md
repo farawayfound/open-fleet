@@ -21,11 +21,11 @@ spelling:
 |---|---|---|---|
 | Linux + systemd | apu-box-1, hub, cpu-box-1, server-1, gpu-laptop-1 | `systemd` units | `/etc/llmstack/gateway.env` |
 | macOS + cron | mac-desktop-1, mac-laptop-2, mac-laptop-1 | `@reboot` + a 5-minute keepalive | `~/llmstack/gateway.env` |
-| Windows + schtasks | apu-tablet-1, apu-tablet-2, mini-pc-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1 | SYSTEM scheduled tasks | `C:\llmstack\gateway.env.cmd` |
+| Windows + schtasks | blackbox, apu-tablet-1, apu-tablet-2, mini-pc-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1 | SYSTEM scheduled tasks | `C:\llmstack\gateway.env.cmd` |
 
 | engine | boxes | upstream |
 |---|---|---|
-| llama.cpp behind llama-swap | apu-box-1, apu-tablet-2, mac-laptop-2, mac-laptop-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1, server-1, gpu-laptop-1 | `127.0.0.1:8081` |
+| llama.cpp behind llama-swap | apu-box-1, blackbox (CPU build), apu-tablet-2, mac-laptop-2, mac-laptop-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1, server-1, gpu-laptop-1 | `127.0.0.1:8081` |
 | Ollama | mac-desktop-1, cpu-box-1, mini-pc-1 | `127.0.0.1:11434` |
 | none (routes, does not serve) | apu-tablet-1, hub | `8081`, where nothing listens |
 

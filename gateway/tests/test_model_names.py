@@ -45,11 +45,37 @@ def test_every_name_in_the_map_is_claimed_by_one_catalogue_row():
     for canon, spellings in gw.FLEET_MODEL_NAMES.items():
         owners = [r["public_id"] for r in gw.PUBLIC_MODELS_SEED
                   if canon in r["fleet_ids"]]
+        if canon in gw.FLEET_ONLY_MODELS:
+            continue  # pinned by the test below
         assert len(owners) == 1, (canon, owners)
         row = next(r for r in gw.PUBLIC_MODELS_SEED if r["public_id"] == owners[0])
         for s in spellings:
             assert s in row["fleet_ids"], (s, "is not claimed by", owners[0])
         assert gw.SAFE_ID.match(canon), canon
+
+
+def test_a_fleet_only_model_is_in_no_catalogue_row_under_any_name():
+    """A fleet-only model is exempt from the rule above because no public id
+    can reach it. That only holds while no row claims it -- under its
+    canonical id or any spelling -- in either copy of the seed."""
+    seeds = [gw.PUBLIC_MODELS_SEED, gw.load_public_models_seed()]
+    for canon in gw.FLEET_ONLY_MODELS:
+        assert canon in gw.FLEET_MODEL_NAMES, canon
+        names = {canon, *gw.FLEET_MODEL_NAMES[canon]}
+        for seed in seeds:
+            for row in seed:
+                assert not names & {row["public_id"], *row["fleet_ids"]}, (
+                    canon, row["public_id"])
+
+
+def test_hemmingway_downloads_converge_on_the_writer_id():
+    """downstream-app asks for Hemmingway-1. A Library download of the same
+    weights registers under its file name; it has to become the writer."""
+    (r,), changes = gw.converge_model_names(
+        [_rec("altworld_hemmingway-1-q3_k_m")])
+    assert r["id"] == "Hemmingway-1"
+    assert r["aliases"] == ["altworld_hemmingway-1-q3_k_m"]
+    assert changes == [{"id": "altworld_hemmingway-1-q3_k_m", "to": "Hemmingway-1"}]
 
 
 def test_a_spelling_belongs_to_exactly_one_model():
@@ -65,6 +91,8 @@ def test_the_public_row_claims_the_canonical_id_itself():
     """Without this, the LM Studio sync on mac-laptop-2 dodges the canonical id as
     a collision with the public id and derives a fourth spelling."""
     for canon in gw.FLEET_MODEL_NAMES:
+        if canon in gw.FLEET_ONLY_MODELS:
+            continue
         row = next((r for r in gw.PUBLIC_MODELS_SEED if canon in r["fleet_ids"]), None)
         assert row is not None
         if row["public_id"] == canon:

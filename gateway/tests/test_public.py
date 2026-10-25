@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import struct
 import time
 from types import SimpleNamespace
 
@@ -1810,6 +1811,76 @@ class TestPerBoxCtxReporting:
         # q8_0 is 8.5 bits per weight, not 8: 48 layers x 4 KV heads x
         # (128 + 128) x 8.5 / 8 bytes.
         assert gw.kv_bytes_per_token(meta, "q8_0", "q8_0") == 48 * 4 * 272
+
+    # Hemmingway-1's real header (a Qwen3.8 27B finetune): 64 blocks plus an
+    # MTP block, one full-attention layer in four, the MTP block last.
+    HYBRID_RECURRENT = [i % 4 != 3 for i in range(64)] + [False]
+
+    def test_a_hybrid_model_pays_kv_only_on_its_full_attention_layers(self):
+        meta = {"block_count": 65, "head_count_kv": 4, "key_length": 256,
+                "value_length": 256, "recurrent_layers": self.HYBRID_RECURRENT,
+                "full_attention_interval": 4}
+        # 17 layers x 4 KV heads x (256 + 256) x 8.5 / 8 -- not 65 layers.
+        assert gw.kv_layers(meta) == 17
+        assert gw.kv_bytes_per_token(meta, "q8_0", "q8_0") == 17 * 4 * 544
+        # A header with the interval and no table rounds up, keeping the MTP
+        # block; one with neither is a plain transformer.
+        del meta["recurrent_layers"]
+        assert gw.kv_layers(meta) == 17
+        del meta["full_attention_interval"]
+        assert gw.kv_layers(meta) == 65
+        # A table that does not match the block count is not trusted.
+        meta["recurrent_layers"] = [True, False]
+        assert gw.kv_layers(meta) == 65
+
+    def test_gguf_meta_reads_the_recurrent_layer_table(self, tmp_path):
+        def s(text: str) -> bytes:
+            raw = text.encode()
+            return struct.pack("<Q", len(raw)) + raw
+
+        kvs = [
+            s("general.architecture") + struct.pack("<I", 8) + s("qwen35"),
+            s("qwen35.block_count") + struct.pack("<II", 4, 65),
+            s("qwen35.attention.head_count_kv") + struct.pack("<II", 4, 4),
+            s("qwen35.full_attention_interval") + struct.pack("<II", 4, 4),
+            s("qwen35.attention.recurrent_layers") + struct.pack("<IIQ", 9, 7, 65)
+            + bytes(int(r) for r in self.HYBRID_RECURRENT),
+            # A big scalar table is still skipped, not decoded.
+            s("tokenizer.ggml.token_type") + struct.pack("<IIQ", 9, 5, 5000)
+            + b"\0" * 20000,
+        ]
+        path = tmp_path / "hybrid.gguf"
+        path.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 0, len(kvs)) + b"".join(kvs))
+        meta = gw.gguf_meta(str(path))
+        assert meta["arch"] == "qwen35"
+        assert meta["recurrent_layers"] == self.HYBRID_RECURRENT
+        assert meta["full_attention_interval"] == 4
+        assert gw.kv_layers(meta) == 17
+
+    def test_ollama_kv_meta_carries_the_hybrid_layout(self):
+        meta = gw._ollama_kv_meta({
+            "qwen35.block_count": 65,
+            "qwen35.full_attention_interval": 4,
+            "qwen35.attention.recurrent_layers": self.HYBRID_RECURRENT,
+        })
+        assert meta["full_attention_interval"] == 4
+        assert meta["recurrent_layers"] == self.HYBRID_RECURRENT
+
+    def test_resolve_ctx_on_a_16gb_card_holding_a_27b_hybrid(self, monkeypatch):
+        """The numbers gpu-desktop-1 reported on 2026-10-19: 15.9 GiB of card, 13.4 GB
+        of Q3_K_M. Charging all 65 layers left 2.6k tokens and floored it at
+        4096; the 17 that keep a KV cache give twice that."""
+        meta = {"block_count": 65, "head_count_kv": 4, "key_length": 256,
+                "value_length": 256, "n_ctx_train": 262144, "arch": "qwen35",
+                "recurrent_layers": self.HYBRID_RECURRENT}
+        monkeypatch.setattr(gw, "gguf_meta", lambda p: meta)
+        monkeypatch.setattr(gw, "model_bytes", lambda p: 13404051520 if p else 0)
+        monkeypatch.setattr(gw, "vram_total_bytes", lambda: 17095983104)
+        rec = {"id": "m", "path": "/x.gguf", "ctx": 0,
+               "cache_type_k": "q8_0", "cache_type_v": "q8_0"}
+        ctx, detail = gw.resolve_ctx(rec)
+        assert detail["kv_bytes_per_token"] == 36992.0
+        assert ctx == 8192
 
     def test_ollama_kv_meta_ignores_junk(self):
         assert gw._ollama_kv_meta(None) == {}
