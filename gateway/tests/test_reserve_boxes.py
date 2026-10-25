@@ -65,7 +65,8 @@ def _isolate_preload_state():
 
 
 # ---------------------------------------------------------------------------
-# host_reserved / DEFAULT_SPECS: exactly the nine personal machines
+# host_reserved / DEFAULT_SPECS: exactly the nine personal machines, plus the
+# one box reserved by role (blackbox, the CPU standby)
 # ---------------------------------------------------------------------------
 
 class TestHostReservedDefaultSpecs:
@@ -76,8 +77,13 @@ class TestHostReservedDefaultSpecs:
         # laptop this repo is edited from, so somebody is always at it.
         # npu-box-1 joined on 2026-10-14 Not in use, and reserve for after: it is
         # another agent's brain first and serves one request at a time.
+        # blackbox (2026-10-24) is nobody's personal machine: it is reserved
+        # by ROLE, the CPU-only standby that keeps a copy of every sub-40B
+        # model and must be chosen only when every non-reserve box is
+        # saturated or cooling.
         reserved = {"apu-tablet-2", "gpu-desktop-2", "gpu-laptop-2", "gpu-desktop-1",
-                    "gpu-laptop-3", "mac-laptop-2", "gpu-laptop-4", "gpu-laptop-5", "gpu-laptop-6", "npu-box-1"}
+                    "gpu-laptop-3", "mac-laptop-2", "gpu-laptop-4", "gpu-laptop-5", "gpu-laptop-6", "npu-box-1",
+                    "blackbox"}
         # apu-tablet-1 left this set on 2026-09-16: on Fedora it is a fleet box
         # sharing the writing lane with apu-box-1, not a machine someone sits at.
         not_reserved = {"apu-box-1", "apu-tablet-1", "mac-laptop-1", "gpu-laptop-1", "mac-desktop-1",

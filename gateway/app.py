@@ -1503,7 +1503,15 @@ def _gguf_value(buf: bytes, off: int, vtype: int) -> tuple[Any, int]:
                 off += 8 + n
             return None, off
         if itype in _GGUF_SCALARS:
-            return None, off + _GGUF_SCALARS[itype][1] * count
+            fmt, size = _GGUF_SCALARS[itype]
+            # A per-layer table (which layers are recurrent, on a hybrid
+            # model) is one entry per block -- small, and the only place the
+            # header says which layers keep a KV cache. Token-type tables
+            # are 150k entries and stay skipped.
+            if count <= 1024:
+                vals = list(struct.unpack_from("<%d%s" % (count, fmt), buf, off))
+                return vals, off + size * count
+            return None, off + size * count
         raise ValueError("nested gguf array")
     fmt, size = _GGUF_SCALARS[vtype]
     (v,) = struct.unpack_from("<" + fmt, buf, off)
@@ -1565,6 +1573,11 @@ def gguf_meta(path: str) -> dict:
         "embedding_length": geo("embedding_length"),
         "expert_count": geo("expert_count"),
         "sliding_window": geo("attention.sliding_window"),
+        # Hybrid linear/full-attention models (qwen35, qwen35moe, qwen3next):
+        # only the full-attention layers keep a KV cache. The per-layer table
+        # is exact; the interval is what older conversions carry instead.
+        "recurrent_layers": raw.get(arch + ".attention.recurrent_layers"),
+        "full_attention_interval": geo("full_attention_interval"),
     }
     _gguf_cache[path] = (stamp, meta)
     return meta
@@ -1575,14 +1588,40 @@ _KV_BITS = {"f32": 32.0, "f16": 16.0, "bf16": 16.0, "q8_0": 8.5, "q5_1": 6.0,
             "q5_0": 5.5, "q4_1": 5.0, "q4_0": 4.5, "iq4_nl": 4.5}
 
 
-def kv_bytes_per_token(meta: dict, ctk: Any, ctv: Any) -> float | None:
-    """Bytes of KV cache one token costs across every layer.
+def kv_layers(meta: dict) -> int | None:
+    """How many layers keep a KV cache.
 
-    Full attention is assumed. Models with a sliding window (this fleet has
-    two) cache far less than this on their windowed layers, so the estimate
-    errs toward a SMALLER context than the box could hold -- the safe
-    direction for a number that decides whether a load OOMs."""
+    Every one, on a plain transformer. On a hybrid linear/full-attention
+    model only the full-attention layers do -- the recurrent ones carry a
+    fixed-size state per slot instead, whatever the context length. Qwen
+    3.5/3.6/3.8 put one full-attention layer in four: Hemmingway-1 (a Qwen3.8
+    27B finetune) has 17 of 65 (16 plus its MTP layer). Charging all 65 made
+    the KV look four times its real size and sized a 16 GB card down to the
+    4096 floor (2026-10-19)."""
     n_layer = meta.get("block_count")
+    if not n_layer:
+        return None
+    rec = meta.get("recurrent_layers")
+    if isinstance(rec, list) and len(rec) == n_layer:
+        return sum(1 for r in rec if not r)
+    interval = meta.get("full_attention_interval")
+    if interval and interval > 1:
+        # Rounded up: a trailing full-attention layer (the MTP block) counts.
+        return -(-n_layer // interval)
+    return n_layer
+
+
+def kv_bytes_per_token(meta: dict, ctk: Any, ctv: Any) -> float | None:
+    """Bytes of KV cache one token costs across every layer that keeps one.
+
+    Full attention is assumed on those layers. Models with a sliding window
+    (this fleet has two) cache far less than this on their windowed layers,
+    so the estimate errs toward a SMALLER context than the box could hold --
+    the safe direction for a number that decides whether a load OOMs. A
+    hybrid model's recurrent state is not per token and is not charged here;
+    resolve_ctx()'s per-slot overhead allowance covers it (~160 MB a slot on
+    a Qwen3.8 27B)."""
+    n_layer = kv_layers(meta)
     n_kv = meta.get("head_count_kv")
     if not n_layer or not n_kv:
         return None
@@ -1924,7 +1963,9 @@ def check_preload_count(models: list[dict]) -> None:
 #
 # Every name here has to be claimed by one row of PUBLIC_MODELS_SEED as well
 # (its fleet_ids), so the catalogue and the routing layer agree on what is
-# one model. tests/test_model_names.py pins that.
+# one model -- except a model in FLEET_ONLY_MODELS, which the fleet serves to
+# its own clients and the catalogue never lists, so there is no public id to
+# disagree with. tests/test_model_names.py pins both.
 #
 # What is done with it, per box, when the gateway starts -- which is to say
 # on every deploy, and when a box that was off comes back and the reconcile
@@ -1958,9 +1999,34 @@ FLEET_MODEL_NAMES: dict[str, tuple[str, ...]] = {
     "tev1": ("tev1:latest",),
     # The npu-box-1's vendor server lists the model by its Hugging Face repo id.
     "glm-4.7-flash": ("zai-org/GLM-4.7-Flash",),
+    # the downstream app's cover-letter and open-ended-answer writer (2026-10-18),
+    # asked for by this id. bartowski's quants, one id whatever the quant:
+    # the Library download derives `altworld_hemmingway-1-<quant>` from the
+    # file name (gpu-desktop-1's copy sat invisible to the writer under that name),
+    # and LM Studio derives `altworld_hemmingway-1` from the repo (apu-tablet-2).
+    "Hemmingway-1": (
+        "altworld_hemmingway-1-q3_k_m",
+        "altworld_hemmingway-1-q4_k_m",
+        "bartowski-altworld_hemmingway-1-q3_k_m",
+        "bartowski-altworld_hemmingway-1-q4_k_m",
+        "altworld_hemmingway-1",
+        # cpu-box-1's Ollama (2026-10-25): the pulled tag, and the `ollama
+        # create hemmingway-1` built over it so the box can carry num_ctx
+        # 32768 and a thread cap in a Modelfile -- Ollama's /v1 can express
+        # neither per request, and an un-pinned Ollama default of 4096 would
+        # truncate the writer's 11k-token prompt without a word.
+        "hf.co/bartowski/Altworld_Hemmingway-1-GGUF:Q3_K_M",
+        "hemmingway-1",
+        "hemmingway-1:latest",
+    ),
 }
 SPELLING_TO_CANONICAL: dict[str, str] = {
     s: c for c, spellings in FLEET_MODEL_NAMES.items() for s in spellings}
+
+# Converged above but never listed in the public catalogue: Hemmingway-1 is
+# CC BY-NC 4.0, so it is the fleet's own clients' model, not one a Fleet Pass
+# key may be issued for.
+FLEET_ONLY_MODELS: frozenset[str] = frozenset({"Hemmingway-1"})
 
 
 # ---- fleet roles: one word, the best model for it on each box ---------------
@@ -7244,7 +7310,7 @@ def _ctx_rank(t: tuple[str, str], ctx_limit: int) -> int:
 _OLLAMA_META_KEYS = {"block_count", "head_count_kv", "head_count", "key_length",
                      "value_length", "embedding_length", "context_length",
                      "sliding_window", "key_length_swa", "value_length_swa",
-                     "expert_count"}
+                     "expert_count", "full_attention_interval"}
 
 
 # Gemma 3 and 4 interleave five sliding-window attention layers per global
@@ -7304,6 +7370,9 @@ def _ollama_kv_meta(info: Any) -> dict:
         if not isinstance(k, str) or "." not in k:
             continue
         tail = k.split(".", 1)[1].replace("attention.", "")
+        if tail == "recurrent_layers" and isinstance(v, list):
+            out[tail] = [bool(x) for x in v]
+            continue
         if tail in _OLLAMA_META_KEYS:
             try:
                 out[tail] = int(v)
@@ -8845,12 +8914,25 @@ async def openai_proxy(path: str, request: Request):
             deadline = None
             if more:
                 tps_here = None
-                if not stream:
-                    try:
-                        tps_here = (await asyncio.to_thread(measured_tps, fleet_id)).get(hname)
-                    except Exception:  # noqa: BLE001 -- no history is a valid answer
-                        tps_here = None
-                deadline = _answer_deadline(prompt_est, gen_est, resident, stream, tps_here)
+                est_here = None
+                klass_here = host_class(hname)
+                try:
+                    tps_map = await asyncio.to_thread(measured_tps, fleet_id) if not stream else {}
+                    tps_here = tps_map.get(hname)
+                    if klass_here in SLOW_CLASSES:
+                        # The scorer's own estimate for THIS box (a CPU/iGPU
+                        # one): for a streamed request the first byte follows
+                        # the prompt alone, so the generation term is left out.
+                        if stream:
+                            tps_map = await asyncio.to_thread(measured_tps, fleet_id)
+                        pp_map = await asyncio.to_thread(measured_pp, fleet_id)
+                        est_here = _est_wall(cand, fleet_id, resident, tps_map, pp_map,
+                                             prompt_est, 0 if stream else gen_est)
+                except Exception:  # noqa: BLE001 -- no history is a valid answer
+                    tps_here = None
+                    est_here = None
+                deadline = _answer_deadline(prompt_est, gen_est, resident, stream, tps_here,
+                                            est_s=est_here, klass=klass_here)
             try:
                 # Raced, because the wait for the first byte is itself a place
                 # a request gets stuck: llama-swap loading a large model
@@ -9295,9 +9377,35 @@ def _ttfb_deadline(prompt_tokens: int, resident: bool) -> float:
 GEN_RATE_FLOOR = 3.0
 ANSWER_DEADLINE_MAX = 900.0
 
+# A box the fleet KNOWS is slow (2026-10-25). The two formulas above assume a
+# GPU: 150 prompt tokens a second and a 3 tok/s decode floor, capped at 15
+# minutes. the downstream app's letter writer, Hemmingway-1 (a dense 27B), is also
+# served by the always-on CPU/iGPU boxes -- server-1's 680M, cpu-box-1's and
+# blackbox's CPUs -- whenever gpu-desktop-1 and gpu-laptop-3 are away, and there ONE call
+# reads an 11k-token prompt for 5-15 minutes and decodes at 2-4 tok/s. On
+# 2026-10-22..24 every such call was cut off by this deadline with the box
+# still writing (gpu-laptop-2: "no first byte within 550 s", then 1800 s of
+# cooldown each time), so the next box started the same letter from scratch
+# and the caller's own deadline ran out before any of them finished.
+#
+# The estimate the scorer already computes for each candidate (_est_wall:
+# class stand-ins or measured rates, the cold load, the prompt, the
+# generation) is the honest number, so when the proxy has it the deadline is
+# at least SLOW_EST_FACTOR times that plus a margin -- for the `small` and
+# `fallback` classes only, with the cap raised to an hour there. A GPU-class
+# box (and a peer the spec sheet has not classed) keeps the formulas above
+# byte for byte: its estimate is small, a stuck load there should still be
+# caught in 15 minutes, and a wrong estimate must not be able to hold a fast
+# box's caller for an hour. No estimate: the formulas above, unchanged.
+SLOW_EST_FACTOR = 2.5
+SLOW_EST_MARGIN = 120.0
+ANSWER_DEADLINE_MAX_SLOW = 3600.0
+SLOW_CLASSES = frozenset({"small", "fallback"})
+
 
 def _answer_deadline(prompt_tokens: int, gen_tokens: int, resident: bool,
-                     stream: bool, tps: float | None = None) -> float:
+                     stream: bool, tps: float | None = None, *,
+                     est_s: float | None = None, klass: str | None = None) -> float:
     """The failover deadline for one attempt at one box.
 
     For a STREAMED request that is the first byte: the box has read the
@@ -9317,7 +9425,18 @@ def _answer_deadline(prompt_tokens: int, gen_tokens: int, resident: bool,
     if not stream:
         rate = max(GEN_RATE_FLOOR, float(tps or 0.0) * 0.5)
         d += max(0, gen_tokens) / rate
-    return min(ANSWER_DEADLINE_MAX, d)
+    cap = ANSWER_DEADLINE_MAX
+    try:
+        est = float(est_s or 0.0)
+    except (TypeError, ValueError):
+        est = 0.0
+    if est > 0 and klass in SLOW_CLASSES:
+        # The box's own estimate, with room for it to be optimistic: it never
+        # SHORTENS the deadline, so a slow box that happens to be quick keeps
+        # the formula above.
+        d = max(d, est * SLOW_EST_FACTOR + SLOW_EST_MARGIN)
+        cap = ANSWER_DEADLINE_MAX_SLOW
+    return min(cap, d)
 
 
 # Vocabulary a llama.cpp server (>= b4700) or an older one's plain-text 4xx
@@ -20179,6 +20298,24 @@ DEFAULT_SPECS: dict[str, dict] = {
                    "klass": "small", "always_on": 3},
     "cpu-box-1":    {"ram_gb": 32, "vram_gb": 0, "mem_bw_gbs": 50, "gpu_tflops": 0,
                    "cpu": "CPU only", "gpu": "", "klass": "fallback", "always_on": 5},
+    # blackbox (2026-10-24): the always-on Windows PC that runs the downstream app's
+    # discovery scraper, 32 GB of DDR4 since its upgrade (12 before) and no
+    # GPU worth the name (a 512 MB iGPU carve). It runs llama.cpp on six Zen 3
+    # cores behind llama-swap and keeps a STANDBY copy of every sub-40B model
+    # the fleet serves (hosts/blackbox/provision-models.ps1), so a model whose
+    # only warm home is asleep -- Lightning on the gaming boxes, Hemmingway-1
+    # on gpu-laptop-3/gpu-desktop-1, the 27B when mac-laptop-1 is away -- still has a route.
+    # `fallback` is the honest class (a 27B decodes at a few tok/s here) and
+    # `reserve` is the whole point of the box in THIS fleet: it is chosen
+    # only when every non-reserve candidate is saturated or cooling, and the
+    # preload loop never warms it, so it costs the fleet nothing until it is
+    # the last option. always_on 6 ranks it behind cpu-box-1 among the CPU
+    # boxes. mem_bw_gbs is dual-channel DDR4-3200. It is NOT npu-box-1: that row
+    # above is the accelerator that hung off this PC's USB-C until
+    # 2026-10-24, and it keeps its row for wherever it is hooked up next.
+    "blackbox":   {"ram_gb": 32, "vram_gb": 0, "mem_bw_gbs": 50, "gpu_tflops": 0,
+                   "cpu": "Ryzen 5 7430U", "gpu": "", "klass": "fallback",
+                   "always_on": 6, "reserve": True},
     "server-1":   {"ram_gb": 18, "vram_gb": 0, "mem_bw_gbs": 40, "gpu_tflops": 4,
                    "cpu": "APU", "gpu": "680M", "klass": "small", "always_on": 2},
     "mini-pc-1":     {"ram_gb": 16, "vram_gb": 0, "mem_bw_gbs": 50, "gpu_tflops": 8,

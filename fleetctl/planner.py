@@ -56,6 +56,11 @@ SCHEMA: dict[str, dict[str, tuple[type | tuple, bool]]] = {
         "role": (str, True),          # peer | hub
         "klass": (str, False),        # routing class: gpu|big|small|fallback|hub
         "description": (str, False),
+        # A plan kept for a box that is nowhere right now (npu-box-1, 2026-10-24:
+        # the device left BLACKBOX and will hang off another node). Parked
+        # plans are excused from the address requirement, the deploy census
+        # and the peer reconcile, and must be in no deploy list.
+        "parked": (bool, False),
     },
     "platform": {
         "os": (str, True),            # linux | darwin | windows
@@ -553,6 +558,11 @@ COMMENTS: dict[str, str] = {
     "host.klass": (
         "Routing class. Derived from VRAM unless stated: big >= 32 GB,\n"
         "gpu >= 6 GB, small otherwise, fallback for a CPU-only box."),
+    "host.parked": (
+        "The box is nowhere right now and this plan is kept for its return\n"
+        "(the npu-box-1 left BLACKBOX 2026-10-24). No address is required, the\n"
+        "deploy census and `fleetctl peers` leave it alone, and it must be\n"
+        "in no deploy list. Delete the line when the box has a home again."),
     "paths.llama_server": (
         "Only here when the engine is NOT in the fleet's own bin -- a box\n"
         "that built llama.cpp itself keeps its binaries where it built them.\n"

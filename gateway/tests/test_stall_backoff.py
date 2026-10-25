@@ -120,6 +120,51 @@ class TestAnswerDeadline:
         assert old < 140
         assert new > 200
 
+    # ---- a box the fleet knows is slow (2026-10-25) ----------------------
+
+    def test_a_slow_box_gets_a_deadline_sized_by_its_own_estimate(self, monkeypatch):
+        monkeypatch.setattr(gw, "_ttfb_deadline", lambda p, r: 100.0)
+        # server-1's 680M on a dense 27B: the scorer says ~460 s for the whole
+        # answer. The GPU formula (100 + 1024/3 = 441 s) cut the box off with
+        # the letter half written; the deadline follows the estimate instead.
+        assert gw._answer_deadline(11000, 1024, True, stream=False, est_s=460.0, klass="small") \
+            == pytest.approx(460.0 * gw.SLOW_EST_FACTOR + gw.SLOW_EST_MARGIN)
+
+    def test_a_slow_class_may_pass_the_gpu_cap_but_not_the_slow_one(self, monkeypatch):
+        monkeypatch.setattr(gw, "_ttfb_deadline", lambda p, r: 100.0)
+        # cpu-box-1's CPU: ~1200 s estimated. 2.5x + margin is 3120 s -- past
+        # the 900 s a GPU box gets, inside the hour a CPU box gets.
+        d = gw._answer_deadline(11000, 1024, True, stream=False, est_s=1200.0, klass="fallback")
+        assert d == pytest.approx(1200.0 * gw.SLOW_EST_FACTOR + gw.SLOW_EST_MARGIN)
+        assert gw.ANSWER_DEADLINE_MAX < d < gw.ANSWER_DEADLINE_MAX_SLOW
+        # ...and an hour is where even a CPU box's deadline stops.
+        assert gw._answer_deadline(11000, 1024, True, stream=False, est_s=5000.0, klass="fallback") \
+            == gw.ANSWER_DEADLINE_MAX_SLOW
+
+    def test_a_gpu_class_box_is_untouched_whatever_its_estimate(self, monkeypatch):
+        monkeypatch.setattr(gw, "_ttfb_deadline", lambda p, r: 100.0)
+        # A fast card, the big box, a peer the sheet has not classed: the
+        # formula above, byte for byte -- a wrong estimate must not be able
+        # to hold a fast box's caller for an hour.
+        base = gw._answer_deadline(11000, 1024, True, stream=False)
+        for klass in ("gpu", "big", "hub", "unknown", None):
+            assert gw._answer_deadline(11000, 1024, True, stream=False, est_s=5000.0, klass=klass) == base
+
+    def test_an_estimate_never_shortens_the_deadline(self, monkeypatch):
+        monkeypatch.setattr(gw, "_ttfb_deadline", lambda p, r: 100.0)
+        base = gw._answer_deadline(5000, 1024, True, stream=False)
+        assert gw._answer_deadline(5000, 1024, True, stream=False, est_s=10.0, klass="small") == base
+        assert gw._answer_deadline(5000, 1024, True, stream=False, est_s=None, klass="small") == base
+        assert gw._answer_deadline(5000, 1024, True, stream=False, est_s="junk", klass="small") == base
+
+    def test_a_streamed_request_on_a_slow_box_waits_for_its_prompt_to_be_read(self, monkeypatch):
+        monkeypatch.setattr(gw, "_ttfb_deadline", lambda p, r: 100.0)
+        # Streamed: the estimate the proxy passes is the prompt-reading part
+        # alone (generation is guarded mid-stream); 700 s of prompt reading on
+        # a CPU still gets a deadline that covers it.
+        assert gw._answer_deadline(11000, 1024, True, stream=True, est_s=700.0, klass="fallback") \
+            == pytest.approx(700.0 * gw.SLOW_EST_FACTOR + gw.SLOW_EST_MARGIN)
+
 
 class TestProxyDeadline:
     def test_non_streamed_slow_answer_inside_the_generation_budget_is_awaited(

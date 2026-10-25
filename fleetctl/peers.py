@@ -114,6 +114,11 @@ def desired(repo: Path) -> tuple[dict[str, dict], list[str]]:
         doc = hostfile.load(path)
         net = doc.get("network") or {}
         name = (doc.get("host") or {}).get("name") or path.parent.name
+        # A parked plan (host.parked) is a box that is nowhere right now; the
+        # hub's own entry for it, if any, is left exactly as the operator
+        # keeps it (Not in use), neither corrected nor reported.
+        if (doc.get("host") or {}).get("parked"):
+            continue
         ip = net.get("tailnet_ip")
         if not ip:
             problems.append(f"{name}: no network.tailnet_ip in {path}")
