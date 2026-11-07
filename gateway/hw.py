@@ -366,8 +366,20 @@ def nvidia_stats(nvsmi: str | None = None) -> list[dict]:
     return out
 
 
-_wingpu_cache: dict[str, Any] = {"t": 0.0, "gpus": []}
+_wingpu_cache: dict[str, Any] = {"t": 0.0, "gpus": [], "ok": False}
 WIN_GPU_TTL = 10.0
+# An EMPTY reading is cached too, and for longer. The cache used to hold only
+# while a card had been found, so a Windows box with no GPU worth the name --
+# blackbox, whose 512 MB iGPU carve the size filter below drops -- re-ran the
+# whole PowerShell round trip on EVERY telemetry call: synchronously, inside
+# the event loop, two to three seconds each, back to back as the hub polled,
+# and the gateway never got to answer /health inside the self-watchdog's 10 s
+# (2026-10-24: "busy, not dead" for an hour, then restart loops). A box does
+# not grow a GPU between polls, so a successful empty reading holds for five
+# minutes; a round trip that itself failed (no counters, no PowerShell) is
+# retried sooner, since that is a condition that can clear.
+WIN_GPU_EMPTY_TTL = 300.0
+WIN_GPU_FAIL_TTL = 60.0
 
 # One PowerShell round trip for everything Windows will tell us about a GPU
 # without vendor tooling. Written as a single script because starting
@@ -474,9 +486,17 @@ def windows_gpu_stats() -> list[dict]:
     invented. Cached for WIN_GPU_TTL because it costs a PowerShell start."""
     if platform.system() != "Windows":
         return []
-    if _wingpu_cache["gpus"] and time.time() - _wingpu_cache["t"] < WIN_GPU_TTL:
-        return _wingpu_cache["gpus"]
+    if _wingpu_cache["t"]:
+        if _wingpu_cache["gpus"]:
+            ttl = WIN_GPU_TTL
+        elif _wingpu_cache.get("ok"):
+            ttl = WIN_GPU_EMPTY_TTL
+        else:
+            ttl = WIN_GPU_FAIL_TTL
+        if time.time() - _wingpu_cache["t"] < ttl:
+            return _wingpu_cache["gpus"]
     gpus: list[dict] = []
+    ok = False
     try:
         p = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", _WIN_GPU_PS],
@@ -515,9 +535,10 @@ def windows_gpu_stats() -> list[dict]:
             # honest placeholder rather than dead weight.
             for g in gpus:
                 g["vram_used"] = None
+        ok = True
     except Exception:  # noqa: BLE001 -- no counters is just no telemetry
         gpus = []
-    _wingpu_cache.update(t=time.time(), gpus=gpus)
+    _wingpu_cache.update(t=time.time(), gpus=gpus, ok=ok)
     return gpus
 
 

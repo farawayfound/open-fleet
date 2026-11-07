@@ -508,6 +508,9 @@ class TestEveryPlanInTheRepo:
         appliable plan is a box that cannot be provisioned."""
         for path in self._plans(repo):
             doc = hostfile.load(path)
+            if doc["host"].get("parked"):
+                # Nowhere to apply it: no address until the box has a home.
+                continue
             facts = dict(linux_facts)
             facts["os"] = dict(linux_facts["os"], family=doc["platform"]["os"],
                                arch=doc["platform"].get("arch") or "x86_64",

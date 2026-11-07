@@ -1,0 +1,127 @@
+# Elasticsearch + Kibana for the fleet's observability data. One node, TLS on, published ONLY on the tailnet
+# address and loopback. Drive it with setup.sh: running `docker compose up` on a fresh checkout skips the steps that
+# make it safe (secrets, the rendered kibana.yml). See ../docs/observability.md for the design.
+name: fleet-obs
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "3" }
+
+# The bridge gets a fixed name so scripts/firewall.sh can scope its rule to this stack alone ("-o br-fleet-obs")
+# and never touch any other forwarded traffic on the host.
+networks:
+  default:
+    name: fleet-obs
+    driver_opts:
+      com.docker.network.bridge.name: br-fleet-obs
+
+secrets:
+  elastic_password:
+    file: ./.secrets/elastic_password
+
+services:
+  # One-shot: CA, leaf and chain, with the CA key split off into a volume only this service mounts.
+  setup:
+    image: ${ES_IMAGE:?set ES_IMAGE}
+    user: "0"
+    restart: "no"
+    volumes:
+      - ca-private:/ca-private              # ca.key lives ONLY here
+      - es-certs:/certs-es                  # leaf key, chain and ca.crt (es01 only)
+      - kb-certs:/certs-kb                  # ca.crt only (kibana, read-only)
+      - ./scripts/setup-certs.sh:/setup-certs.sh:ro
+    environment:
+      ES_CERT_IPS: ${ES_CERT_IPS:?comma list, e.g. 127.0.0.1,100.64.0.10}
+      ES_CERT_DNS: ${ES_CERT_DNS:-es01,localhost}
+      FORCE_LEAF: ${FORCE_LEAF:-0}
+    command: ["bash", "/setup-certs.sh"]
+    logging: *logging
+
+  es01:
+    image: ${ES_IMAGE:?set ES_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      setup: { condition: service_completed_successfully }
+    secrets: [elastic_password]
+    volumes:
+      - es-certs:/usr/share/elasticsearch/config/certs:ro
+      - esdata01:/usr/share/elasticsearch/data
+      - ${ES_SNAPSHOT_DIR:-./snapshots}:/usr/share/elasticsearch/snapshots
+    ports:                                  # HOST_IP:HOST_PORT:CONTAINER_PORT, never 0.0.0.0
+      - "${TAILNET_IP:?set TAILNET_IP}:9200:9200"
+      - "127.0.0.1:9200:9200"
+    environment:
+      - node.name=es01
+      - cluster.name=${CLUSTER_NAME:-fleet-obs}
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD_FILE=/run/secrets/elastic_password
+      - bootstrap.memory_lock=true
+      # Pinned rather than auto-sized: the container limit below is 4g and the heap must stay at about half of it,
+      # the rest being off-heap (page cache, direct buffers) that Lucene lives on.
+      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms2g -Xmx2g}"
+      - xpack.license.self_generated.type=basic
+      - xpack.security.enabled=true
+      - xpack.security.authc.api_key.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/es01.key
+      - xpack.security.http.ssl.certificate=certs/es01-chain.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/es01.key
+      - xpack.security.transport.ssl.certificate=certs/es01-chain.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - path.repo=/usr/share/elasticsearch/snapshots
+    mem_limit: ${ES_MEM_LIMIT:-4g}
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65535, hard: 65535 }
+    healthcheck:                            # no credentials: 200 or 401 both mean TLS and HTTP are up
+      test:
+        - CMD-SHELL
+        - >-
+          code=$$(curl -s -o /dev/null -w '%{http_code}' --cacert config/certs/ca.crt https://localhost:9200/);
+          [ "$$code" = 200 ] || [ "$$code" = 401 ]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    logging: *logging
+
+  kibana:
+    image: ${KIBANA_IMAGE:?set KIBANA_IMAGE}
+    profiles: ["kibana"]                    # started only by setup.sh, once .secrets/kibana.yml exists
+    restart: unless-stopped
+    depends_on:
+      es01: { condition: service_healthy }
+    volumes:
+      - kb-certs:/usr/share/kibana/config/certs:ro
+      - kibanadata:/usr/share/kibana/data
+      - ./.secrets/kibana.yml:/usr/share/kibana/config/kibana.yml:ro   # holds the token and the keys, not env
+    ports:
+      - "${TAILNET_IP:?set TAILNET_IP}:5601:5601"
+      - "127.0.0.1:5601:5601"
+    mem_limit: ${KIBANA_MEM_LIMIT:-1536m}
+    environment:
+      # Kibana's default Node heap is about as large as the container limit above, so a wide time range would be OOM-killed
+      # instead of throttled by the garbage collector. 1 GB of heap leaves the rest for off-heap use. A first guess:
+      # measure on the first box and raise both together.
+      NODE_OPTIONS: --max-old-space-size=1024
+    healthcheck:                            # /api/status needs auth, so probe /: 200, 302 or 401 means up, 503 not ready
+      test:
+        - CMD-SHELL
+        - >-
+          code=$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5601/);
+          [ "$$code" = 200 ] || [ "$$code" = 302 ] || [ "$$code" = 401 ]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    logging: *logging
+
+volumes:
+  ca-private: {}
+  es-certs: {}
+  kb-certs: {}
+  esdata01: {}
+  kibanadata: {}

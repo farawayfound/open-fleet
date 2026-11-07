@@ -1259,3 +1259,56 @@ class TestAnOkThatCannotSeeThePermission:
         assert ctx.restrict(p) is True
         assert ctx.acl_strangers(p) == []
         assert p.read_text(encoding="utf-8") == text
+
+
+# --------------------------------------------------------------------------
+# gpu-laptop-6, 2026-11-02: a fresh fleetctl Linux install left /etc/llmstack
+# root:root 0755 with gateway.env 0600 root. `verify` was green, and the first
+# model save on the dashboard failed with PermissionError on the temp file the
+# gateway writes beside llama-swap.yaml. The grants step now checks and fixes
+# the directory's group and mode.
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
+class TestGrantsHandsTheConfigDirectoryToTheAccount:
+    def _ctx(self, linux_facts, empty_repo, tmp_path, monkeypatch):
+        import os
+        script = empty_repo / "hosts" / "linux" / "grants.sh"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        p = ctx.plan["paths"]
+        if p["etc"] == p["state"]:
+            pytest.skip("this plan keeps its config in the state directory")
+        monkeypatch.setattr(Grants, "_account_ids",
+                            staticmethod(lambda user: (os.getuid() + 1, os.getgid())))
+        grant = ctx.path("/etc/sudoers.d/llmstack-fleet")
+        grant.parent.mkdir(parents=True, exist_ok=True)
+        grant.write_text("", encoding="utf-8")
+        etc = ctx.path(p["etc"])
+        etc.mkdir(parents=True, exist_ok=True)
+        return ctx, etc
+
+    def test_a_directory_the_group_cannot_write_is_drift(
+            self, linux_facts, empty_repo, tmp_path, monkeypatch):
+        ctx, etc = self._ctx(linux_facts, empty_repo, tmp_path, monkeypatch)
+        etc.chmod(0o755)
+        c = Grants().check(ctx)
+        assert c.state == DRIFT
+        assert any("chmod 0770" in step for step in c.plan)
+
+    def test_a_group_writable_directory_is_ok(
+            self, linux_facts, empty_repo, tmp_path, monkeypatch):
+        ctx, etc = self._ctx(linux_facts, empty_repo, tmp_path, monkeypatch)
+        etc.chmod(0o770)
+        assert Grants().check(ctx).state == OK
+
+    def test_an_env_file_only_root_can_read_is_drift(
+            self, linux_facts, empty_repo, tmp_path, monkeypatch):
+        ctx, etc = self._ctx(linux_facts, empty_repo, tmp_path, monkeypatch)
+        etc.chmod(0o770)
+        env = ctx.path(ctx.plan["paths"]["envfile"])
+        env.write_text("X=1\n", encoding="utf-8")
+        env.chmod(0o600)
+        c = Grants().check(ctx)
+        assert c.state == DRIFT and "gateway.env" in c.detail
+        env.chmod(0o640)
+        assert Grants().check(ctx).state == OK

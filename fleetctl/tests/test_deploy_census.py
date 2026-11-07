@@ -7,6 +7,10 @@ without them every half hour, and the two boxes simply stayed on the gateway
 they were provisioned with.
 
 This reads the checked-in script; it runs nothing and reaches no machine.
+
+A plan marked `host.parked: true` is a box that has left (npu-box-1, 2026-10-24)
+and whose plan is kept for its return -- and the rule inverts for it: it
+must appear in no list at all.
 """
 from __future__ import annotations
 
@@ -47,15 +51,40 @@ def _plans(repo) -> dict[str, dict]:
     return out
 
 
+def _parked(plan: dict) -> bool:
+    """`host.parked: true` -- a plan kept for a box that is nowhere right now.
+
+    npu-box-1 is the case (2026-10-24): the npu-box-1 left BLACKBOX and its plan is
+    kept, address commented out, for the node it is next hooked up through.
+    Such a plan must NOT be in a deploy list -- the script would resolve the
+    bare name to nothing and report a phantom box offline every half hour,
+    or worse, deploy to the address of whatever machine inherited it.
+    `fleetctl peers` skips it for the same reason (peers.desired()).
+    """
+    return bool((plan.get("host") or {}).get("parked"))
+
+
 class TestEveryPlannedBoxIsDeployedTo:
     def test_each_one_is_in_the_list_for_its_own_os(self, repo, script):
         missing = []
         for name, plan in _plans(repo).items():
+            if _parked(plan):
+                continue
             family = (plan.get("platform") or {}).get("os")
             wanted = DEPLOY_NAME.get(name, name)
             if wanted not in _list(script, FAMILY_LIST[family]):
                 missing.append(f"{name} ({family}) is not in {FAMILY_LIST[family]}")
         assert missing == []
+
+    def test_a_parked_plan_with_no_address_is_in_no_list(self, repo, script):
+        listed = {h for fam in FAMILY_LIST.values() for h in _list(script, fam)}
+        parked = {DEPLOY_NAME.get(n, n) for n, p in _plans(repo).items() if _parked(p)}
+        assert parked & listed == set(), (
+            "a parked plan (host.parked) has no box to deploy to: "
+            f"{sorted(parked & listed)}")
+        # And the one parked today is the one this rule was written for.
+        if "npu-box-1" in _plans(repo):
+            assert "npu-box-1" in parked
 
     def test_nothing_is_deployed_to_that_has_no_plan(self, repo, script):
         planned = {DEPLOY_NAME.get(n, n) for n in _plans(repo)}

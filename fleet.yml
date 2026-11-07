@@ -34,3 +34,25 @@ access:
   cf_team_domain: your-team.cloudflareaccess.com
   admin_emails:
     - admin@example.com
+
+# Optional, and off unless you uncomment it: ship every box's host metrics, the
+# journal of the units below and the gateway's own numbers to an Elastic stack
+# on the private network (see docs/fleetctl.md and docs/observability.md). The
+# ingest key and the CA fingerprint are NOT keys here -- they arrive in a file
+# the operator carries to each box, so nothing secret is ever in this file.
+# Turn it on one box at a time in that box's own host.yml (`observability:` +
+# `enabled: true`) once that box has its secrets file; enabling it fleet-wide
+# first makes every box that lacks one report `blocked`.
+#
+# observability:
+#   enabled: false
+#   agent_version: 9.5.6        # keep equal to the stack's STACK_VERSION
+#   # One item per version/asset, from <download url>.sha512. No `:` in an item.
+#   agent_sha512: [9.5.6/linux-x86_64.tar.gz=<128 hex digits>, 9.5.6/linux-arm64.tar.gz=<128 hex digits>]
+#   secrets_file: /etc/fleet-obs/agent-output.env
+#   journald_units: [llm-gateway, llama-swap, ollama, cloudflared, tailscaled]
+#   metrics_period_s: 30
+#   status_interval_s: 300      # /admin/api/status is a live read: keep it slow
+#   agent_mem_high: 768M
+#   agent_mem_max: 1G
+#   agent_cpu_quota: 50%

@@ -21,11 +21,11 @@ spelling:
 |---|---|---|---|
 | Linux + systemd | apu-box-1, hub, cpu-box-1, server-1, gpu-laptop-1 | `systemd` units | `/etc/llmstack/gateway.env` |
 | macOS + cron | mac-desktop-1, mac-laptop-2, mac-laptop-1 | `@reboot` + a 5-minute keepalive | `~/llmstack/gateway.env` |
-| Windows + schtasks | apu-tablet-1, apu-tablet-2, mini-pc-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1 | SYSTEM scheduled tasks | `C:\llmstack\gateway.env.cmd` |
+| Windows + schtasks | blackbox, apu-tablet-1, apu-tablet-2, mini-pc-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1 | SYSTEM scheduled tasks | `C:\llmstack\gateway.env.cmd` |
 
 | engine | boxes | upstream |
 |---|---|---|
-| llama.cpp behind llama-swap | apu-box-1, apu-tablet-2, mac-laptop-2, mac-laptop-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1, server-1, gpu-laptop-1 | `127.0.0.1:8081` |
+| llama.cpp behind llama-swap | apu-box-1, blackbox (CPU build), apu-tablet-2, mac-laptop-2, mac-laptop-1, gpu-laptop-3, gpu-desktop-2, gpu-laptop-2, gpu-desktop-1, server-1, gpu-laptop-1 | `127.0.0.1:8081` |
 | Ollama | mac-desktop-1, cpu-box-1, mini-pc-1 | `127.0.0.1:11434` |
 | none (routes, does not serve) | apu-tablet-1, hub | `8081`, where nothing listens |
 
@@ -170,6 +170,122 @@ explicitly rather than assuming `card0`. `check()` reads the same helper's
 `status` verb to report wanted vs. active, the way `gpu-cap` does for the
 GTT window -- except a sysfs write is synchronous, so there is no "staged,
 pending reboot" state here, only active or not.
+
+## Host metrics, journald and the gateway's numbers in Elastic (Linux, opt-in)
+
+```yaml
+observability:
+  enabled: true
+  agent_version: 9.5.6                       # the stack's version; default 9.5.6
+  agent_sha512: [9.5.6/linux-x86_64.tar.gz=<128 hex>]   # one item per version/asset
+  secrets_file: /etc/fleet-obs/agent-output.env          # carried by hand, see below
+  journald_units: [llm-gateway, llama-swap, ollama]      # REPLACES the fleet's list
+  collect_status: false      # /admin/api/status: default true on the hub, false on peers
+  metrics_period_s: 30       # floors: metrics/health 10, gpu 30, usage 60, status/fleet 120
+  process_top_n: 5           # 1..20
+  agent_mem_high: 768M       # systemd drop-in: MemoryHigh / MemoryMax / CPUQuota
+  agent_mem_max: 1G
+  agent_cpu_quota: 50%
+```
+
+Every key but `enabled` is optional and the defaults are in
+`fleetctl/steps/observability.py`. The `observability-agent` step installs an
+Elastic Agent in **standalone** mode -- never enrolled, so there is no Fleet
+Server and no enrolment credential on any box -- whose policy is a file
+fleetctl renders from the plan. That is what makes the step honest under
+`--dry-run`: the box holds exactly those bytes or it does not.
+
+What it ships, to the stack under `observability/` (see
+[`observability.md`](observability.md) for the hub side):
+
+| data stream | what | how often |
+|---|---|---|
+| `metrics-system.*` | cpu, memory, load, network, diskio, filesystem, fsstat, uptime, process (top N, names only -- command lines are dropped because engines are started with keys in argv), process and socket summaries | `metrics_period_s`; 60 s for the slow ones |
+| `logs-llmstack.journal` | the journal of the listed units; lines that look like they carry a credential are dropped whole, and so are the agent's own `/health` polls | continuous |
+| `logs-llmstack.health` | `/health` on loopback, no auth | `health_interval_s` |
+| `logs-llmstack.gpu`, `.usage` | `/admin/api/gpu`, `/admin/api/usage?hours=1` (a rolling window: do not sum across documents) | `gpu_interval_s`, `usage_interval_s` |
+| `logs-llmstack.status` | `/admin/api/status`, which is a live read (a CPU sample, `nvidia-smi`, a process walk, `systemctl`) | `status_interval_s`, only where `collect_status` |
+| `logs-llmstack.fleet_summary`, `.fleet_overview`, `.peers` | the hub's fleet endpoints | `fleet_interval_s`, hub only |
+| `logs-llmstack.requests` | the gateway's own request log, one JSON line per metered request | continuous |
+
+The last row needs the gateway to write the log, and `fleetctl apply` does
+that: while `observability.enabled` is true the `envfile` step sets
+`LLMSTACK_ACCESS_LOG` to `<paths.state>/access.ndjson` (the gateway rotates it
+itself) and the agent tails the same path. Counts, latencies and the API key's
+display name -- never a prompt, a completion or a key. The gateway reads its
+environment once at start, so **restart `llm-gateway` once** after the first
+apply on a box that was already running. Turning `observability` off drops the
+line again; a rotated size you set by hand
+(`LLMSTACK_ACCESS_LOG_MAX_BYTES`) is carried across as usual.
+
+**Opt-in, one box at a time.** With no `observability:` section the step does
+not appear in the run at all. `enabled: false` in a `host.yml` turns it off
+for that box, and `steps.skip: [observability-agent]` or
+`--only observability-agent` work as for any step. Enable it per host, after
+that box has its secrets file: a box that is enabled without one reports
+`blocked`, and one blocked step makes every fleet-wide apply exit 2.
+
+**How the key and the fingerprint reach a node.** The stack's `setup.sh key
+<name>` writes one file per node holding `ES_HOSTS`, `ES_API_KEY` (the
+`<id>:<secret>` form), `ES_CA_FINGERPRINT` and `ES_KEY_EXPIRES`. The operator
+carries it, without a temporary copy, to `secrets_file`:
+
+```
+ssh <node> 'sudo install -d -m 0700 -o root -g root /etc/fleet-obs && \
+  sudo install -m 0600 -o root -g root /dev/stdin /etc/fleet-obs/agent-output.env' \
+  < observability/.secrets/agent-output-<node>.env
+```
+
+Neither value is a `fleet.yml` key, so there is nothing in the plan to leak
+and nothing to drift against the stack: a CA rotation changes one carried
+file. The step reads the file and never copies it anywhere -- not the plan,
+not a log line, not a command's argv. Its directory chain must be root-owned
+with no group or world write bit and none of the paths may be a symlink; a
+box that fails that is `blocked`, not trusted.
+
+**Pinned downloads.** The agent tarball comes from `artifacts.elastic.co` over
+https, and a redirect to any other host is refused. It is compared against
+`agent_sha512` (`<version>/<asset>=<sha512>`; the asset is `linux-x86_64.tar.gz`
+or `linux-arm64.tar.gz`) before anything is extracted, with the digest taken
+from `<url>.sha512` on a version you have just chosen. A version with no pin
+is `blocked`; `allow_unpinned: true` falls back to the sibling `.sha512` file,
+which proves the transfer was whole and nothing about who made it.
+
+**The states.** `ok`: installed, running, policy, token file and resource
+limits as planned -- the detail carries the version the binary reports (or
+`version unknown`), the agent's own status summary and, inside 30 days of
+`ES_KEY_EXPIRES`, a warning. `missing`: not installed, or half-installed
+(binary without a unit: uninstalled first). `drift`: installed, but the
+policy, token file, drop-in or enable state differs. `blocked`: not Linux with
+systemd, no pin, not root, the gateway env file or the secrets file absent,
+malformed or expired, an untrusted path, or the unit failed or crash-looping
+(`journalctl -u elastic-agent`). A version that differs from the pin is shown
+in the detail only: `install --non-interactive` cannot upgrade, so calling it
+drift would be an apply that never converges. In `--dry-run` a missing gateway
+env file is `missing` with the plan, not `blocked`, because on a fresh box
+the apply writes it in an earlier step.
+
+**Where it runs.** The step is `observability-agent`, last in the order and
+after `health` on purpose: a 430 MB download that fails or an agent that
+crash-loops must not stop the gateway's own health check from running. It
+needs real root (not just passwordless sudo) and refuses a sandbox like any
+system step. `check()` never touches the network and never asks whether
+Elasticsearch is reachable.
+
+macOS and Windows are `blocked` when it is enabled for them -- nothing is
+installed. The service names are unverified, extracting the Windows zip may
+exceed `MAX_PATH`, and the macOS install is a system-domain launchd daemon on
+boxes that are supervised by cron.
+
+**Teardown is manual.** Removing the config removes nothing:
+
+```
+sudo /opt/Elastic/Agent/elastic-agent uninstall --force   # not from inside that directory
+sudo rm -rf /etc/fleet-obs /etc/systemd/system/elastic-agent.service.d
+```
+
+then set `observability.enabled: false` for the box and revoke its key on the
+hub. A silent uninstall on a config edit is the wrong default.
 
 ## A keepalive for the Windows tasks
 

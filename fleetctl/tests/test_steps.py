@@ -50,14 +50,23 @@ class TestCatalogue:
         # only has to exist before the step that first enables llama-swap.
         assert ids.index("power-cap") < ids.index("services")
 
-    def test_health_is_last(self):
-        assert steps_mod.ORDER[-1] == "health"
+    def test_health_is_the_last_gateway_critical_step(self):
+        # The agent runs AFTER health, so a failed or slow download of it can
+        # never stop the gateway's own health check from running.
+        assert steps_mod.ORDER[-1] == "observability-agent"
+        assert steps_mod.ORDER[-2] == "health"
+
+    def test_the_agent_step_is_in_the_catalogue_after_health(self):
+        ids = [s.id for s in steps_mod.catalogue()]
+        assert "observability-agent" in ids
+        assert ids.index("observability-agent") > ids.index("health")
 
     def test_system_steps_are_marked_as_such(self):
         marked = {s.id for s in steps_mod.catalogue() if s.system}
         # These are the ones that reach outside the plan's own paths.
         assert marked == {"packages", "service-account", "grants", "power",
-                          "firewall", "gpu-cap", "power-cap", "services"}
+                          "firewall", "gpu-cap", "power-cap", "services",
+                          "observability-agent"}
 
 
 class TestSelection:
@@ -346,6 +355,18 @@ class TestServiceUnits:
         ctx.plan["engine"]["visible_devices"] = "1"
         unit = Services()._units(ctx)["llama-swap.service"]
         assert "GGML_VK_VISIBLE_DEVICES=1" in unit
+
+    def test_cuda_unified_memory_lands_in_the_engine_unit(self, linux_facts,
+                                                          empty_repo, tmp_path):
+        from fleetctl.steps.services import Services
+
+        ctx = ctx_for(linux_facts, empty_repo, tmp_path)
+        ctx.plan["engine"]["llama_swap"] = True
+        unit = Services()._units(ctx)["llama-swap.service"]
+        assert "GGML_CUDA_ENABLE_UNIFIED_MEMORY" not in unit
+        ctx.plan["engine"]["cuda_unified_memory"] = True
+        unit = Services()._units(ctx)["llama-swap.service"]
+        assert "Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1" in unit
 
     def test_cron_lines_carry_an_id_so_a_rerun_replaces_only_its_own(
             self, darwin_facts, empty_repo, tmp_path):

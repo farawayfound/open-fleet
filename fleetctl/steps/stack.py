@@ -261,6 +261,10 @@ class EnvFile(Step):
             vals["LLMSTACK_MAX_AUTO_CTX"] = s["max_auto_ctx"]
         if ctx.plan["availability"]["file"]:
             vals["LLMSTACK_AVAILABILITY_FILE"] = ctx.plan["availability"]["file"]
+        if (ctx.plan.get("observability") or {}).get("enabled"):
+            # The same path the observability step's filestream input tails;
+            # shapes.access_log_path is where the two agree on it.
+            vals["LLMSTACK_ACCESS_LOG"] = shapes.access_log_path(ctx.family, p["state"])
         return vals
 
     # Written only for one engine or the other. When the plan leaves one out,
@@ -271,6 +275,14 @@ class EnvFile(Step):
         "LLMSTACK_MODELS_FROM_UPSTREAM", "LLMSTACK_LLAMA_SERVER",
         "LLMSTACK_LLAMA_BENCH", "LLMSTACK_SWAP_CONFIG",
     })
+
+    # Written only while observability is on, and OWNED either way: switching
+    # it off must drop the line, not carry it across as somebody else's value,
+    # or the gateway keeps writing a request log that nothing ships and nothing
+    # rotates away from the operator's attention. The sizing knobs beside it
+    # (LLMSTACK_ACCESS_LOG_MAX_BYTES / _BACKUPS) are not owned: an operator who
+    # set those by hand keeps them.
+    OBSERVABILITY_KEYS = frozenset({"LLMSTACK_ACCESS_LOG"})
 
     NOTES = {
         "LLMSTACK_BIND": (
@@ -297,6 +309,12 @@ class EnvFile(Step):
             "The file holding the key this box's engine wants on /v1. The\n"
             "gateway reads it at start-up and sends it to that engine alone;\n"
             "rotating the key is writing this file and restarting."),
+        "LLMSTACK_ACCESS_LOG": (
+            "One JSON line per metered request, for the Elastic Agent's\n"
+            "filestream input (observability.enabled). Counts and the key's\n"
+            "name only -- never a prompt, a completion or a key. The gateway\n"
+            "rotates it itself; remove observability.enabled and fleetctl\n"
+            "drops this line on the next apply."),
     }
 
     def foreign(self, ctx, current: str | None) -> dict[str, str]:
@@ -322,7 +340,8 @@ class EnvFile(Step):
         """
         if not current:
             return {}
-        mine = set(self._values(ctx)) | self.ENGINE_KEYS | {"LLMSTACK_ADMIN_TOKEN"}
+        mine = (set(self._values(ctx)) | self.ENGINE_KEYS | self.OBSERVABILITY_KEYS
+                | {"LLMSTACK_ADMIN_TOKEN"})
         out: dict[str, str] = {}
         for line in current.splitlines():
             m = re.match(r"^(?:set |export )?([A-Z][A-Z0-9_]*)=(.*)$", line.strip())

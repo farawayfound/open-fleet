@@ -1,5 +1,5 @@
-"""Does it answer? The last step, and the only one whose failure means the
-whole run failed.
+"""Does it answer? The last gateway-critical step: if this one fails the run
+failed, whatever the opt-in steps after it say.
 
 Everything before this can be verified by inspection -- a file is there, a
 unit is enabled. This one asks the box the only question that matters, over

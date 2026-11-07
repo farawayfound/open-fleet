@@ -112,6 +112,48 @@ class TestWindows:
         gw.windows_gpu_stats()
         assert ps.calls == 1, "a PowerShell start per dashboard poll is the cost this avoids"
 
+    def test_a_box_with_no_card_is_cached_too_and_for_longer(self, on_windows, monkeypatch):
+        """blackbox (2026-10-24): a Windows box whose only adapter is a 512 MB
+        iGPU carve, filtered out below the 2 GiB floor. The cache used to hold
+        only while a card had been FOUND, so every telemetry call re-ran the
+        PowerShell round trip -- synchronously, in the event loop, back to back
+        as the hub polled -- and the gateway never answered /health inside the
+        self-watchdog's 10 s. A box does not grow a GPU between polls."""
+        clock = [1_000_000.0]
+        monkeypatch.setattr(gw.time, "time", lambda: clock[0])
+        ps = FakePS([IGPU])
+        monkeypatch.setattr(gw.subprocess, "run", ps)
+        assert gw.windows_gpu_stats() == []
+        assert gw.windows_gpu_stats() == []
+        assert ps.calls == 1, "an empty reading is a reading; it is cached"
+        clock[0] += gw.hw.WIN_GPU_TTL + 1
+        gw.windows_gpu_stats()
+        assert ps.calls == 1, "held past the 10 s a found card is held for"
+        clock[0] += gw.hw.WIN_GPU_EMPTY_TTL
+        gw.windows_gpu_stats()
+        assert ps.calls == 2, "and re-read once the longer empty TTL lapses"
+
+    def test_a_failed_round_trip_is_retried_sooner_than_an_empty_box(self, on_windows, monkeypatch):
+        """No PowerShell / no counters is a condition that can clear, so it is
+        cached for less than a genuine 'no card here' -- but it IS cached: a
+        failing round trip per poll blocks the loop exactly like a slow one."""
+        clock = [2_000_000.0]
+        monkeypatch.setattr(gw.time, "time", lambda: clock[0])
+        calls = [0]
+
+        def boom(*a, **k):
+            calls[0] += 1
+            raise FileNotFoundError("powershell")
+
+        monkeypatch.setattr(gw.subprocess, "run", boom)
+        assert gw.windows_gpu_stats() == []
+        assert gw.windows_gpu_stats() == []
+        assert calls[0] == 1
+        clock[0] += gw.hw.WIN_GPU_FAIL_TTL + 1
+        gw.windows_gpu_stats()
+        assert calls[0] == 2, "retried after the shorter failure TTL"
+        assert gw.hw.WIN_GPU_FAIL_TTL < gw.hw.WIN_GPU_EMPTY_TTL
+
 
 class TestFailuresAreQuiet:
     """A box with no readable counters reports no GPU. It does not 500 the

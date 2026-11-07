@@ -1,13 +1,18 @@
 {
   "format": 1,
-  "private_sha": "9d141f8b61bc5f41ad2f446c66b1870766529d36",
-  "exported_at": "2026-10-19T03:26:32+00:00",
-  "files": 123,
+  "private_sha": "8f3001d7d997dffa67dbd28d474e6c58c0231da4",
+  "exported_at": "2026-11-07T01:05:33+00:00",
+  "files": 139,
   "overlay_files": 15,
   "executable": [
     "gateway/bin/llmstack-gpuconf",
     "gateway/bin/llmstack-powercap",
     "hosts/linux/grants.sh",
-    "install.sh"
+    "install.sh",
+    "observability/scripts/firewall.sh",
+    "observability/scripts/lib.sh",
+    "observability/scripts/setup-certs.sh",
+    "observability/setup.sh",
+    "observability/smoke.sh"
   ]
 }

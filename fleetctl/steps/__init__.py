@@ -129,16 +129,21 @@ ORDER = (
     "power-cap",
     "services",
     "health",
+    # After health, not before: a 430 MB download that fails (or an agent that
+    # crash-loops) must not stop the gateway's own health check from running.
+    # It is the only step that reaches the network for something the gateway
+    # does not need to serve a request.
+    "observability-agent",
 )
 
 
 def catalogue() -> list[Step]:
     """Every step, in run order. Imported here rather than at module scope so
     a broken step module names itself in the traceback."""
-    from . import engine, health, services, stack, system
+    from . import engine, health, observability, services, stack, system
 
     steps: dict[str, Step] = {}
-    for mod in (stack, system, engine, services, health):
+    for mod in (stack, system, engine, services, health, observability):
         for obj in vars(mod).values():
             if (isinstance(obj, type) and issubclass(obj, Step)
                     and obj is not Step and obj.id):

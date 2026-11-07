@@ -1,0 +1,5 @@
+# Everything here is generated on the hub and must never be committed.
+.env
+.secrets/
+snapshots/
+agent-output*.env

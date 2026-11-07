@@ -242,6 +242,14 @@ class Services(Step):
         if e["llama_swap"]:
             vis = e["visible_devices"]
             extra = f"Environment=GGML_VK_VISIBLE_DEVICES={vis}\n" if vis else ""
+            # Managed allocations, so the NVIDIA driver pages what does not fit
+            # out to system RAM. Measured on gpu-laptop-6 (2026-11-02): with the 7 GB
+            # persona resident, every qwen3.6-35b load failed outright
+            # ("upstream command exited prematurely"); with this set it loaded
+            # beside the persona at 41-47 tok/s (51 alone), and the persona's
+            # first turn after it paid ~1.3 s for its pages to come back.
+            if e.get("cuda_unified_memory"):
+                extra += "Environment=GGML_CUDA_ENABLE_UNIFIED_MEMORY=1\n"
             out["llama-swap.service"] = SYSTEMD_SWAP.format(
                 host=ctx.plan["host"]["name"], user=user, envfile=p["envfile"],
                 bin=p["bin"], swap_config=p["swap_config"],

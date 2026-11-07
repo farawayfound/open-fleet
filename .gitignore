@@ -7,3 +7,7 @@ secrets/
 peers.json
 tunnel.token
 data/
+# the observability stack's generated state: secrets, per-node ingest keys, local env
+**/.env
+**/.secrets/
+**/agent-output*.env

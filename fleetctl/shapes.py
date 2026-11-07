@@ -252,6 +252,39 @@ LLAMA_SWAP_ASSETS: dict[tuple[str, str], str] = {
     ("windows", "ARM64"): "windows_arm64",
 }
 
+# The Elastic Agent tarball for a box, keyed the way LLAMA_SWAP_ASSETS is but
+# with the arch taken from the PLAN (uname -m on Linux: x86_64 / aarch64), not
+# from facts -- engine.py reads it the same way. Linux only in v1: the macOS and
+# Windows installs are unverified (service names, MAX_PATH on the zip, a
+# system-domain launchd daemon under cron), so those families have no entry
+# and the observability step reports BLOCKED for them rather than guessing.
+# Elastic names the arm64 build "arm64" where the kernel says "aarch64".
+ELASTIC_AGENT_ASSETS: dict[tuple[str, str], str] = {
+    ("linux", "x86_64"): "linux-x86_64.tar.gz",
+    ("linux", "aarch64"): "linux-arm64.tar.gz",
+}
+ELASTIC_AGENT_URL = ("https://artifacts.elastic.co/downloads/beats/elastic-agent/"
+                     "elastic-agent-{version}-{asset}")
+
+
+def elastic_agent_asset(family: str, arch: str | None) -> str | None:
+    """The tarball suffix for this box, or None where v1 installs nothing
+    (any other family, any other arch, an arch the plan never learned)."""
+    return ELASTIC_AGENT_ASSETS.get((family, arch or ""))
+
+
+# The gateway's opt-in request log (LLMSTACK_ACCESS_LOG): one ECS-shaped JSON
+# line per metered request. The envfile step names the path and the
+# observability step's filestream input reads it, so the two cannot be allowed
+# to spell it differently -- a typo here is a log nobody ships and nothing
+# reports. Beside the database, in state, because that is the one directory
+# the gateway's service account is already allowed to write.
+ACCESS_LOG_NAME = "access.ndjson"
+
+
+def access_log_path(family: str, state: str) -> str:
+    return join(family, state, ACCESS_LOG_NAME)
+
 
 def llama_asset(family: str, backend: str, arch: str) -> str | None:
     """The release-asset pattern for this box, or None if upstream publishes

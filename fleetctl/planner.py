@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 import ipaddress
+import re
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,11 @@ SCHEMA: dict[str, dict[str, tuple[type | tuple, bool]]] = {
         "role": (str, True),          # peer | hub
         "klass": (str, False),        # routing class: gpu|big|small|fallback|hub
         "description": (str, False),
+        # A plan kept for a box that is nowhere right now (npu-box-1, 2026-10-24:
+        # the device left BLACKBOX and will hang off another node). Parked
+        # plans are excused from the address requirement, the deploy census
+        # and the peer reconcile, and must be in no deploy list.
+        "parked": (bool, False),
     },
     "platform": {
         "os": (str, True),            # linux | darwin | windows
@@ -91,6 +97,12 @@ SCHEMA: dict[str, dict[str, tuple[type | tuple, bool]]] = {
         "llama_swap": (bool, False),
         "swap_listen": (str, False),
         "visible_devices": (str, False),
+        # CUDA on Linux only: llama.cpp allocates managed memory, so the
+        # driver pages overflow out to system RAM instead of failing the load.
+        # For a box that keeps a persistent model resident beside the swap
+        # group on a card too small for both (gpu-laptop-6: the 7 GB persona plus
+        # a 7.6 GB MoE split, on 8 GB).
+        "cuda_unified_memory": (bool, False),
         "models_from_upstream": (bool, False),
         "build_from_source": (bool, False),
         # Pin the release-asset pattern when the default matches more than one
@@ -140,7 +152,44 @@ SCHEMA: dict[str, dict[str, tuple[type | tuple, bool]]] = {
         "skip": (list, False),
         "only": (list, False),
     },
+    # Opt-in. Every leaf is None until somebody sets it, and the step treats
+    # None as "use the default" (steps/observability.py:DEFAULTS) -- the plan
+    # itself stays a flat table of what was stated. A box with no such
+    # section is untouched and the step does not appear in its run.
+    "observability": {
+        "enabled": (bool, False),
+        "agent_version": (str, False),    # the stack's version; no `:` -- host.yml
+        "agent_sha512": (list, False),    # "<version>/<asset>=<128 hex>"
+        "allow_unpinned": (bool, False),
+        "secrets_file": (str, False),     # carried by the operator, never in the plan
+        "journald_units": (list, False),  # bare names; a host list REPLACES the fleet's
+        "collect_status": (bool, False),  # None: on for the hub, off for peers
+        "metrics_period_s": (int, False),
+        "process_top_n": (int, False),
+        "health_interval_s": (int, False),
+        "gpu_interval_s": (int, False),
+        "status_interval_s": (int, False),
+        "usage_interval_s": (int, False),
+        "fleet_interval_s": (int, False),  # hub only
+        "agent_mem_high": (str, False),
+        "agent_mem_max": (str, False),
+        "agent_cpu_quota": (str, False),
+    },
 }
+
+# Floors, not defaults: below these a poll costs the gateway more than the
+# view is worth. /admin/api/status without the routed header is a live read (a
+# CPU sample, nvidia-smi, a process walk, systemctl), which is why its floor is
+# 120 s and its default 300.
+OBSERVABILITY_FLOORS = {
+    "metrics_period_s": 10, "health_interval_s": 10, "gpu_interval_s": 30,
+    "status_interval_s": 120, "usage_interval_s": 60, "fleet_interval_s": 120,
+}
+# httpjson's auth.file arrived in 9.3.0; an agent older than that would read the
+# policy, not understand the stream, and report a healthy agent with no data.
+OBSERVABILITY_MIN_AGENT = (9, 3, 0)
+_PIN = re.compile(r"^\d+\.\d+\.\d+/[a-z0-9._-]+=[0-9a-f]{128}\Z")
+_UNIT = re.compile(r"^[A-Za-z0-9@_.-]+\Z")
 
 class PlanError(ValueError):
     pass
@@ -534,7 +583,63 @@ def validate(plan: dict, *, strict: bool = True) -> list[str]:
             except ValueError:
                 problems.append(f"network.allow_from: {addr!r} is not an "
                                 f"address or a CIDR with its host bits clear")
+    problems += _validate_observability(plan.get("observability") or {})
     return problems
+
+
+def _validate_observability(obs: dict) -> list[str]:
+    """Cross-field checks for `observability:`, only when it is switched on.
+
+    A box that never asked for it is not made to answer for a typo in a block
+    it is not using. Types were already checked by the schema loop; a value of
+    the wrong type is skipped here rather than reported twice.
+    """
+    if obs.get("enabled") is not True:
+        return []
+    out: list[str] = []
+
+    def text(key: str) -> str | None:
+        v = obs.get(key)
+        return v if isinstance(v, str) else None
+
+    ver = text("agent_version")
+    if ver is not None:
+        m = re.match(r"^(\d+)\.(\d+)\.(\d+)\Z", ver)
+        if not m:
+            out.append(f"observability.agent_version {ver!r} is not MAJOR.MINOR.PATCH")
+        elif tuple(int(g) for g in m.groups()) < OBSERVABILITY_MIN_AGENT:
+            out.append(f"observability.agent_version {ver} is older than "
+                       f"{'.'.join(map(str, OBSERVABILITY_MIN_AGENT))}, the first "
+                       f"release whose httpjson input can read a token file")
+    path = text("secrets_file")
+    if path is not None and not path.startswith("/"):
+        out.append(f"observability.secrets_file {path!r} must be an absolute path")
+    pins = obs.get("agent_sha512")
+    for item in pins if isinstance(pins, list) else []:
+        if not isinstance(item, str) or not _PIN.match(item):
+            out.append("observability.agent_sha512 items look like "
+                       "<version>/<asset>=<128 hex digits>, e.g. "
+                       f"9.5.6/linux-x86_64.tar.gz=...; got {str(item)[:48]!r}")
+    units = obs.get("journald_units")
+    for unit in units if isinstance(units, list) else []:
+        if not isinstance(unit, str) or not _UNIT.match(unit):
+            out.append(f"observability.journald_units: {unit!r} is not a unit "
+                       f"name (letters, digits and @ _ . - only)")
+    for key, floor in OBSERVABILITY_FLOORS.items():
+        v = obs.get(key)
+        if isinstance(v, int) and not isinstance(v, bool) and v < floor:
+            out.append(f"observability.{key} {v} is below the {floor} s floor")
+    top = obs.get("process_top_n")
+    if isinstance(top, int) and not isinstance(top, bool) and not 1 <= top <= 20:
+        out.append(f"observability.process_top_n {top} must be between 1 and 20")
+    for key in ("agent_mem_high", "agent_mem_max"):
+        v = text(key)
+        if v is not None and not re.match(r"^\d+[KMG]\Z", v):
+            out.append(f"observability.{key} {v!r} must look like 768M or 1G")
+    v = text("agent_cpu_quota")
+    if v is not None and not re.match(r"^\d+%\Z", v):
+        out.append(f"observability.agent_cpu_quota {v!r} must look like 50%")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -553,6 +658,11 @@ COMMENTS: dict[str, str] = {
     "host.klass": (
         "Routing class. Derived from VRAM unless stated: big >= 32 GB,\n"
         "gpu >= 6 GB, small otherwise, fallback for a CPU-only box."),
+    "host.parked": (
+        "The box is nowhere right now and this plan is kept for its return\n"
+        "(the npu-box-1 left BLACKBOX 2026-10-24). No address is required, the\n"
+        "deploy census and `fleetctl peers` leave it alone, and it must be\n"
+        "in no deploy list. Delete the line when the box has a home again."),
     "paths.llama_server": (
         "Only here when the engine is NOT in the fleet's own bin -- a box\n"
         "that built llama.cpp itself keeps its binaries where it built them.\n"
@@ -595,6 +705,12 @@ COMMENTS: dict[str, str] = {
         "system RAM and looks like a perfectly good card to anything picking\n"
         "device 0 -- every model would load onto it and simply run several\n"
         "times slower, with the discrete card idle beside it."),
+    "engine.cuda_unified_memory": (
+        "CUDA on Linux: let llama.cpp oversubscribe the card into system RAM\n"
+        "(GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 on the llama-swap unit). Without it\n"
+        "a load that does not fit fails outright -- Linux NVIDIA drivers have no\n"
+        "system-memory fallback, unlike Vulkan on an APU or CUDA on Windows. Set\n"
+        "it where a persistent model shares the card with the swap group."),
     "paths.models": (
         "Where the weights are. Frequently NOT on this box's system disk --\n"
         "an external SSD, or Ollama's own store. The gateway survives this\n"
@@ -633,6 +749,17 @@ COMMENTS: dict[str, str] = {
         "use this machine right now'. The gateway stops advertising its\n"
         "models to the hub whenever the answer is no. For a box that is\n"
         "somebody's daily driver before it is a peer."),
+    "observability.enabled": (
+        "Install the Elastic Agent on this box (step observability-agent).\n"
+        "Turn it on one box at a time, AFTER the operator has carried that\n"
+        "box's ingest-key file to observability.secrets_file: a box that is\n"
+        "enabled without one reports blocked, and a blocked step makes every\n"
+        "fleet-wide apply exit 2. Setting it false removes nothing that is\n"
+        "already installed -- see docs/fleetctl.md for the manual teardown."),
+    "observability.journald_units": (
+        "Units whose journal goes to the stack. A list here REPLACES the\n"
+        "fleet's list rather than adding to it, so a box with an extra unit\n"
+        "(the hub's router, say) names all of them."),
     "steps.skip": (
         "Step ids `fleetctl apply` should leave alone on this box. Listed\n"
         "here rather than passed on the command line, so a box that must\n"

@@ -254,6 +254,10 @@ class Grants(Step):
         if not script.is_file():
             return Check(SKIPPED, "hosts/linux/grants.sh is not in this checkout")
         there, why = ctx.exists_state("/etc/sudoers.d/llmstack-fleet")
+        etc = self._etc_problems(ctx)
+        if there and etc:
+            return Check(DRIFT, "/etc/sudoers.d/llmstack-fleet present; "
+                                + "; ".join(etc), self._etc_plan(ctx))
         if there:
             return Check(OK, "/etc/sudoers.d/llmstack-fleet present")
         if there is None:
@@ -266,7 +270,78 @@ class Grants(Step):
                                   f"account ({why}); re-run with sudo")
         return Check(MISSING, "no fleet grant",
                      ["run hosts/linux/grants.sh (writes "
-                      "/etc/sudoers.d/llmstack-fleet)"])
+                      "/etc/sudoers.d/llmstack-fleet)",
+                      *(self._etc_plan(ctx) if etc else [])])
+
+    # The config directory. The gateway saves llama-swap.yaml by writing a
+    # temp file beside it and renaming it into place, so the service account
+    # needs write access to the DIRECTORY, not just the file; and it reads
+    # gateway.env (0640 root:<account>). The old bootstrap scripts
+    # (hosts/*/bootstrap/20-llama-swap.sh) set that up. fleetctl did not: the
+    # envfile step writes 0600 and leaves the regrade to "the grants step",
+    # which never did it. A fresh fleetctl install (gpu-laptop-6, 2026-11-02) came up
+    # with /etc/llmstack root-only, `verify` all green, and every model save
+    # on the dashboard failing with PermissionError on the temp file.
+    @staticmethod
+    def _account_ids(user: str) -> tuple[int, int] | None:
+        try:
+            import grp
+            import pwd
+            return pwd.getpwnam(user).pw_uid, grp.getgrnam(user).gr_gid
+        except (ImportError, KeyError):
+            return None
+
+    def _etc_problems(self, ctx) -> list[str]:
+        p = ctx.plan["paths"]
+        if ctx.family != "linux" or not p.get("etc") or p["etc"] == p["state"]:
+            return []
+        user = ctx.plan["service"]["user"]
+        ids = self._account_ids(user)
+        if ids is None:
+            return []          # no account yet: service-account says so
+        uid, gid = ids
+        try:
+            st = ctx.path(p["etc"]).stat()
+        except OSError:
+            return []          # absent: the directories step says so
+        out: list[str] = []
+        if st.st_gid != gid or (st.st_mode & 0o070) != 0o070:
+            out.append(f"{p['etc']} is not rwx for group {user} (the gateway "
+                       f"saves {p['swap_config']} by rename, so model saves fail)")
+        for f in (p.get("envfile"), p.get("swap_config")):
+            if not f:
+                continue
+            try:
+                fs = ctx.path(f).stat()
+            except OSError:
+                # Absent, or inside a directory this account cannot search --
+                # which is the healthy state for an unprivileged check.
+                continue
+            if fs.st_uid != uid and not (fs.st_gid == gid and fs.st_mode & 0o040):
+                out.append(f"{f} is not readable by {user}")
+        return out
+
+    def _etc_plan(self, ctx) -> list[str]:
+        p, user = ctx.plan["paths"], ctx.plan["service"]["user"]
+        return [f"chown root:{user} {p['etc']}; chmod 0770 {p['etc']}",
+                f"chown root:{user} {p['envfile']}; chmod 0640 {p['envfile']}",
+                f"chgrp {user} {p['swap_config']}; chmod g+r {p['swap_config']}"]
+
+    def _fix_etc(self, ctx) -> None:
+        p = ctx.plan["paths"]
+        if ctx.family != "linux" or not p.get("etc") or p["etc"] == p["state"]:
+            return
+        user = ctx.plan["service"]["user"]
+        etc = p["etc"]
+        ctx.sudo(["chown", f"root:{user}", etc])
+        ctx.sudo(["chmod", "0770", etc])
+        # check=False: either file may not exist yet on a partial run, and the
+        # directory is the part that decides whether saves work.
+        ctx.sudo(["chown", f"root:{user}", p["envfile"]], check=False)
+        ctx.sudo(["chmod", "0640", p["envfile"]], check=False)
+        ctx.sudo(["chgrp", user, p["swap_config"]], check=False)
+        ctx.sudo(["chmod", "g+r", p["swap_config"]], check=False)
+        ctx.did(f"{etc} is root:{user} 0770, gateway.env 0640")
 
     def apply(self, ctx) -> None:
         script = ctx.repo / "hosts" / "linux" / "grants.sh"
@@ -280,6 +355,7 @@ class Grants(Step):
             args.append(str(helper))
         ctx.sudo(args)
         ctx.did("fleet sudoers grant installed")
+        self._fix_etc(ctx)
 
 
 class Power(Step):

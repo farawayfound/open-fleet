@@ -66,11 +66,10 @@ def _set_meta(**by_host_fid: dict) -> None:
 
 class TestHostClass:
     def test_class_matrix(self, monkeypatch):
-        # gpu-laptop-1 carries an 8 GB card but is classed `small` on purpose
-        # since 2026-09-06: it is the Athena box, and as gpu-class it would
-        # be tier 0 for any model it holds in VRAM and jump server-1 and
-        # mac-desktop-1, the two boxes it is meant to sit behind.
-        assert gw.host_class("gpu-laptop-1") == "small"
+        # gpu-laptop-1 was `small` while it held Athena's persona (2026-09-06 to
+        # 2026-11-02); since the persona moved to gpu-laptop-6 it is a general
+        # gpu-class node again.
+        assert gw.host_class("gpu-laptop-1") == "gpu"
         assert gw.host_class("mac-laptop-1") == "gpu"
         assert gw.host_class("apu-box-1") == "big"
         assert gw.host_class("server-1") == "small"
@@ -102,23 +101,21 @@ class TestHostTierOwnerRules:
         # A model that fits a gpu-class box's card outright beats the big box
         # even when apu-box-1 already holds it resident -- residency is a
         # tiebreak inside a tier, not a way to jump one. mac-laptop-1 is the
-        # example since 2026-09-06; gpu-laptop-1, which used to be, is classed
-        # `small` now (see the next test).
+        # example.
         _set_meta(**{"mac-laptop-1|m": {"fit": "vram"}, "apu-box-1|m": {"fit": "spill"}})
         assert gw.host_tier("mac-laptop-1", "m", "primary") < gw.host_tier("apu-box-1", "m", "primary")
 
-    def test_zephyrus_is_the_last_always_on_box_even_when_the_model_fits(self):
-        # The Athena box (2026-09-06): for anything that is not Athena it
-        # answers only after server-1 and mac-desktop-1. A model fitting its 8 GB
-        # card no longer earns it tier 0 -- it shares the small tier with
-        # them, and its rank (always_on 4) sorts it behind both. apu-box-1 stays
-        # ahead of the whole small tier for a primary request.
+    def test_zephyrus_vram_beats_ai_max(self):
+        # gpu-laptop-1 was classed `small` while it held Athena's persona
+        # (2026-09-06 to 2026-11-02) so it answered only after server-1 and
+        # mac-desktop-1. The persona moved to gpu-laptop-6; gpu-laptop-1 is a general gpu-class
+        # node again, with the same rules as gpu-laptop-2.
         _set_meta(**{"gpu-laptop-1|m": {"fit": "vram"}, "apu-box-1|m": {"fit": "spill"}})
-        z = gw.host_tier("gpu-laptop-1", "m", "primary")
-        assert z > gw.host_tier("apu-box-1", "m", "primary")
-        assert z > gw.host_tier("server-1", "m", "primary")
-        assert z > gw.host_tier("mac-desktop-1", "m", "primary")
-        assert z < gw.host_tier("cpu-box-1", "m", "primary")
+        assert gw.host_tier("gpu-laptop-1", "m", "primary") < gw.host_tier("apu-box-1", "m", "primary")
+
+    def test_zephyrus_spill_behind_ai_max(self):
+        _set_meta(**{"gpu-laptop-1|m": {"fit": "spill"}, "apu-box-1|m": {"fit": ""}})
+        assert gw.host_tier("gpu-laptop-1", "m", "primary") > gw.host_tier("apu-box-1", "m", "primary")
 
     def test_pipedream_vram_beats_ai_max(self):
         _set_meta(**{"gpu-desktop-2|m": {"fit": "vram"}, "apu-box-1|m": {"fit": ""}})
@@ -187,10 +184,10 @@ class TestHostTierOwnerRules:
         by any machine except apu-box-1"), so it sits behind apu-box-1 even here:
         a CPU-only DDR4 box preempting 96 GB of VRAM would be the one place
         this policy made a request slower on purpose."""
-        # gpu-laptop-1 moved from the front of this order to behind mac-desktop-1 on
-        # 2026-09-06 (the Athena box; see test_zephyrus_is_the_last_always_on_box).
-        order = ["server-1", "mac-desktop-1", "gpu-laptop-1", "mini-pc-1"]
-        _set_meta(**{"gpu-laptop-1|m": {"fit": "vram"}})
+        # gpu-laptop-1 sat in this order (behind mac-desktop-1) while it was the Athena
+        # box and classed `small`; since 2026-11-02 it is gpu-class and ranked
+        # by the gpu rules instead (test_zephyrus_vram_beats_ai_max).
+        order = ["server-1", "mac-desktop-1", "mini-pc-1"]
         tiers = [gw.host_tier(h, "m", "worker") for h in order]
         assert tiers == sorted(tiers)
         ai_max = gw.host_tier("apu-box-1", "m", "worker")
@@ -286,7 +283,7 @@ class TestSaturationAndCooldown:
         # slots; apu-box-1 is the lower-tier box (big, tier 1) but only 1 job
         # waiting past its 1 slot. Queue depth is compared before tier/rank,
         # so the LESS busy, lower-tier box goes first. (mac-laptop-1 plays the
-        # gpu-class part since 2026-09-06; gpu-laptop-1 is `small` now.)
+        # gpu-class part.)
         gw._routes_cache["cap"] = {("mac-laptop-1", "m"): 2, ("apu-box-1", "m"): 1}
         gw._routes_cache["running"] = {}
         gw._routes_cache["meta"] = {
